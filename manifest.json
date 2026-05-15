@@ -6,8 +6,8 @@
   "scope": "/4s-orders/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#C00000",
-  "theme_color": "#C00000",
+  "background_color": "#F04040",
+  "theme_color": "#F04040",
   "lang": "en-IN",
   "categories": ["business", "productivity"],
   "icons": [

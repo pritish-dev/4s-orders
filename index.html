@@ -8,7 +8,7 @@
 <link rel="manifest" href="manifest.json"/>
 
 <!-- Theme / status bar -->
-<meta name="theme-color" content="#C00000"/>
+<meta name="theme-color" content="#F04040"/>
 <meta name="mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
@@ -57,9 +57,9 @@ button{font-family:'Inter',system-ui,sans-serif;cursor:pointer}
 /* PWA install banner (shown by JS when installable) */
 #install-banner{
   display:none;position:fixed;bottom:90px;left:50%;transform:translateX(-50%);
-  background:#C00000;color:#fff;border-radius:10px;
+  background:#F04040;color:#fff;border-radius:10px;
   padding:10px 16px;font-size:13px;font-weight:600;
-  box-shadow:0 6px 24px rgba(192,0,0,.45);z-index:9990;
+  box-shadow:0 6px 24px rgba(240,64,64,.45);z-index:9990;
   white-space:nowrap;cursor:pointer;gap:10px;align-items:center;
 }
 #install-banner.visible{display:flex}
@@ -68,7 +68,7 @@ button{font-family:'Inter',system-ui,sans-serif;cursor:pointer}
 <body>
 <!-- Splash while Babel compiles -->
 <div id="root"><div class="app-shell" id="app-loading" style="align-items:center;justify-content:center;gap:12px;padding-top:env(safe-area-inset-top)">
-  <div style="width:48px;height:48px;border-radius:10px;background:#C00000;display:flex;align-items:center;justify-content:center;font-family:monospace;font-weight:700;font-size:18px;color:#fff">4S</div>
+  <div style="width:48px;height:48px;border-radius:10px;background:#F04040;display:flex;align-items:center;justify-content:center;font-family:monospace;font-weight:700;font-size:18px;color:#fff">4S</div>
   <div style="font-size:13px;color:#6b7672">Loading…</div>
 </div></div>
 
@@ -85,7 +85,7 @@ button{font-family:'Inter',system-ui,sans-serif;cursor:pointer}
 const T = {
   paper:'#f4f2ee', paper2:'#ebe8e2', ink:'#0a0f0d', ink2:'#1f2624', ink3:'#404b47', ink4:'#6b7672',
   line:'#d9d5cc', line2:'#c7c2b7', card:'#ffffff',
-  green:'#C00000', greenDeep:'#800000', greenSoft:'#fff0f0', greenLine:'#f4bbbb',
+  green:'#F04040', greenDeep:'#c0302f', greenSoft:'#fff0f0', greenLine:'#f4bbbb',
   ok:'#1f7a4d', okSoft:'#deefe3',
   warn:'#a6610b', warnSoft:'#f7e9cf',
   bad:'#9b2917', badSoft:'#f2d9d2',
@@ -264,191 +264,343 @@ function StockRibbon({syncedAt}) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// PDF GENERATOR
+// PDF GENERATOR  — matches physical Order Confirmation Form
 // ═══════════════════════════════════════════════════════════
 function generatePDF(order) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit:'mm', format:'a4' });
   const pw  = 210;
-  const m   = 14;
+  const ph  = 297;
+  const m   = 10;   // side margin
+  const cw  = pw - m*2;  // content width = 190mm
 
   const subtotal = order.items.reduce((s,i)=>s+i.total,0);
   const cgst     = Math.round(subtotal*0.09);
   const sgst     = Math.round(subtotal*0.09);
   const total    = subtotal+cgst+sgst;
-  const balance  = total-(order.earnest||0);
+  const balance  = total-(Number(order.earnest)||0);
   const serialNo = order.internalNo ? String(order.internalNo) : (order.no||'—');
+  const R=240,G=64,B=64;  // #F04040 coral red
 
-  // ── Header (red background) ──────────────────────────────
-  doc.setFillColor(192,0,0);
-  doc.rect(0,0,pw,38,'F');
+  // ── Header band ──────────────────────────────────────────
+  doc.setFillColor(R,G,B);
+  doc.rect(0,0,pw,22,'F');
+
+  // "interio" brand text (left side of header)
   doc.setTextColor(255,255,255);
-
-  // Left — 4S Interiors brand
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(15);
-  doc.text('4S INTERIORS', m, 11);
+  doc.setFont('times','bolditalic');
+  doc.setFontSize(22);
+  doc.text('interio', m+1, 14);
   doc.setFont('helvetica','normal');
-  doc.setFontSize(7);
-  doc.text('Patia Square, Chandrasekharpur, Bhubaneswar - 751024', m, 17);
-  doc.text('Ph: 0674-2744906  |  GSTIN: 21ADAPS1043C1ZE', m, 22);
-  doc.setFont('helvetica','italic');
-  doc.setFontSize(7);
-  doc.text('Authorised Dealer of Godrej Interio', m, 27);
-
-  // Right — "interio by GODREJ" logo text + serial number
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(17);
-  doc.text('interio', pw-m, 12, {align:'right'});
-  doc.setFont('helvetica','normal');
-  doc.setFontSize(8.5);
-  doc.text('by GODREJ', pw-m, 19, {align:'right'});
-  doc.setDrawColor(255,255,255);
-  doc.setLineWidth(0.2);
-  doc.line(pw-m-48, 21, pw-m, 21);
-  doc.setFont('helvetica','normal');
-  doc.setFontSize(7);
-  doc.setTextColor(255,220,220);
-  doc.text('ORDER CONFIRMATION', pw-m, 27, {align:'right'});
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(10);
-  doc.setTextColor(255,255,255);
-  doc.text('SL #'+serialNo, pw-m, 34, {align:'right'});
-
-  // ── Bill To / Deliver To ─────────────────────────────────
-  let y = 44;
-  doc.setTextColor(192,0,0);
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(7);
-  doc.text('BILL TO', m, y);
-  doc.text('DELIVER TO', pw/2+2, y);
-  y += 4;
-  doc.setTextColor(30,38,36);
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(10);
-  doc.text(order.customer||'', m, y);
-  doc.setFont('helvetica','normal');
-  doc.setFontSize(8.5);
-  const bLines = doc.splitTextToSize(order.billing||order.delivery||'—', 80);
-  doc.text(bLines, m, y+5);
-  doc.text(order.phone||'', m, y+5+bLines.length*4);
-  doc.text(order.delivery||order.billing||'—', pw/2+2, y+5);
-
-  // ── Meta strip ───────────────────────────────────────────
-  y = 75;
-  doc.setFillColor(244,242,238);
-  doc.roundedRect(m, y, pw-m*2, 12, 2, 2, 'F');
-  doc.setFontSize(7.5);
-  const metas = [
-    ['DATE',    order.date||new Date().toLocaleDateString('en-IN')],
-    ['EXEC',    order.salesExec||'—'],
-    ['WON #',   order.won||'Pending'],
-    ['PAYMENT', order.paymentMode||'—'],
-    ['ADVANCE', '₹'+(order.earnest||0).toLocaleString('en-IN')],
-  ];
-  const mw = (pw-m*2)/metas.length;
-  metas.forEach(([k,v],i) => {
-    const x = m + i*mw + mw/2;
-    doc.setFont('helvetica','normal');
-    doc.setTextColor(107,118,114);
-    doc.text(k, x, y+5, {align:'center'});
-    doc.setFont('helvetica','bold');
-    doc.setTextColor(30,38,36);
-    doc.text(String(v), x, y+10, {align:'center'});
-  });
-
-  // ── Items table ──────────────────────────────────────────
-  y = 92;
-  doc.setFillColor(30,38,36);
-  doc.rect(m, y, pw-m*2, 7, 'F');
-  doc.setTextColor(255,255,255);
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(7);
-  doc.text('#',       m+3,     y+5);
-  doc.text('ITEM',    m+10,    y+5);
-  doc.text('MRP/U',   pw-m-68, y+5, {align:'right'});
-  doc.text('QTY',     pw-m-46, y+5, {align:'right'});
-  doc.text('DISC',    pw-m-26, y+5, {align:'right'});
-  doc.text('AMOUNT',  pw-m,    y+5, {align:'right'});
-  y += 7;
-
-  order.items.forEach((it,i) => {
-    const h      = 15;
-    const mrpVal = it.mrp || it.cpl || 0;
-    if (i%2===1) { doc.setFillColor(248,247,244); doc.rect(m, y, pw-m*2, h, 'F'); }
-    doc.setTextColor(107,118,114);
-    doc.setFont('helvetica','normal');
-    doc.setFontSize(7);
-    doc.text(String(i+1), m+3, y+6);
-    doc.text(it.code||'', m+10, y+5.5);
-    doc.setTextColor(30,38,36);
-    doc.setFont('helvetica','bold');
-    doc.setFontSize(8);
-    const nm = doc.splitTextToSize(it.name, 88);
-    doc.text(nm[0], m+10, y+10.5);
-    doc.setFont('helvetica','normal');
-    doc.setFontSize(8);
-    doc.setTextColor(107,118,114);
-    doc.text(mrpVal>0?'₹'+mrpVal.toLocaleString('en-IN'):'—', pw-m-68, y+9, {align:'right'});
-    doc.setTextColor(30,38,36);
-    doc.text(String(it.qty), pw-m-46, y+9, {align:'right'});
-    doc.text(it.disc||'—',   pw-m-26, y+9, {align:'right'});
-    doc.setFont('helvetica','bold');
-    doc.text('₹'+it.total.toLocaleString('en-IN'), pw-m, y+9, {align:'right'});
-    doc.setDrawColor(217,213,204);
-    doc.line(m, y+h, pw-m, y+h);
-    y += h;
-  });
-
-  // ── Totals ───────────────────────────────────────────────
-  y += 4;
-  const totW = 70;
-  const totX = pw-m-totW;
-  const tRow = (k,v,bold=false) => {
-    doc.setFont('helvetica', bold?'bold':'normal');
-    doc.setFontSize(bold?10:8.5);
-    doc.setTextColor(bold?'#0a0f0d':'#404b47');
-    doc.text(k, totX, y);
-    doc.text(v, pw-m, y, {align:'right'});
-    y += bold?6:5;
-  };
-  tRow('Subtotal', '₹'+subtotal.toLocaleString('en-IN'));
-  tRow('CGST 9%',  '₹'+cgst.toLocaleString('en-IN'));
-  tRow('SGST 9%',  '₹'+sgst.toLocaleString('en-IN'));
-  doc.setDrawColor(30,38,36);
-  doc.line(totX, y, pw-m, y);
-  y += 3;
-  tRow('TOTAL', '₹'+total.toLocaleString('en-IN'), true);
-  tRow('Earnest Paid', '₹'+(order.earnest||0).toLocaleString('en-IN'));
-  y += 1;
-  tRow('Balance Due', '₹'+balance.toLocaleString('en-IN'), true);
-
-  // ── Footer ───────────────────────────────────────────────
-  y = Math.max(y+10, 260);
-  doc.setFillColor(255,240,240);
-  doc.rect(0, y, pw, 37, 'F');
-  doc.setDrawColor(244,187,187);
-  doc.line(0, y, pw, y);
-  doc.setTextColor(192,0,0);
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(7.5);
-  doc.text('CUSTOMER COPY', m, y+8);
-  doc.setFont('helvetica','normal');
-  doc.setTextColor(64,75,71);
-  doc.setFontSize(7);
-  doc.text('Scan QR for your digital order copy. Valid 30 days.', m, y+14);
-  doc.text('4SI.IN/O/'+(order.no||'').replace('/','‑'), m, y+19);
-  doc.setFont('helvetica','bold');
   doc.setFontSize(8);
-  doc.setTextColor(192,0,0);
-  doc.text('interio by GODREJ', pw-m, y+10, {align:'right'});
+  doc.text('by Godrej', m+1, 19.5);
+
+  // Thin white separator line
+  doc.setDrawColor(255,255,255);
+  doc.setLineWidth(0.3);
+  doc.line(m+37, 8, m+37, 20);
+
+  // 4S Interiors dealer info (right of separator)
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(10);
+  doc.text('4S INTERIORS', m+41, 12);
+  doc.setFont('helvetica','normal');
+  doc.setFontSize(7);
+  doc.text('Patia Square, Chandrasekharpur, Bhubaneswar - 751024', m+41, 16.5);
+  doc.text('Ph: 0674-2744906  |  GSTIN: 21ADAPS1043C1ZE', m+41, 20.5);
+
+  // Serial number top-right
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(9);
+  doc.text('SL #'+serialNo, pw-m, 12, {align:'right'});
+  doc.setFont('helvetica','normal');
+  doc.setFontSize(7);
+  doc.text('ORDER CONFIRMATION FORM', pw-m, 18, {align:'right'});
+
+  // ── Title strip ──────────────────────────────────────────
+  let y = 22;
+  doc.setFillColor(245,245,245);
+  doc.rect(0,y,pw,8,'F');
+  doc.setDrawColor(220,220,220);
+  doc.line(0,y,pw,y);
+  doc.line(0,y+8,pw,y+8);
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(9);
+  doc.setTextColor(R,G,B);
+  doc.text('ORDER CONFIRMATION', pw/2, y+5.5, {align:'center'});
+  y += 8;
+
+  // ── WON / Order meta row ─────────────────────────────────
+  doc.setDrawColor(200,200,200);
+  doc.setLineWidth(0.3);
+  const wonY = y;
+  const col1 = m;
+  const col2 = m + cw*0.35;
+  const col3 = m + cw*0.60;
+  const col4 = m + cw*0.80;
+  doc.rect(m, wonY, cw, 10, 'S');
+  doc.line(col2, wonY, col2, wonY+10);
+  doc.line(col3, wonY, col3, wonY+10);
+  doc.line(col4, wonY, col4, wonY+10);
+
+  const metaItems = [
+    ['DATE', order.date||new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'2-digit',year:'2-digit'})],
+    ['WON #', order.won||'Pending'],
+    ['ORDER #', order.no||'—'],
+    ['EXEC', order.salesExec||'—'],
+  ];
+  const metaColX = [col1+1.5, col2+1.5, col3+1.5, col4+1.5];
+  metaItems.forEach(([k,v],i) => {
+    doc.setFont('helvetica','normal');
+    doc.setFontSize(6);
+    doc.setTextColor(120,120,120);
+    doc.text(k, metaColX[i], wonY+3.5);
+    doc.setFont('helvetica','bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(30,30,30);
+    doc.text(String(v), metaColX[i], wonY+8);
+  });
+  y = wonY + 10;
+
+  // ── Customer / Address section ───────────────────────────
+  const addrH = 26;
+  doc.rect(m, y, cw, addrH, 'S');
+  doc.line(m+cw/2, y, m+cw/2, y+addrH);
+
+  // Bill-to
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(7);
+  doc.setTextColor(R,G,B);
+  doc.text('BILL TO', m+2, y+4);
+  doc.setTextColor(30,30,30);
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(9);
+  doc.text(order.customer||'', m+2, y+9);
+  doc.setFont('helvetica','normal');
+  doc.setFontSize(7.5);
+  const billLines = doc.splitTextToSize(order.billing||'—', cw/2-6);
+  doc.text(billLines.slice(0,2), m+2, y+14);
+  doc.setFont('helvetica','normal');
+  doc.setFontSize(7.5);
+  doc.text('Ph: '+(order.phone||'—')+(order.alt?' / '+order.alt:''), m+2, y+22);
+
+  // Deliver-to
+  const dx = m+cw/2+2;
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(7);
+  doc.setTextColor(R,G,B);
+  doc.text('DELIVER TO', dx, y+4);
+  doc.setFont('helvetica','normal');
+  doc.setFontSize(7.5);
+  doc.setTextColor(30,30,30);
+  const delvLines = doc.splitTextToSize(order.delivery||order.billing||'—', cw/2-4);
+  doc.text(delvLines.slice(0,3), dx, y+9);
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(7);
+  doc.setTextColor(R,G,B);
+  doc.text('PLANNED DELIVERY', dx, y+20);
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(7.5);
+  doc.setTextColor(30,30,30);
+  doc.text(order.plannedDly||'—', dx, y+24.5);
+  y += addrH;
+
+  // ── Instructions / Discount / Payment strip ───────────────
+  const instrH = 10;
+  doc.rect(m, y, cw, instrH, 'S');
+  doc.line(m+cw*0.5, y, m+cw*0.5, y+instrH);
+  doc.line(m+cw*0.75, y, m+cw*0.75, y+instrH);
   doc.setFont('helvetica','normal');
   doc.setFontSize(6.5);
-  doc.setTextColor(107,118,114);
-  doc.text('4S INTERIORS · PATIA, BHUBANESWAR · GST 21ADAPS1043C1ZE · Authorised Dealer of Godrej & Boyce Mfg. Co. Ltd.', pw/2, y+33, {align:'center'});
+  doc.setTextColor(120,120,120);
+  doc.text('INSTRUCTIONS', m+2, y+3.5);
+  doc.text('DISCOUNT', m+cw*0.5+2, y+3.5);
+  doc.text('PAYMENT MODE', m+cw*0.75+2, y+3.5);
+  doc.setFont('helvetica','normal');
+  doc.setFontSize(7.5);
+  doc.setTextColor(30,30,30);
+  doc.text(doc.splitTextToSize(order.installNote||'—', cw*0.48)[0], m+2, y+8);
+  doc.text(order.discountCode||'—', m+cw*0.5+2, y+8);
+  doc.text(order.paymentMode||'—', m+cw*0.75+2, y+8);
+  y += instrH;
+
+  // ── Items table ──────────────────────────────────────────
+  // Columns: Sl | Br | Item Code | Qty | Product Description | MRP | CPL/Unit Price | Disc% | Total
+  const cols = {
+    sl:   {x:m,      w:7},
+    br:   {x:m+7,    w:9},
+    code: {x:m+16,   w:20},
+    qty:  {x:m+36,   w:9},
+    desc: {x:m+45,   w:75},
+    mrp:  {x:m+120,  w:20},
+    up:   {x:m+140,  w:20},
+    disc: {x:m+160,  w:13},
+    tot:  {x:m+173,  w:cw-(173)},
+  };
+
+  // Header row
+  const thH = 8;
+  doc.setFillColor(R,G,B);
+  doc.rect(m, y, cw, thH, 'F');
+  doc.setTextColor(255,255,255);
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(6.5);
+  const headers = [
+    [cols.sl,   'Sl.'],
+    [cols.br,   'Br.'],
+    [cols.code, 'Item Code'],
+    [cols.qty,  'Qty'],
+    [cols.desc, 'Product Description'],
+    [cols.mrp,  'MRP (₹)'],
+    [cols.up,   'Unit Price'],
+    [cols.disc, 'Disc%'],
+    [cols.tot,  'Total (₹)'],
+  ];
+  headers.forEach(([c,lbl]) => doc.text(lbl, c.x+1, y+5.5));
+  y += thH;
+
+  // Item rows
+  const rowH = 12;
+  order.items.forEach((it, i) => {
+    if (i%2===0) { doc.setFillColor(255,255,255); } else { doc.setFillColor(252,248,248); }
+    doc.rect(m, y, cw, rowH, 'F');
+    doc.setDrawColor(220,210,210);
+    doc.line(m, y+rowH, m+cw, y+rowH);
+
+    doc.setTextColor(100,100,100);
+    doc.setFont('helvetica','normal');
+    doc.setFontSize(7);
+    doc.text(String(i+1), cols.sl.x+1, y+5);
+    doc.text(it.branch||'KB', cols.br.x+1, y+5);
+    doc.setFont('helvetica','bold');
+    doc.setFontSize(7);
+    doc.text(it.code||'', cols.code.x+1, y+5);
+    doc.setFont('helvetica','normal');
+    doc.setFontSize(7);
+    doc.text(String(it.qty), cols.qty.x+cols.qty.w/2, y+7.5, {align:'center'});
+
+    // Description (bold name + code hint)
+    doc.setFont('helvetica','bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(30,30,30);
+    const nameLines = doc.splitTextToSize(it.name, cols.desc.w-3);
+    doc.text(nameLines[0], cols.desc.x+1, y+5.5);
+    if (nameLines[1]) { doc.setFontSize(6.5); doc.setFont('helvetica','normal'); doc.setTextColor(100,100,100); doc.text(nameLines[1], cols.desc.x+1, y+9.5); }
+
+    doc.setFont('helvetica','normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(30,30,30);
+    const mrpVal = it.mrp||it.cpl||0;
+    doc.text(mrpVal>0?mrpVal.toLocaleString('en-IN'):'—', cols.mrp.x+cols.mrp.w-1, y+7.5, {align:'right'});
+    doc.text((it.unitPrice||it.cpl||0).toLocaleString('en-IN'), cols.up.x+cols.up.w-1, y+7.5, {align:'right'});
+    doc.text(it.disc||'—', cols.disc.x+cols.disc.w/2, y+7.5, {align:'center'});
+    doc.setFont('helvetica','bold');
+    doc.text(it.total.toLocaleString('en-IN'), cols.tot.x+cols.tot.w-1, y+7.5, {align:'right'});
+    y += rowH;
+  });
+
+  // Outer border for table
+  doc.setDrawColor(200,180,180);
+  doc.rect(m, y-rowH*order.items.length-thH, cw, rowH*order.items.length+thH, 'S');
+
+  // ── Totals section ────────────────────────────────────────
+  y += 3;
+  const totLX = m + cw*0.55;
+  const totW  = cw*0.45;
+  const totR  = m + cw;
+
+  const tRow = (k, v, bold=false, clr=[30,30,30]) => {
+    doc.setFont('helvetica', bold?'bold':'normal');
+    doc.setFontSize(bold?9:8);
+    doc.setTextColor(...clr);
+    doc.text(k, totLX+2, y);
+    doc.text(v, totR-1, y, {align:'right'});
+    y += bold ? 6 : 5;
+  };
+
+  doc.setDrawColor(200,180,180);
+  doc.rect(totLX, y-2, totW, 38, 'S');
+  doc.setFillColor(250,245,245);
+  doc.rect(totLX, y-2, totW, 8, 'F');
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(7.5);
+  doc.setTextColor(R,G,B);
+  doc.text('INVOICE SUMMARY', totLX+2, y+3.5);
+  y += 8;
+
+  tRow('Sub Total (excl. GST)', '₹'+subtotal.toLocaleString('en-IN'));
+  tRow('CGST @ 9%', '₹'+cgst.toLocaleString('en-IN'));
+  tRow('SGST @ 9%', '₹'+sgst.toLocaleString('en-IN'));
+  doc.setDrawColor(R,G,B);
+  doc.setLineWidth(0.4);
+  doc.line(totLX, y, totR, y);
+  y += 3;
+  tRow('TOTAL AMOUNT', '₹'+total.toLocaleString('en-IN'), true, [R,G,B]);
+  doc.setLineWidth(0.3);
+  doc.setDrawColor(200,180,180);
+  doc.line(totLX, y, totR, y);
+  y += 2;
+  tRow('Earnest / Advance Paid', '₹'+(Number(order.earnest)||0).toLocaleString('en-IN'));
+  if (order.receiptNo) { doc.setFont('helvetica','italic'); doc.setFontSize(6.5); doc.setTextColor(120,120,120); doc.text('Rcpt: '+order.receiptNo, totLX+2, y-1); }
+  doc.setDrawColor(30,30,30);
+  doc.line(totLX, y, totR, y);
+  y += 2;
+  tRow('BALANCE DUE', '₹'+balance.toLocaleString('en-IN'), true, [30,30,30]);
+
+  // ── Note / Terms row ──────────────────────────────────────
+  const noteY = y + 4;
+  doc.setLineWidth(0.3);
+  doc.setDrawColor(200,200,200);
+  doc.rect(m, noteY, cw, 12, 'S');
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(6.5);
+  doc.setTextColor(R,G,B);
+  doc.text('NOTE:', m+2, noteY+4);
+  doc.setFont('helvetica','normal');
+  doc.setFontSize(6.5);
+  doc.setTextColor(80,80,80);
+  doc.text('1. Prices are inclusive of taxes as applicable.   2. Goods once sold will not be taken back.   3. Delivery subject to stock availability.   4. Balance to be cleared before delivery.', m+12, noteY+4);
+  doc.text('5. This is a computer-generated document and does not require a physical signature unless otherwise specified.', m+2, noteY+9);
+  y = noteY + 12;
+
+  // ── Signature row ─────────────────────────────────────────
+  const sigH = 18;
+  doc.rect(m, y, cw, sigH, 'S');
+  doc.line(m+cw/3, y, m+cw/3, y+sigH);
+  doc.line(m+cw*2/3, y, m+cw*2/3, y+sigH);
+  [
+    [m+2,          'Customer Signature'],
+    [m+cw/3+2,     'Sales Executive'],
+    [m+cw*2/3+2,   'Store Manager / Auth. Signatory'],
+  ].forEach(([sx,lbl]) => {
+    doc.setFont('helvetica','normal');
+    doc.setFontSize(6.5);
+    doc.setTextColor(120,120,120);
+    doc.text(lbl, sx, y+sigH-2);
+  });
+  y += sigH;
+
+  // ── Footer ────────────────────────────────────────────────
+  doc.setFillColor(R,G,B);
+  doc.rect(0, y, pw, 14, 'F');
+  doc.setTextColor(255,255,255);
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(7);
+  doc.text('4S INTERIORS', m, y+5);
+  doc.setFont('helvetica','normal');
+  doc.setFontSize(6.5);
+  doc.text('Patia Square, Chandrasekharpur, Bhubaneswar - 751024  |  Ph: 0674-2744906  |  GSTIN: 21ADAPS1043C1ZE', m, y+10);
+  doc.setFont('times','italic');
+  doc.setFontSize(8);
+  doc.text('interio by Godrej', pw-m, y+7, {align:'right'});
+  doc.setFont('helvetica','normal');
+  doc.setFontSize(6);
+  doc.setTextColor(255,220,220);
+  doc.text('Authorised Dealer of Godrej & Boyce Mfg. Co. Ltd.', pw-m, y+11.5, {align:'right'});
 
   return doc;
 }
+
 
 // ═══════════════════════════════════════════════════════════
 // APP STATE
@@ -508,14 +660,22 @@ function App() {
   }, [user]);
 
   async function syncStock() {
+    setLoading(true);
     try {
       const res = await apiGet('stock');
       if (res.ok) {
         setItems(res.items);
-        setSyncedAt(res.syncedAt);
+        setSyncedAt(res.syncedAt || new Date().toISOString());
         localStorage.setItem('4s_items', JSON.stringify(res.items));
+        showToast(res.items.length + ' items synced ✓');
+      } else {
+        showToast(res.error || 'Sync failed — check sheet data', 'bad');
       }
-    } catch {}
+    } catch(e) {
+      showToast('Sync failed: ' + e.message, 'bad');
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function loadOrders() {
