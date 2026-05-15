@@ -8,7 +8,7 @@
 <link rel="manifest" href="manifest.json"/>
 
 <!-- Theme / status bar -->
-<meta name="theme-color" content="#0f4c3a"/>
+<meta name="theme-color" content="#C00000"/>
 <meta name="mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
@@ -57,9 +57,9 @@ button{font-family:'Inter',system-ui,sans-serif;cursor:pointer}
 /* PWA install banner (shown by JS when installable) */
 #install-banner{
   display:none;position:fixed;bottom:90px;left:50%;transform:translateX(-50%);
-  background:#0f4c3a;color:#fff;border-radius:10px;
+  background:#C00000;color:#fff;border-radius:10px;
   padding:10px 16px;font-size:13px;font-weight:600;
-  box-shadow:0 6px 24px rgba(15,76,58,.45);z-index:9990;
+  box-shadow:0 6px 24px rgba(192,0,0,.45);z-index:9990;
   white-space:nowrap;cursor:pointer;gap:10px;align-items:center;
 }
 #install-banner.visible{display:flex}
@@ -68,7 +68,7 @@ button{font-family:'Inter',system-ui,sans-serif;cursor:pointer}
 <body>
 <!-- Splash while Babel compiles -->
 <div id="root"><div class="app-shell" id="app-loading" style="align-items:center;justify-content:center;gap:12px;padding-top:env(safe-area-inset-top)">
-  <div style="width:48px;height:48px;border-radius:10px;background:#0f4c3a;display:flex;align-items:center;justify-content:center;font-family:monospace;font-weight:700;font-size:18px;color:#fff">4S</div>
+  <div style="width:48px;height:48px;border-radius:10px;background:#C00000;display:flex;align-items:center;justify-content:center;font-family:monospace;font-weight:700;font-size:18px;color:#fff">4S</div>
   <div style="font-size:13px;color:#6b7672">Loading…</div>
 </div></div>
 
@@ -85,7 +85,7 @@ button{font-family:'Inter',system-ui,sans-serif;cursor:pointer}
 const T = {
   paper:'#f4f2ee', paper2:'#ebe8e2', ink:'#0a0f0d', ink2:'#1f2624', ink3:'#404b47', ink4:'#6b7672',
   line:'#d9d5cc', line2:'#c7c2b7', card:'#ffffff',
-  green:'#0f4c3a', greenDeep:'#082b20', greenSoft:'#e5ede9', greenLine:'#b6cfc4',
+  green:'#C00000', greenDeep:'#800000', greenSoft:'#fff0f0', greenLine:'#f4bbbb',
   ok:'#1f7a4d', okSoft:'#deefe3',
   warn:'#a6610b', warnSoft:'#f7e9cf',
   bad:'#9b2917', badSoft:'#f2d9d2',
@@ -277,25 +277,47 @@ function generatePDF(order) {
   const sgst     = Math.round(subtotal*0.09);
   const total    = subtotal+cgst+sgst;
   const balance  = total-(order.earnest||0);
+  const serialNo = order.internalNo ? String(order.internalNo) : (order.no||'—');
 
-  doc.setFillColor(15,76,58);
-  doc.rect(0,0,pw,28,'F');
+  // ── Header (red background) ──────────────────────────────
+  doc.setFillColor(192,0,0);
+  doc.rect(0,0,pw,38,'F');
   doc.setTextColor(255,255,255);
+
+  // Left — 4S Interiors brand
   doc.setFont('helvetica','bold');
-  doc.setFontSize(14);
+  doc.setFontSize(15);
   doc.text('4S INTERIORS', m, 11);
   doc.setFont('helvetica','normal');
-  doc.setFontSize(7.5);
+  doc.setFontSize(7);
   doc.text('Patia Square, Chandrasekharpur, Bhubaneswar - 751024', m, 17);
   doc.text('Ph: 0674-2744906  |  GSTIN: 21ADAPS1043C1ZE', m, 22);
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(9);
-  doc.text('ORDER CONFIRMATION', pw-m, 11, {align:'right'});
-  doc.setFontSize(14);
-  doc.text(order.no || '—', pw-m, 19, {align:'right'});
+  doc.setFont('helvetica','italic');
+  doc.setFontSize(7);
+  doc.text('Authorised Dealer of Godrej Interio', m, 27);
 
-  let y = 34;
-  doc.setTextColor(15,76,58);
+  // Right — "interio by GODREJ" logo text + serial number
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(17);
+  doc.text('interio', pw-m, 12, {align:'right'});
+  doc.setFont('helvetica','normal');
+  doc.setFontSize(8.5);
+  doc.text('by GODREJ', pw-m, 19, {align:'right'});
+  doc.setDrawColor(255,255,255);
+  doc.setLineWidth(0.2);
+  doc.line(pw-m-48, 21, pw-m, 21);
+  doc.setFont('helvetica','normal');
+  doc.setFontSize(7);
+  doc.setTextColor(255,220,220);
+  doc.text('ORDER CONFIRMATION', pw-m, 27, {align:'right'});
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(10);
+  doc.setTextColor(255,255,255);
+  doc.text('SL #'+serialNo, pw-m, 34, {align:'right'});
+
+  // ── Bill To / Deliver To ─────────────────────────────────
+  let y = 44;
+  doc.setTextColor(192,0,0);
   doc.setFont('helvetica','bold');
   doc.setFontSize(7);
   doc.text('BILL TO', m, y);
@@ -312,7 +334,8 @@ function generatePDF(order) {
   doc.text(order.phone||'', m, y+5+bLines.length*4);
   doc.text(order.delivery||order.billing||'—', pw/2+2, y+5);
 
-  y = 65;
+  // ── Meta strip ───────────────────────────────────────────
+  y = 75;
   doc.setFillColor(244,242,238);
   doc.roundedRect(m, y, pw-m*2, 12, 2, 2, 'F');
   doc.setFontSize(7.5);
@@ -334,57 +357,64 @@ function generatePDF(order) {
     doc.text(String(v), x, y+10, {align:'center'});
   });
 
-  y = 82;
+  // ── Items table ──────────────────────────────────────────
+  y = 92;
   doc.setFillColor(30,38,36);
   doc.rect(m, y, pw-m*2, 7, 'F');
   doc.setTextColor(255,255,255);
   doc.setFont('helvetica','bold');
   doc.setFontSize(7);
-  doc.text('#', m+3, y+5);
-  doc.text('ITEM', m+10, y+5);
-  doc.text('QTY', pw-m-52, y+5, {align:'right'});
-  doc.text('DISC', pw-m-34, y+5, {align:'right'});
-  doc.text('AMOUNT', pw-m, y+5, {align:'right'});
+  doc.text('#',       m+3,     y+5);
+  doc.text('ITEM',    m+10,    y+5);
+  doc.text('MRP/U',   pw-m-68, y+5, {align:'right'});
+  doc.text('QTY',     pw-m-46, y+5, {align:'right'});
+  doc.text('DISC',    pw-m-26, y+5, {align:'right'});
+  doc.text('AMOUNT',  pw-m,    y+5, {align:'right'});
   y += 7;
 
   order.items.forEach((it,i) => {
-    const h = 14;
+    const h      = 15;
+    const mrpVal = it.mrp || it.cpl || 0;
     if (i%2===1) { doc.setFillColor(248,247,244); doc.rect(m, y, pw-m*2, h, 'F'); }
     doc.setTextColor(107,118,114);
     doc.setFont('helvetica','normal');
     doc.setFontSize(7);
-    doc.text(String(i+1), m+3, y+5.5);
-    doc.text(it.code||'', m+10, y+5);
+    doc.text(String(i+1), m+3, y+6);
+    doc.text(it.code||'', m+10, y+5.5);
     doc.setTextColor(30,38,36);
     doc.setFont('helvetica','bold');
     doc.setFontSize(8);
-    const nm = doc.splitTextToSize(it.name, 100);
-    doc.text(nm[0], m+10, y+10);
+    const nm = doc.splitTextToSize(it.name, 88);
+    doc.text(nm[0], m+10, y+10.5);
     doc.setFont('helvetica','normal');
-    doc.setFontSize(8.5);
-    doc.text(String(it.qty), pw-m-52, y+8.5, {align:'right'});
-    doc.text(it.disc||'—', pw-m-34, y+8.5, {align:'right'});
+    doc.setFontSize(8);
+    doc.setTextColor(107,118,114);
+    doc.text(mrpVal>0?'₹'+mrpVal.toLocaleString('en-IN'):'—', pw-m-68, y+9, {align:'right'});
+    doc.setTextColor(30,38,36);
+    doc.text(String(it.qty), pw-m-46, y+9, {align:'right'});
+    doc.text(it.disc||'—',   pw-m-26, y+9, {align:'right'});
     doc.setFont('helvetica','bold');
-    doc.text('₹'+it.total.toLocaleString('en-IN'), pw-m, y+8.5, {align:'right'});
+    doc.text('₹'+it.total.toLocaleString('en-IN'), pw-m, y+9, {align:'right'});
     doc.setDrawColor(217,213,204);
     doc.line(m, y+h, pw-m, y+h);
     y += h;
   });
 
+  // ── Totals ───────────────────────────────────────────────
   y += 4;
   const totW = 70;
   const totX = pw-m-totW;
   const tRow = (k,v,bold=false) => {
     doc.setFont('helvetica', bold?'bold':'normal');
     doc.setFontSize(bold?10:8.5);
-    doc.setTextColor(bold?T.ink:T.ink3);
+    doc.setTextColor(bold?'#0a0f0d':'#404b47');
     doc.text(k, totX, y);
     doc.text(v, pw-m, y, {align:'right'});
     y += bold?6:5;
   };
   tRow('Subtotal', '₹'+subtotal.toLocaleString('en-IN'));
-  tRow('CGST 9%', '₹'+cgst.toLocaleString('en-IN'));
-  tRow('SGST 9%', '₹'+sgst.toLocaleString('en-IN'));
+  tRow('CGST 9%',  '₹'+cgst.toLocaleString('en-IN'));
+  tRow('SGST 9%',  '₹'+sgst.toLocaleString('en-IN'));
   doc.setDrawColor(30,38,36);
   doc.line(totX, y, pw-m, y);
   y += 3;
@@ -393,10 +423,13 @@ function generatePDF(order) {
   y += 1;
   tRow('Balance Due', '₹'+balance.toLocaleString('en-IN'), true);
 
-  y = Math.max(y+10, 255);
-  doc.setFillColor(229,237,233);
-  doc.rect(0, y, pw, 42, 'F');
-  doc.setTextColor(15,76,58);
+  // ── Footer ───────────────────────────────────────────────
+  y = Math.max(y+10, 260);
+  doc.setFillColor(255,240,240);
+  doc.rect(0, y, pw, 37, 'F');
+  doc.setDrawColor(244,187,187);
+  doc.line(0, y, pw, y);
+  doc.setTextColor(192,0,0);
   doc.setFont('helvetica','bold');
   doc.setFontSize(7.5);
   doc.text('CUSTOMER COPY', m, y+8);
@@ -405,10 +438,14 @@ function generatePDF(order) {
   doc.setFontSize(7);
   doc.text('Scan QR for your digital order copy. Valid 30 days.', m, y+14);
   doc.text('4SI.IN/O/'+(order.no||'').replace('/','‑'), m, y+19);
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(8);
+  doc.setTextColor(192,0,0);
+  doc.text('interio by GODREJ', pw-m, y+10, {align:'right'});
   doc.setFont('helvetica','normal');
   doc.setFontSize(6.5);
   doc.setTextColor(107,118,114);
-  doc.text('4S INTERIORS · PATIA, BHUBANESWAR · GST 21ADAPS1043C1ZE · Authorised Dealer of Godrej & Boyce Mfg. Co. Ltd.', pw/2, y+37, {align:'center'});
+  doc.text('4S INTERIORS · PATIA, BHUBANESWAR · GST 21ADAPS1043C1ZE · Authorised Dealer of Godrej & Boyce Mfg. Co. Ltd.', pw/2, y+33, {align:'center'});
 
   return doc;
 }
@@ -746,18 +783,25 @@ function SearchScreen({ctx}) {
     return qOk&&cOk;
   });
   function addToOrder(item) {
-    const disc = order.discountCode||'0%';
-    const pct  = parseFloat(disc)/100||0;
-    const total = Math.round(item.cpl*(1-pct));
-    const exists = (order.items||[]).findIndex(x=>x.code===item.code);
+    const disc      = order.discountCode||'0%';
+    const pct       = parseFloat(disc)/100||0;
+    const unitPrice = Math.round(item.cpl*(1-pct));
+    const exists    = (order.items||[]).findIndex(x=>x.code===item.code);
     let newItems;
     if (exists>=0) {
-      newItems = order.items.map((x,i)=>i===exists?{...x,qty:x.qty+1,total:(x.qty+1)*Math.round(item.cpl*(1-pct))}:x);
+      newItems = order.items.map((x,idx)=>idx===exists?{...x,qty:x.qty+1,total:(x.qty+1)*(x.unitPrice||x.cpl)}:x);
     } else {
-      newItems = [...(order.items||[]),{code:item.code,name:item.name,cat:item.cat,qty:1,cpl:item.cpl,total,disc,branch:item.stock[0]?.b||'KB'}];
+      newItems = [...(order.items||[]),{
+        code:item.code, name:item.name, cat:item.cat,
+        qty:1, mrp:item.mrp||item.cpl, cpl:item.cpl,
+        unitPrice, total:unitPrice, disc,
+        branch:item.stock[0]?.b||'KB',
+        inStock:(item.stock||[]).reduce((s,x)=>s+x.q,0),
+      }];
     }
     setOrder({...order,items:newItems});
-    ctx.showToast(item.name.slice(0,30)+'… added');
+    const totalStock = (item.stock||[]).reduce((s,x)=>s+x.q,0);
+    ctx.showToast(totalStock===0?item.name.slice(0,22)+'… added (OOS)':item.name.slice(0,30)+'… added', totalStock===0?'warn':'ok');
   }
   return (
     <div className="screen">
@@ -783,29 +827,36 @@ function SearchScreen({ctx}) {
       </div>
       <div className="scroll" style={{background:'#fff',borderTop:`1px solid ${T.line}`}}>
         {filtered.map(it=>{
-          const total = it.stock.reduce((s,x)=>s+x.q,0);
+          const total = (it.stock||[]).reduce((s,x)=>s+x.q,0);
           const oos   = total===0;
+          const mrp   = it.mrp||it.cpl||0;
           return (
-            <div key={it.code} style={{padding:'12px 18px',borderBottom:`1px solid ${T.line}`,opacity:oos?.65:1}}>
+            <div key={it.code} style={{padding:'12px 18px',borderBottom:`1px solid ${T.line}`}}>
               <div style={{display:'flex',gap:10}}>
                 <div style={{width:52,height:52,borderRadius:4,flexShrink:0,background:`repeating-linear-gradient(135deg,${T.paper2} 0 6px,${T.paper} 6px 12px)`,border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',fontFamily:T.mono,fontSize:9,color:T.ink4}}>IMG</div>
                 <div style={{flex:1,minWidth:0}}>
-                  <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3}}>
+                  <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3,flexWrap:'wrap'}}>
                     <span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:600}}>{it.code}</span>
                     <Pill tone="neutral" size="sm">{it.cat.toUpperCase()}</Pill>
-                    {oos&&<Pill tone="bad" size="sm">OUT</Pill>}
+                    {oos&&<Pill tone="bad" size="sm">OUT OF STOCK</Pill>}
                   </div>
                   <div style={{fontSize:13,fontWeight:600,color:T.ink,lineHeight:1.3,marginBottom:5}}>{it.name}</div>
                   <div style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap'}}>
-                    {it.stock.map(s=><StockChip key={s.b} branch={s.b} count={s.q} low={s.q>0&&s.q<2}/>)}
+                    {(it.stock||[]).length>0
+                      ? it.stock.map(s=><StockChip key={s.b} branch={s.b} count={s.q} low={s.q>0&&s.q<2}/>)
+                      : <span style={{fontSize:10,color:T.bad,fontWeight:600}}>No stock data</span>}
                   </div>
                 </div>
                 <div style={{flexShrink:0,textAlign:'right',display:'flex',flexDirection:'column',alignItems:'flex-end',gap:6}}>
                   <div>
-                    <div style={{fontSize:9,color:T.ink4,fontWeight:600,letterSpacing:.5}}>CPL</div>
-                    <div style={{fontFamily:T.mono,fontSize:13,fontWeight:700,color:T.ink}}>₹{(it.cpl/1000).toFixed(1)}k</div>
+                    <div style={{fontSize:9,color:T.ink4,fontWeight:600,letterSpacing:.5}}>MRP</div>
+                    <div style={{fontFamily:T.mono,fontSize:13,fontWeight:700,color:T.ink}}>₹{mrp.toLocaleString('en-IN')}</div>
+                    {it.cpl&&it.cpl!==mrp&&<div style={{fontFamily:T.mono,fontSize:9,color:T.ink4}}>CPL ₹{it.cpl.toLocaleString('en-IN')}</div>}
                   </div>
-                  {!oos&&<button onClick={()=>addToOrder(it)} style={{height:30,padding:'0 10px',borderRadius:6,background:T.green,color:'#fff',border:'none',fontSize:12,fontWeight:700,cursor:'pointer'}}>{Icon.plus('#fff',14)}</button>}
+                  <button onClick={()=>addToOrder(it)} style={{height:30,padding:'0 10px',borderRadius:6,background:oos?T.warn:T.green,color:'#fff',border:'none',fontSize:12,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:4}}>
+                    {Icon.plus('#fff',14)}{oos?'Book':'Add'}
+                  </button>
+                  {oos&&<div style={{fontSize:9,color:T.warn,fontWeight:600,textAlign:'right',lineHeight:1.2}}>Can book on<br/>customer demand</div>}
                 </div>
               </div>
             </div>
@@ -835,8 +886,8 @@ function OrderFormScreen({ctx}) {
     setOrder(prev=>({...prev,items:prev.items.map((it,i)=>{
       if(i!==idx) return it;
       const newQty = Math.max(1,it.qty+delta);
-      const unitPrice = Math.round(it.cpl*(1-(parseFloat(it.disc)||0)/100));
-      return {...it,qty:newQty,total:newQty*unitPrice};
+      const up = it.unitPrice!==undefined ? it.unitPrice : Math.round(it.cpl*(1-(parseFloat(it.disc)||0)/100));
+      return {...it,qty:newQty,unitPrice:up,total:newQty*up};
     })}));
   }
 
@@ -875,31 +926,51 @@ function OrderFormScreen({ctx}) {
         <Field label="Lift available?" value={o.liftAvailable} onChange={v=>setF('liftAvailable',v)} hint="If No — installation handling fee applies"/>
         <SectionHead n="03" label={`Items · ${(o.items||[]).length}`} action="+ ADD ITEM" onAction={()=>nav('search')}/>
         <div style={{background:'#fff'}}>
-          {(o.items||[]).map((it,i)=>(
+          {(o.items||[]).map((it,i)=>{
+            const mrpVal   = it.mrp||it.cpl||0;
+            const curPrice = it.unitPrice!==undefined ? it.unitPrice : Math.round(it.cpl*(1-(parseFloat(it.disc)||0)/100));
+            return (
             <div key={it.code+i} style={{padding:'11px 14px',borderBottom:`1px solid ${T.line}`}}>
               <div style={{display:'flex',gap:8,alignItems:'flex-start'}}>
                 <div style={{flex:1,minWidth:0}}>
-                  <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:3}}>
+                  <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:3,flexWrap:'wrap'}}>
                     <span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:600}}>{it.code}</span>
-                    <StockChip branch={it.branch||'KB'} count={3}/>
+                    <StockChip branch={it.branch||'KB'} count={it.inStock||0}/>
+                    {(it.inStock===0||it.inStock===undefined)&&<Pill tone="warn" size="sm">OOS</Pill>}
                   </div>
                   <div style={{fontSize:13,fontWeight:600,lineHeight:1.3}}>{it.name}</div>
-                  <div style={{display:'flex',gap:10,marginTop:5,alignItems:'center'}}>
+                  {mrpVal>0&&<div style={{fontSize:10,color:T.ink4,marginTop:2}}>MRP: ₹{mrpVal.toLocaleString('en-IN')} /unit</div>}
+                  <div style={{display:'flex',gap:8,marginTop:6,alignItems:'center',flexWrap:'wrap'}}>
                     <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>QTY</span>
                     <button onClick={()=>updateItemQty(i,-1)} style={{width:24,height:24,borderRadius:4,border:`1px solid ${T.line}`,background:'#fff',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,color:T.ink}}>−</button>
                     <span style={{fontFamily:T.mono,fontSize:14,fontWeight:700,minWidth:20,textAlign:'center'}}>{it.qty}</span>
                     <button onClick={()=>updateItemQty(i,1)} style={{width:24,height:24,borderRadius:4,border:`1px solid ${T.line}`,background:'#fff',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,color:T.ink}}>+</button>
-                    <span style={{fontSize:10,color:T.ink4,fontWeight:700,marginLeft:6}}>DISC</span>
-                    <input value={it.disc||''} onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,disc:v,total:Math.round(x.cpl*x.qty*(1-parseFloat(v||0)/100))}:x)}));}} style={{width:46,border:`1px solid ${T.line}`,borderRadius:4,padding:'2px 6px',fontFamily:T.mono,fontSize:12,textAlign:'center'}} placeholder="0%"/>
+                  </div>
+                  <div style={{display:'flex',gap:8,marginTop:6,alignItems:'center',flexWrap:'wrap'}}>
+                    <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>PRICE ₹</span>
+                    <input
+                      value={curPrice}
+                      onChange={e=>{const v=Number(e.target.value)||0;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,unitPrice:v,total:v*x.qty}:x)}));}}
+                      style={{width:72,border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 6px',fontFamily:T.mono,fontSize:13,fontWeight:700,textAlign:'right',color:T.ink}}
+                    />
+                    <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>DISC</span>
+                    <input
+                      value={it.disc||''}
+                      onChange={e=>{const v=e.target.value;const pct=parseFloat(v||0)/100;const newUp=Math.round((it.mrp||it.cpl||0)*(1-pct));setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,disc:v,unitPrice:newUp,total:newUp*x.qty}:x)}));}}
+                      style={{width:46,border:`1px solid ${T.line}`,borderRadius:4,padding:'2px 6px',fontFamily:T.mono,fontSize:12,textAlign:'center'}}
+                      placeholder="0%"
+                    />
                   </div>
                 </div>
                 <div style={{textAlign:'right',flexShrink:0}}>
-                  <div style={{fontFamily:T.mono,fontSize:14,fontWeight:700}}>₹{it.total.toLocaleString('en-IN')}</div>
-                  <button onClick={()=>removeItem(i)} style={{marginTop:6,fontSize:11,color:T.bad,background:'none',border:'none',cursor:'pointer',fontWeight:600}}>REMOVE</button>
+                  <div style={{fontFamily:T.mono,fontSize:15,fontWeight:700}}>₹{it.total.toLocaleString('en-IN')}</div>
+                  <div style={{fontSize:9,color:T.ink4,marginTop:1}}>×{it.qty} unit{it.qty>1?'s':''}</div>
+                  <button onClick={()=>removeItem(i)} style={{marginTop:8,fontSize:11,color:T.bad,background:'none',border:'none',cursor:'pointer',fontWeight:600}}>REMOVE</button>
                 </div>
               </div>
             </div>
-          ))}
+            );
+          })}
           <div onClick={()=>nav('search')} style={{padding:14,display:'flex',alignItems:'center',gap:10,background:T.greenSoft,color:T.green,fontWeight:700,cursor:'pointer'}}>
             {Icon.search(T.green,16)}<span style={{fontSize:13}}>Search & add item</span>
           </div>
