@@ -268,335 +268,245 @@ function StockRibbon({syncedAt}) {
 // ═══════════════════════════════════════════════════════════
 function generatePDF(order) {
   const { jsPDF } = window.jspdf;
-  const doc = new jsPDF({ unit:'mm', format:'a4' });
-  const pw  = 210;
-  const ph  = 297;
-  const m   = 10;   // side margin
-  const cw  = pw - m*2;  // content width = 190mm
+  const doc  = new jsPDF({ unit:'mm', format:'a4' });
+  const pw   = 210;
+  const ml   = 10;
+  const cw   = pw - ml*2;
 
   const subtotal = order.items.reduce((s,i)=>s+i.total,0);
   const cgst     = Math.round(subtotal*0.09);
   const sgst     = Math.round(subtotal*0.09);
-  const total    = subtotal+cgst+sgst;
-  const balance  = total-(Number(order.earnest)||0);
+  const totalAmt = subtotal+cgst+sgst;
+  const earnest  = Number(order.earnest)||0;
+  const balance  = totalAmt-earnest;
   const serialNo = order.internalNo ? String(order.internalNo) : (order.no||'—');
-  const R=240,G=64,B=64;  // #F04040 coral red
+  const oDate    = order.date||new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'2-digit',year:'numeric'});
 
-  // ── Header band ──────────────────────────────────────────
-  doc.setFillColor(R,G,B);
-  doc.rect(0,0,pw,22,'F');
+  const DRED=[180,0,0], NAVY=[20,20,80], INK=[20,20,20], GR=[110,110,110], LGR=[200,200,200];
 
-  // "interio" brand text (left side of header)
-  doc.setTextColor(255,255,255);
+  const lw0 = () => { doc.setLineWidth(0.25); doc.setDrawColor(...LGR); };
+  const brd = (x,y,w,h) => { lw0(); doc.rect(x,y,w,h,'S'); };
+  const hln = (x,y,x2)  => { lw0(); doc.line(x,y,x2,y); };
+  const vln = (x,y,y2)  => { lw0(); doc.line(x,y,x,y2); };
+  const lbl = (x,y,t,sz=6) => { doc.setFont('helvetica','normal'); doc.setFontSize(sz); doc.setTextColor(...GR); doc.text(t,x,y); };
+  const val = (x,y,t,sz=8,bold=false,clr=INK) => { doc.setFont('helvetica',bold?'bold':'normal'); doc.setFontSize(sz); doc.setTextColor(...clr); doc.text(String(t||''),x,y); };
+  const rval= (x,y,t,sz=8,bold=false,clr=INK) => { doc.setFont('helvetica',bold?'bold':'normal'); doc.setFontSize(sz); doc.setTextColor(...clr); doc.text(String(t||''),x,y,{align:'right'}); };
+  const fit1= (t,w,sz=8) => { doc.setFontSize(sz); return (doc.splitTextToSize(String(t||''),w)[0])||''; };
+
+  let y = 6;
+
+  // ── 1. HEADER ─────────────────────────────────────────────
+  const hH = 15;
+  doc.setFillColor(236,236,236);
+  doc.rect(ml,y,cw,hH,'F');
+  brd(ml,y,cw,hH);
+  vln(ml+105,y,y+hH);
+  // "Order Confirmation Form" — Times bold-italic, dark red
   doc.setFont('times','bolditalic');
-  doc.setFontSize(22);
-  doc.text('interio', m+1, 14);
-  doc.setFont('helvetica','normal');
-  doc.setFontSize(8);
-  doc.text('by Godrej', m+1, 19.5);
-
-  // Thin white separator line
-  doc.setDrawColor(255,255,255);
-  doc.setLineWidth(0.3);
-  doc.line(m+37, 8, m+37, 20);
-
-  // 4S Interiors dealer info (right of separator)
+  doc.setFontSize(18);
+  doc.setTextColor(...DRED);
+  doc.text('Order Confirmation Form', ml+3, y+10.5);
+  // "Godrej" dark navy bold + registered + "interio" Times italic red
+  const lx = ml+109;
   doc.setFont('helvetica','bold');
-  doc.setFontSize(10);
-  doc.text('4S INTERIORS', m+41, 12);
+  doc.setFontSize(13);
+  doc.setTextColor(...NAVY);
+  doc.text('Godrej', lx, y+7.5);
   doc.setFont('helvetica','normal');
-  doc.setFontSize(7);
-  doc.text('Patia Square, Chandrasekharpur, Bhubaneswar - 751024', m+41, 16.5);
-  doc.text('Ph: 0674-2744906  |  GSTIN: 21ADAPS1043C1ZE', m+41, 20.5);
+  doc.setFontSize(6);
+  doc.setTextColor(...GR);
+  doc.text('®', lx+26, y+4.5);
+  doc.setFont('times','bolditalic');
+  doc.setFontSize(16);
+  doc.setTextColor(...DRED);
+  doc.text('interio', lx, y+14);
+  y += hH;
 
-  // Serial number top-right
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(9);
-  doc.text('SL #'+serialNo, pw-m, 12, {align:'right'});
-  doc.setFont('helvetica','normal');
-  doc.setFontSize(7);
-  doc.text('ORDER CONFIRMATION FORM', pw-m, 18, {align:'right'});
+  // ── 2. STORE + WON + ORDER ROW ────────────────────────────
+  const r1H = 17;
+  brd(ml,y,cw,r1H);
+  const c1w=55, c2w=68;
+  vln(ml+c1w,y,y+r1H);
+  vln(ml+c1w+c2w,y,y+r1H);
+  lbl(ml+1,y+3.5,'Store Address :');
+  val(ml+1,y+8.5,'4S Interiors',7.5,true);
+  val(ml+1,y+13,'Patia Sq., BBSR — Ph: 0674-2744906',6.5);
+  lbl(ml+c1w+1,y+3.5,'WON No.');
+  doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(...DRED);
+  doc.text(order.won||'Pending', ml+c1w+1, y+10);
+  lbl(ml+c1w+1,y+14.5,'Date :');
+  val(ml+c1w+11,y+14.5,oDate,7.5);
+  lbl(ml+c1w+c2w+1,y+3.5,'Order No.');
+  val(ml+c1w+c2w+1,y+9,order.no||'—',9,true);
+  lbl(ml+c1w+c2w+1,y+14,'Serial No.');
+  val(ml+c1w+c2w+1,y+r1H-1,serialNo,8,false,DRED);
+  y += r1H;
 
-  // ── Title strip ──────────────────────────────────────────
-  let y = 22;
-  doc.setFillColor(245,245,245);
-  doc.rect(0,y,pw,8,'F');
-  doc.setDrawColor(220,220,220);
-  doc.line(0,y,pw,y);
-  doc.line(0,y+8,pw,y+8);
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(9);
-  doc.setTextColor(R,G,B);
-  doc.text('ORDER CONFIRMATION', pw/2, y+5.5, {align:'center'});
-  y += 8;
-
-  // ── WON / Order meta row ─────────────────────────────────
-  doc.setDrawColor(200,200,200);
-  doc.setLineWidth(0.3);
-  const wonY = y;
-  const col1 = m;
-  const col2 = m + cw*0.35;
-  const col3 = m + cw*0.60;
-  const col4 = m + cw*0.80;
-  doc.rect(m, wonY, cw, 10, 'S');
-  doc.line(col2, wonY, col2, wonY+10);
-  doc.line(col3, wonY, col3, wonY+10);
-  doc.line(col4, wonY, col4, wonY+10);
-
-  const metaItems = [
-    ['DATE', order.date||new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'2-digit',year:'2-digit'})],
-    ['WON #', order.won||'Pending'],
-    ['ORDER #', order.no||'—'],
-    ['EXEC', order.salesExec||'—'],
-  ];
-  const metaColX = [col1+1.5, col2+1.5, col3+1.5, col4+1.5];
-  metaItems.forEach(([k,v],i) => {
-    doc.setFont('helvetica','normal');
-    doc.setFontSize(6);
-    doc.setTextColor(120,120,120);
-    doc.text(k, metaColX[i], wonY+3.5);
-    doc.setFont('helvetica','bold');
-    doc.setFontSize(7.5);
-    doc.setTextColor(30,30,30);
-    doc.text(String(v), metaColX[i], wonY+8);
+  // ── 3. BILLING / DELIVERY HEADER ──────────────────────────
+  const bhH = 6;
+  [[ml,cw/2,'Billing Address'],[ml+cw/2,cw/2,'Delivery Address']].forEach(([x,w,txt]) => {
+    doc.setFillColor(245,245,245); doc.rect(x,y,w,bhH,'F');
+    brd(x,y,w,bhH);
+    doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+    doc.text(txt, x+w/2, y+4.3, {align:'center'});
   });
-  y = wonY + 10;
+  y += bhH;
 
-  // ── Customer / Address section ───────────────────────────
-  const addrH = 26;
-  doc.rect(m, y, cw, addrH, 'S');
-  doc.line(m+cw/2, y, m+cw/2, y+addrH);
+  // ── 4. CUSTOMER DETAILS ───────────────────────────────────
+  const cdH = 46;
+  const hw  = cw/2;
+  brd(ml,y,hw,cdH);
+  brd(ml+hw,y,hw,cdH);
+  // Billing side
+  hln(ml,y+6,ml+hw);
+  lbl(ml+1,y+3.5,'P.O. Ref. No. :'); val(ml+25,y+3.5,fit1(order.poRef||'',hw-27),7.5);
+  hln(ml,y+17,ml+hw);
+  lbl(ml+1,y+10,'Customer Name / Address :');
+  doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...INK);
+  doc.text(fit1(order.customer||'',hw-3,9), ml+1, y+16);
+  hln(ml,y+33,ml+hw);
+  doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+  const bLns=doc.splitTextToSize(order.billing||'',hw-3);
+  bLns.slice(0,3).forEach((ln,i)=>doc.text(ln,ml+1,y+21+i*4));
+  hln(ml,y+38,ml+hw);
+  lbl(ml+1,y+36,'Ph. :'); val(ml+9,y+36,fit1(order.phone||'',hw-11),7.5);
+  hln(ml,y+43,ml+hw);
+  lbl(ml+1,y+41,'M. :');  val(ml+9,y+41,fit1(order.alt||'',hw-11),7.5);
+  hln(ml,y+cdH-3,ml+hw);
+  lbl(ml+1,y+cdH-0.5,'Customer Code :'); val(ml+25,y+cdH-0.5,fit1(order.customerCode||'',hw-27),7.5);
+  // Delivery side
+  const dx=ml+hw;
+  lbl(dx+1,y+3.5,'Delivery Address :');
+  const dLns=doc.splitTextToSize(order.delivery||order.billing||'',hw-3);
+  doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+  dLns.slice(0,4).forEach((ln,i)=>doc.text(ln,dx+1,y+8+i*4));
+  hln(dx,y+27,dx+hw);
+  lbl(dx+1,y+30.5,'E-Mail :'); val(dx+14,y+30.5,fit1(order.email||'',hw-16),7.5);
+  hln(dx,y+33,dx+hw);
+  lbl(dx+1,y+36,'Ph. :');
+  hln(dx,y+39,dx+hw);
+  lbl(dx+1,y+42,'M. :');
+  y += cdH;
 
-  // Bill-to
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(7);
-  doc.setTextColor(R,G,B);
-  doc.text('BILL TO', m+2, y+4);
-  doc.setTextColor(30,30,30);
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(9);
-  doc.text(order.customer||'', m+2, y+9);
-  doc.setFont('helvetica','normal');
-  doc.setFontSize(7.5);
-  const billLines = doc.splitTextToSize(order.billing||'—', cw/2-6);
-  doc.text(billLines.slice(0,2), m+2, y+14);
-  doc.setFont('helvetica','normal');
-  doc.setFontSize(7.5);
-  doc.text('Ph: '+(order.phone||'—')+(order.alt?' / '+order.alt:''), m+2, y+22);
+  // ── 5. INSTRUCTION + DISCOUNT ─────────────────────────────
+  const siH=28, lw5=cw*0.55, rw5=cw*0.45, rx5=ml+lw5;
+  brd(ml,y,lw5,siH); brd(rx5,y,rw5,siH);
+  doc.setFillColor(248,248,248);
+  doc.rect(ml,y,lw5,7,'F'); doc.rect(rx5,y,rw5,7,'F');
+  hln(ml,y+7,ml+lw5); hln(rx5,y+7,rx5+rw5);
+  lbl(ml+2,y+5,'Specific Instruction',7);
+  lbl(rx5+2,y+5,'HFP / HFC / HFS / RFD',7);
+  doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+  doc.splitTextToSize(order.installNote||'',lw5-4).slice(0,4).forEach((ln,i)=>doc.text(ln,ml+2,y+11+i*4));
+  vln(rx5+rw5*0.5,y+7,y+siH);
+  const r5=(l5,v5,ry)=>{ hln(rx5,y+ry,rx5+rw5); lbl(rx5+2,y+ry-5.5,l5); val(rx5+rw5*0.5+2,y+ry-1.5,fit1(v5,rw5*0.48,8.5),8.5,true); };
+  r5('Discount Code',order.discountCode||'',14);
+  r5('Planned Dly Schedule',order.plannedDly||'',21);
+  r5('Reference no.',order.poRef||'',siH);
+  y += siH;
 
-  // Deliver-to
-  const dx = m+cw/2+2;
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(7);
-  doc.setTextColor(R,G,B);
-  doc.text('DELIVER TO', dx, y+4);
-  doc.setFont('helvetica','normal');
-  doc.setFontSize(7.5);
-  doc.setTextColor(30,30,30);
-  const delvLines = doc.splitTextToSize(order.delivery||order.billing||'—', cw/2-4);
-  doc.text(delvLines.slice(0,3), dx, y+9);
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(7);
-  doc.setTextColor(R,G,B);
-  doc.text('PLANNED DELIVERY', dx, y+20);
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(7.5);
-  doc.setTextColor(30,30,30);
-  doc.text(order.plannedDly||'—', dx, y+24.5);
-  y += addrH;
+  // ── 6. SALESMAN ROW ───────────────────────────────────────
+  const scH=7;
+  brd(ml,y,cw,scH); vln(ml+28,y,y+scH);
+  lbl(ml+2,y+5,'Salesman Code',7);
+  val(ml+30,y+5,fit1(order.salesExec||'',cw-32,7.5),7.5);
+  y += scH;
 
-  // ── Instructions / Discount / Payment strip ───────────────
-  const instrH = 10;
-  doc.rect(m, y, cw, instrH, 'S');
-  doc.line(m+cw*0.5, y, m+cw*0.5, y+instrH);
-  doc.line(m+cw*0.75, y, m+cw*0.75, y+instrH);
-  doc.setFont('helvetica','normal');
-  doc.setFontSize(6.5);
-  doc.setTextColor(120,120,120);
-  doc.text('INSTRUCTIONS', m+2, y+3.5);
-  doc.text('DISCOUNT', m+cw*0.5+2, y+3.5);
-  doc.text('PAYMENT MODE', m+cw*0.75+2, y+3.5);
-  doc.setFont('helvetica','normal');
-  doc.setFontSize(7.5);
-  doc.setTextColor(30,30,30);
-  doc.text(doc.splitTextToSize(order.installNote||'—', cw*0.48)[0], m+2, y+8);
-  doc.text(order.discountCode||'—', m+cw*0.5+2, y+8);
-  doc.text(order.paymentMode||'—', m+cw*0.75+2, y+8);
-  y += instrH;
-
-  // ── Items table ──────────────────────────────────────────
-  // Columns: Sl | Br | Item Code | Qty | Product Description | MRP | CPL/Unit Price | Disc% | Total
-  const cols = {
-    sl:   {x:m,      w:7},
-    br:   {x:m+7,    w:9},
-    code: {x:m+16,   w:20},
-    qty:  {x:m+36,   w:9},
-    desc: {x:m+45,   w:75},
-    mrp:  {x:m+120,  w:20},
-    up:   {x:m+140,  w:20},
-    disc: {x:m+160,  w:13},
-    tot:  {x:m+173,  w:cw-(173)},
+  // ── 7. ITEMS TABLE ────────────────────────────────────────
+  const tC={
+    code:{x:ml,        w:22},
+    qty: {x:ml+22,     w:12},
+    desc:{x:ml+34,     w:cw-34-30-24},
+    cpl: {x:ml+cw-54,  w:30},
+    tot: {x:ml+cw-24,  w:24},
   };
-
-  // Header row
-  const thH = 8;
-  doc.setFillColor(R,G,B);
-  doc.rect(m, y, cw, thH, 'F');
-  doc.setTextColor(255,255,255);
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(6.5);
-  const headers = [
-    [cols.sl,   'Sl.'],
-    [cols.br,   'Br.'],
-    [cols.code, 'Item Code'],
-    [cols.qty,  'Qty'],
-    [cols.desc, 'Product Description'],
-    [cols.mrp,  'MRP (₹)'],
-    [cols.up,   'Unit Price'],
-    [cols.disc, 'Disc%'],
-    [cols.tot,  'Total (₹)'],
-  ];
-  headers.forEach(([c,lbl]) => doc.text(lbl, c.x+1, y+5.5));
+  const thH=8;
+  doc.setFillColor(248,248,248); doc.rect(ml,y,cw,thH,'F');
+  brd(ml,y,cw,thH);
+  Object.values(tC).forEach(c=>vln(c.x+c.w,y,y+thH));
+  doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...INK);
+  [['Item Code',tC.code],['Qty',tC.qty],['Product Description',tC.desc],['CPL',tC.cpl],['Total (Rs.)',tC.tot]].forEach(([t,c])=>doc.text(t,c.x+c.w/2,y+5.5,{align:'center'}));
   y += thH;
 
-  // Item rows
-  const rowH = 12;
-  order.items.forEach((it, i) => {
-    if (i%2===0) { doc.setFillColor(255,255,255); } else { doc.setFillColor(252,248,248); }
-    doc.rect(m, y, cw, rowH, 'F');
-    doc.setDrawColor(220,210,210);
-    doc.line(m, y+rowH, m+cw, y+rowH);
-
-    doc.setTextColor(100,100,100);
-    doc.setFont('helvetica','normal');
-    doc.setFontSize(7);
-    doc.text(String(i+1), cols.sl.x+1, y+5);
-    doc.text(it.branch||'KB', cols.br.x+1, y+5);
+  const rH=11;
+  order.items.forEach((it,i)=>{
+    if(i%2===1){doc.setFillColor(252,252,252);doc.rect(ml,y,cw,rH,'F');}
+    brd(ml,y,cw,rH);
+    Object.values(tC).forEach(c=>vln(c.x+c.w,y,y+rH));
+    doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+    doc.text(fit1(it.code||'',tC.code.w-3,7), tC.code.x+tC.code.w/2, y+4.5, {align:'center'});
+    doc.text(String(it.qty), tC.qty.x+tC.qty.w/2, y+7, {align:'center'});
+    doc.setFont('helvetica','bold'); doc.setFontSize(8);
+    const nm=doc.splitTextToSize(it.name||'',tC.desc.w-3);
+    doc.text(nm[0]||'',tC.desc.x+1,y+4.5);
+    if(nm[1]){doc.setFont('helvetica','normal');doc.setFontSize(7);doc.setTextColor(...GR);doc.text(nm[1],tC.desc.x+1,y+9);}
+    doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...INK);
+    const cplV=it.unitPrice||it.cpl||it.mrp||0;
+    rval(tC.cpl.x+tC.cpl.w-2,y+7, cplV>0?cplV.toLocaleString('en-IN'):'—');
     doc.setFont('helvetica','bold');
-    doc.setFontSize(7);
-    doc.text(it.code||'', cols.code.x+1, y+5);
-    doc.setFont('helvetica','normal');
-    doc.setFontSize(7);
-    doc.text(String(it.qty), cols.qty.x+cols.qty.w/2, y+7.5, {align:'center'});
-
-    // Description (bold name + code hint)
-    doc.setFont('helvetica','bold');
-    doc.setFontSize(7.5);
-    doc.setTextColor(30,30,30);
-    const nameLines = doc.splitTextToSize(it.name, cols.desc.w-3);
-    doc.text(nameLines[0], cols.desc.x+1, y+5.5);
-    if (nameLines[1]) { doc.setFontSize(6.5); doc.setFont('helvetica','normal'); doc.setTextColor(100,100,100); doc.text(nameLines[1], cols.desc.x+1, y+9.5); }
-
-    doc.setFont('helvetica','normal');
-    doc.setFontSize(7.5);
-    doc.setTextColor(30,30,30);
-    const mrpVal = it.mrp||it.cpl||0;
-    doc.text(mrpVal>0?mrpVal.toLocaleString('en-IN'):'—', cols.mrp.x+cols.mrp.w-1, y+7.5, {align:'right'});
-    doc.text((it.unitPrice||it.cpl||0).toLocaleString('en-IN'), cols.up.x+cols.up.w-1, y+7.5, {align:'right'});
-    doc.text(it.disc||'—', cols.disc.x+cols.disc.w/2, y+7.5, {align:'center'});
-    doc.setFont('helvetica','bold');
-    doc.text(it.total.toLocaleString('en-IN'), cols.tot.x+cols.tot.w-1, y+7.5, {align:'right'});
-    y += rowH;
+    rval(tC.tot.x+tC.tot.w-2,y+7, it.total.toLocaleString('en-IN'));
+    y+=rH;
   });
+  lw0(); doc.rect(ml,y-rH*order.items.length-thH,cw,rH*order.items.length+thH,'S');
 
-  // Outer border for table
-  doc.setDrawColor(200,180,180);
-  doc.rect(m, y-rowH*order.items.length-thH, cw, rowH*order.items.length+thH, 'S');
+  // ── 8. TOTALS SECTION ─────────────────────────────────────
+  const tsH=34, tsLW=cw*0.55, tsRW=cw*0.45, tsRX=ml+tsLW;
+  brd(ml,y,tsLW,tsH); brd(tsRX,y,tsRW,tsH);
+  lbl(ml+2,y+5,'(Invoice details / receipt info — to be filled after billing)',6.5);
+  const vSp=tsRX+tsRW*0.54;
+  vln(vSp,y,y+tsH);
+  const fRows=[
+    ['TOTAL',        '₹'+subtotal.toLocaleString('en-IN'),  false],
+    ['CGST @ 9%',    '₹'+cgst.toLocaleString('en-IN'),      false],
+    ['SGST @ 9%',    '₹'+sgst.toLocaleString('en-IN'),      false],
+    ['Total Amt.',   '₹'+totalAmt.toLocaleString('en-IN'),  true],
+    ['Earnest Amt.', '₹'+earnest.toLocaleString('en-IN'),   false],
+    ['Balance Amt.', '₹'+balance.toLocaleString('en-IN'),   true],
+  ];
+  const rs=tsH/fRows.length;
+  fRows.forEach(([l,v,bold],i)=>{
+    hln(tsRX,y+rs*(i+1),tsRX+tsRW);
+    doc.setFont('helvetica',bold?'bold':'normal'); doc.setFontSize(bold?8.5:7.5); doc.setTextColor(...bold?DRED:INK);
+    doc.text(l,tsRX+2,y+rs*i+rs*0.72);
+    rval(tsRX+tsRW-2,y+rs*i+rs*0.72,v,bold?8.5:7.5,bold,INK);
+  });
+  y += tsH;
 
-  // ── Totals section ────────────────────────────────────────
-  y += 3;
-  const totLX = m + cw*0.55;
-  const totW  = cw*0.45;
-  const totR  = m + cw;
+  // ── 9. RECEIPT ROWS ───────────────────────────────────────
+  const rcH=9;
+  for(let r=0;r<2;r++){
+    brd(ml,y,cw/2,rcH); brd(ml+cw/2,y,cw/2,rcH);
+    lbl(ml+2,y+5.5,'Receipt No. & Dt');
+    if(r===0&&order.receiptNo) val(ml+30,y+5.5,fit1(order.receiptNo,cw/2-32,7.5),7.5);
+    lbl(ml+cw/2+2,y+5.5,'Receipt No. & Dt');
+    y+=rcH;
+  }
 
-  const tRow = (k, v, bold=false, clr=[30,30,30]) => {
-    doc.setFont('helvetica', bold?'bold':'normal');
-    doc.setFontSize(bold?9:8);
-    doc.setTextColor(...clr);
-    doc.text(k, totLX+2, y);
-    doc.text(v, totR-1, y, {align:'right'});
-    y += bold ? 6 : 5;
-  };
-
-  doc.setDrawColor(200,180,180);
-  doc.rect(totLX, y-2, totW, 38, 'S');
-  doc.setFillColor(250,245,245);
-  doc.rect(totLX, y-2, totW, 8, 'F');
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(7.5);
-  doc.setTextColor(R,G,B);
-  doc.text('INVOICE SUMMARY', totLX+2, y+3.5);
-  y += 8;
-
-  tRow('Sub Total (excl. GST)', '₹'+subtotal.toLocaleString('en-IN'));
-  tRow('CGST @ 9%', '₹'+cgst.toLocaleString('en-IN'));
-  tRow('SGST @ 9%', '₹'+sgst.toLocaleString('en-IN'));
-  doc.setDrawColor(R,G,B);
-  doc.setLineWidth(0.4);
-  doc.line(totLX, y, totR, y);
-  y += 3;
-  tRow('TOTAL AMOUNT', '₹'+total.toLocaleString('en-IN'), true, [R,G,B]);
-  doc.setLineWidth(0.3);
-  doc.setDrawColor(200,180,180);
-  doc.line(totLX, y, totR, y);
-  y += 2;
-  tRow('Earnest / Advance Paid', '₹'+(Number(order.earnest)||0).toLocaleString('en-IN'));
-  if (order.receiptNo) { doc.setFont('helvetica','italic'); doc.setFontSize(6.5); doc.setTextColor(120,120,120); doc.text('Rcpt: '+order.receiptNo, totLX+2, y-1); }
-  doc.setDrawColor(30,30,30);
-  doc.line(totLX, y, totR, y);
-  y += 2;
-  tRow('BALANCE DUE', '₹'+balance.toLocaleString('en-IN'), true, [30,30,30]);
-
-  // ── Note / Terms row ──────────────────────────────────────
-  const noteY = y + 4;
-  doc.setLineWidth(0.3);
-  doc.setDrawColor(200,200,200);
-  doc.rect(m, noteY, cw, 12, 'S');
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(6.5);
-  doc.setTextColor(R,G,B);
-  doc.text('NOTE:', m+2, noteY+4);
-  doc.setFont('helvetica','normal');
-  doc.setFontSize(6.5);
-  doc.setTextColor(80,80,80);
-  doc.text('1. Prices are inclusive of taxes as applicable.   2. Goods once sold will not be taken back.   3. Delivery subject to stock availability.   4. Balance to be cleared before delivery.', m+12, noteY+4);
-  doc.text('5. This is a computer-generated document and does not require a physical signature unless otherwise specified.', m+2, noteY+9);
-  y = noteY + 12;
-
-  // ── Signature row ─────────────────────────────────────────
-  const sigH = 18;
-  doc.rect(m, y, cw, sigH, 'S');
-  doc.line(m+cw/3, y, m+cw/3, y+sigH);
-  doc.line(m+cw*2/3, y, m+cw*2/3, y+sigH);
-  [
-    [m+2,          'Customer Signature'],
-    [m+cw/3+2,     'Sales Executive'],
-    [m+cw*2/3+2,   'Store Manager / Auth. Signatory'],
-  ].forEach(([sx,lbl]) => {
-    doc.setFont('helvetica','normal');
-    doc.setFontSize(6.5);
-    doc.setTextColor(120,120,120);
-    doc.text(lbl, sx, y+sigH-2);
+  // ── 10. SIGNATURE ROW ─────────────────────────────────────
+  const sigH=18, sigW=cw/3;
+  for(let s=0;s<3;s++) brd(ml+s*sigW,y,sigW,sigH);
+  ['Sales Exe. Signature','Sales Exe. Name','Customer Signature'].forEach((lbl_,i)=>{
+    lbl(ml+i*sigW+2,y+sigH-2.5,lbl_);
+    if(i<2&&order.salesExec){doc.setFont('helvetica','normal');doc.setFontSize(9);doc.setTextColor(...INK);doc.text(order.salesExec,ml+i*sigW+sigW/2,y+10,{align:'center'});}
   });
   y += sigH;
 
-  // ── Footer ────────────────────────────────────────────────
-  doc.setFillColor(R,G,B);
-  doc.rect(0, y, pw, 14, 'F');
-  doc.setTextColor(255,255,255);
-  doc.setFont('helvetica','bold');
-  doc.setFontSize(7);
-  doc.text('4S INTERIORS', m, y+5);
-  doc.setFont('helvetica','normal');
-  doc.setFontSize(6.5);
-  doc.text('Patia Square, Chandrasekharpur, Bhubaneswar - 751024  |  Ph: 0674-2744906  |  GSTIN: 21ADAPS1043C1ZE', m, y+10);
-  doc.setFont('times','italic');
-  doc.setFontSize(8);
-  doc.text('interio by Godrej', pw-m, y+7, {align:'right'});
-  doc.setFont('helvetica','normal');
-  doc.setFontSize(6);
-  doc.setTextColor(255,220,220);
-  doc.text('Authorised Dealer of Godrej & Boyce Mfg. Co. Ltd.', pw-m, y+11.5, {align:'right'});
+  // ── 11. FOOTER ────────────────────────────────────────────
+  brd(ml,y,cw,20);
+  hln(ml,y+9,ml+cw);
+  vln(ml+cw*0.6,y,y+9);
+  doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...INK);
+  doc.text('Customer care no. : 18002671122  •  Email Id : interiocare@godrej.com', ml+2, y+4.5);
+  doc.text('• Website : www.godrejinterio.com', ml+2, y+8);
+  doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+  doc.text('For GODREJ & BOYCE MFG. CO. LTD', ml+cw-2, y+4, {align:'right'});
+  doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...GR);
+  doc.text('Authorised Signatory', ml+cw-2, y+8, {align:'right'});
+  doc.setTextColor(...GR);
+  doc.text('GST No. : _______________________________', ml+2, y+13);
+  doc.setTextColor(...INK);
+  doc.text('Note : Our technician will contact you for assembly after delivery. For any further assistance, please contact customer care', ml+2, y+16.5);
+  doc.text('H.O. : Godrej Interio Division, Pirojshanagar, Vikhroli, Mumbai 400 079.', ml+2, y+19.5);
 
   return doc;
 }
@@ -945,17 +855,18 @@ function SearchScreen({ctx}) {
   function addToOrder(item) {
     const disc      = order.discountCode||'0%';
     const pct       = parseFloat(disc)/100||0;
-    const unitPrice = Math.round(item.cpl*(1-pct));
+    const basePrice = item.mrp||item.cpl||0;
+    const unitPrice = basePrice>0 ? Math.round(basePrice*(1-pct)) : 0;
     const exists    = (order.items||[]).findIndex(x=>x.code===item.code);
     let newItems;
     if (exists>=0) {
-      newItems = order.items.map((x,idx)=>idx===exists?{...x,qty:x.qty+1,total:(x.qty+1)*(x.unitPrice||x.cpl)}:x);
+      newItems = order.items.map((x,idx)=>idx===exists?{...x,qty:x.qty+1,total:(x.qty+1)*(x.unitPrice||x.mrp||x.cpl||0)}:x);
     } else {
       newItems = [...(order.items||[]),{
         code:item.code, name:item.name, cat:item.cat,
-        qty:1, mrp:item.mrp||item.cpl, cpl:item.cpl,
+        qty:1, mrp:item.mrp||item.cpl||0, cpl:item.cpl||item.mrp||0,
         unitPrice, total:unitPrice, disc,
-        branch:item.stock[0]?.b||'KB',
+        branch:(item.stock||[])[0]?.b||'KB',
         inStock:(item.stock||[]).reduce((s,x)=>s+x.q,0),
       }];
     }
@@ -1046,7 +957,8 @@ function OrderFormScreen({ctx}) {
     setOrder(prev=>({...prev,items:prev.items.map((it,i)=>{
       if(i!==idx) return it;
       const newQty = Math.max(1,it.qty+delta);
-      const up = it.unitPrice!==undefined ? it.unitPrice : Math.round(it.cpl*(1-(parseFloat(it.disc)||0)/100));
+      const baseP = it.mrp||it.cpl||0;
+      const up = it.unitPrice!==undefined ? it.unitPrice : Math.round(baseP*(1-(parseFloat(it.disc)||0)/100));
       return {...it,qty:newQty,unitPrice:up,total:newQty*up};
     })}));
   }
@@ -1088,7 +1000,7 @@ function OrderFormScreen({ctx}) {
         <div style={{background:'#fff'}}>
           {(o.items||[]).map((it,i)=>{
             const mrpVal   = it.mrp||it.cpl||0;
-            const curPrice = it.unitPrice!==undefined ? it.unitPrice : Math.round(it.cpl*(1-(parseFloat(it.disc)||0)/100));
+            const curPrice = it.unitPrice!==undefined ? it.unitPrice : Math.round(mrpVal*(1-(parseFloat(it.disc)||0)/100));
             return (
             <div key={it.code+i} style={{padding:'11px 14px',borderBottom:`1px solid ${T.line}`}}>
               <div style={{display:'flex',gap:8,alignItems:'flex-start'}}>
@@ -1140,7 +1052,20 @@ function OrderFormScreen({ctx}) {
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setF('plannedDly',v)} mono required type="date"/>
         <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
         <SectionHead n="05" label="Payment"/>
-        <Field label="Payment Mode" value={o.paymentMode} onChange={v=>setF('paymentMode',v)} hint="Cash / UPI / IDBI QR / Card" required/>
+        <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>PAYMENT MODE <span style={{color:T.bad,marginLeft:3}}>*</span></div>
+          <select value={o.paymentMode} onChange={e=>setF('paymentMode',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.paymentMode?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+            <option value="">Select payment mode…</option>
+            <option>Cash</option>
+            <option>UPI (GPay / PhonePe / Paytm)</option>
+            <option>IDBI QR</option>
+            <option>Debit / Credit Card</option>
+            <option>Cheque</option>
+            <option>NEFT / RTGS / Bank Transfer</option>
+            <option>Bajaj Finance EMI</option>
+            <option>Pine Labs EMI</option>
+          </select>
+        </div>
         <Field label="Earnest Amount" value={o.earnest} onChange={v=>setF('earnest',v)} mono type="number" required/>
         <Field label="Receipt No. & Date" value={o.receiptNo} onChange={v=>setF('receiptNo',v)} mono/>
         <Field label="Follow-up Date" value={o.followUp} onChange={v=>setF('followUp',v)} mono type="date" hint="Reminder at 10:00 AM"/>
