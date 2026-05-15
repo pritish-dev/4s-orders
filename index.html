@@ -1000,7 +1000,8 @@ function OrderFormScreen({ctx}) {
         <div style={{background:'#fff'}}>
           {(o.items||[]).map((it,i)=>{
             const mrpVal   = it.mrp||it.cpl||0;
-            const curPrice = it.unitPrice!==undefined ? it.unitPrice : Math.round(mrpVal*(1-(parseFloat(it.disc)||0)/100));
+            const discPct  = parseFloat(it.disc||'0')/100;
+            const curPrice = (it.unitPrice>0) ? it.unitPrice : (mrpVal>0 ? Math.round(mrpVal*(1-discPct)) : 0);
             return (
             <div key={it.code+i} style={{padding:'11px 14px',borderBottom:`1px solid ${T.line}`}}>
               <div style={{display:'flex',gap:8,alignItems:'flex-start'}}>
@@ -1035,7 +1036,7 @@ function OrderFormScreen({ctx}) {
                   </div>
                 </div>
                 <div style={{textAlign:'right',flexShrink:0}}>
-                  <div style={{fontFamily:T.mono,fontSize:15,fontWeight:700}}>₹{it.total.toLocaleString('en-IN')}</div>
+                  <div style={{fontFamily:T.mono,fontSize:15,fontWeight:700}}>₹{(curPrice*it.qty).toLocaleString('en-IN')}</div>
                   <div style={{fontSize:9,color:T.ink4,marginTop:1}}>×{it.qty} unit{it.qty>1?'s':''}</div>
                   <button onClick={()=>removeItem(i)} style={{marginTop:8,fontSize:11,color:T.bad,background:'none',border:'none',cursor:'pointer',fontWeight:600}}>REMOVE</button>
                 </div>
