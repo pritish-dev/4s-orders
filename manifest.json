@@ -2,8 +2,8 @@
   "name": "4S Interiors Orders",
   "short_name": "4S Orders",
   "description": "Order booking app for 4S Interiors sales team",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": "/4s-orders/",
+  "scope": "/4s-orders/",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#C00000",
@@ -42,14 +42,14 @@
       "name": "New Order",
       "short_name": "New Order",
       "description": "Book a new customer order",
-      "url": "/?action=new-order",
+      "url": "/4s-orders/?action=new-order",
       "icons": [{ "src": "icon.svg", "sizes": "any" }]
     },
     {
       "name": "Order History",
       "short_name": "History",
       "description": "View recent orders",
-      "url": "/?action=history",
+      "url": "/4s-orders/?action=history",
       "icons": [{ "src": "icon.svg", "sizes": "any" }]
     }
   ]

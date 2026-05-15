@@ -4,12 +4,12 @@
 // Network-first for API calls to Google Apps Script.
 // ============================================================
 
-const CACHE  = '4s-orders-v1';
+const CACHE  = '4s-orders-v3';
 const SHELL  = [
-  '/',
-  '/index.html',
-  '/manifest.json',
-  '/icon.svg',
+  '/4s-orders/',
+  '/4s-orders/index.html',
+  '/4s-orders/manifest.json',
+  '/4s-orders/icon.svg',
 ];
 
 // CDN assets we want cached for offline use
@@ -108,8 +108,8 @@ self.addEventListener('push', e => {
   e.waitUntil(
     self.registration.showNotification(data.title || '4S Orders', {
       body: data.body || '',
-      icon: '/icon.svg',
-      badge: '/icon.svg',
+      icon: '/4s-orders/icon.svg',
+      badge: '/4s-orders/icon.svg',
       vibrate: [200, 100, 200],
     })
   );
