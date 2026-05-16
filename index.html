@@ -480,21 +480,28 @@ function generatePDF(order) {
   lbl(ml+2,y+5,'(Invoice / billing details to be filled after order processing)',6.5);
   const vSp = tsRX+tsRW*0.54;
   vln(vSp,y,y+tsH);
+  // Use 'Rs.' instead of Rs symbol — jsPDF Helvetica is Latin-1 only,
+  // the Unicode rupee glyph (U+20B9) produces wrong text metrics and overflows.
+  const inr = (n) => 'Rs.' + n.toLocaleString('en-IN');
   const fRows=[
-    ['TOTAL',        '₹'+subtotal.toLocaleString('en-IN'), false],
-    ['CGST @ 9%',   '₹'+cgst.toLocaleString('en-IN'),     false],
-    ['SGST @ 9%',   '₹'+sgst.toLocaleString('en-IN'),     false],
-    ['Total Amt.',  '₹'+totalAmt.toLocaleString('en-IN'), true ],
-    ['Earnest Amt.','₹'+earnest.toLocaleString('en-IN'),  false],
-    ['Balance Amt.','₹'+balance.toLocaleString('en-IN'),  true ],
+    ['TOTAL',        inr(subtotal), false],
+    ['CGST @ 9%',   inr(cgst),     false],
+    ['SGST @ 9%',   inr(sgst),     false],
+    ['Total Amt.',  inr(totalAmt), true ],
+    ['Earnest Amt.',inr(earnest),  false],
+    ['Balance Amt.',inr(balance),  true ],
   ];
   const rs = tsH/fRows.length;
+  const valColW = tsRX+tsRW-3-vSp;          // width available for values
+  const lblColW = vSp-tsRX-4;               // width available for labels
   fRows.forEach(([l,v,bold],i)=>{
     hln(tsRX,y+rs*(i+1),tsRX+tsRW);
+    const sz  = bold ? 8.5 : 7.5;
     const clr = bold ? DRED : INK;
-    doc.setFont('helvetica',bold?'bold':'normal'); doc.setFontSize(bold?8.5:7.5); doc.setTextColor(...clr);
-    doc.text(l, tsRX+2, y+rs*i+rs*0.72);
-    rval(tsRX+tsRW-2, y+rs*i+rs*0.72, v, bold?8.5:7.5, bold, INK);
+    doc.setFont('helvetica',bold?'bold':'normal'); doc.setFontSize(sz); doc.setTextColor(...clr);
+    doc.text(fit1(l,lblColW,sz), tsRX+2, y+rs*i+rs*0.72);
+    doc.setTextColor(...INK);
+    doc.text(fit1(v,valColW,sz), tsRX+tsRW-2, y+rs*i+rs*0.72, {align:'right'});
   });
   y += tsH;
 
@@ -505,7 +512,7 @@ function generatePDF(order) {
     lbl(ml+2,y+5.5,'Receipt No. & Dt :');
     if(r===0&&order.receiptNo) val(ml+32,y+5.5, fit1(order.receiptNo,cw/2-34,7.5), 7.5);
     lbl(ml+cw/2+2,y+5.5,'Amount Received :');
-    if(r===0&&order.earnest) val(ml+cw/2+32,y+5.5, fit1('₹'+earnest.toLocaleString('en-IN'),cw/2-34,7.5), 7.5);
+    if(r===0&&order.earnest) val(ml+cw/2+32,y+5.5, fit1(inr(earnest),cw/2-34,7.5), 7.5);
     y += rcH;
   }
 
