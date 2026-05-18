@@ -1053,36 +1053,34 @@ function HomeScreen({ctx}) {
 // ─── Stock Search ────────────────────────────────────────────
 function SearchScreen({ctx}) {
   const {items, priceItems, syncedAt, nav, order, setOrder} = ctx;
-  const [q,setQ]     = useState('');
-  const [cat,setCat] = useState('All');
-  const [addMode]    = useState(!!order.items);
-  const inputRef     = useRef(null);
+  const [q,   setQ]   = useState('');
+  const [cat, setCat] = useState('All');
+  const [addMode]     = useState(!!order.items);
 
-  // Merge price list (all items) with stock data from Apps Script
+  // Merge: price list catalogue + stock levels from Apps Script
   const allItems = (() => {
     const pl = (priceItems && priceItems.length > 0) ? priceItems : (items||[]);
     const stockMap = {};
     (items||[]).forEach(it => { stockMap[it.code] = it; });
-    const merged = pl.map(pi => {
+    return pl.map(pi => {
       const si = stockMap[pi.code];
       return si ? {...pi, stock:si.stock||[], mrp:si.mrp||pi.mrp||0, cpl:si.cpl||pi.cpl||0} : pi;
     });
-    const priceSet = new Set(pl.map(p => p.code));
-    (items||[]).filter(i => !priceSet.has(i.code)).forEach(i => merged.push(i));
-    return merged;
   })();
 
-  const cats = ['All',...Array.from(new Set(allItems.map(i=>i.cat).filter(Boolean)))];
-  const {results:filtered, mode:searchMode} = fuzzySearch(allItems, q, cat);
+  // Build category chips from actual item data
+  const cats = ['All', ...Array.from(new Set(allItems.map(i => i.cat).filter(Boolean)))];
 
-  // Native input listener — reliable on all mobile browsers
-  useEffect(() => {
-    const el = inputRef.current;
-    if (!el) return;
-    const handler = e => setQ(e.target.value);
-    el.addEventListener('input', handler);
-    return () => el.removeEventListener('input', handler);
-  }, []);
+  // Step 1 — category filter (case-insensitive)
+  const bycat = cat === 'All'
+    ? allItems
+    : allItems.filter(i => (i.cat||'').toLowerCase() === cat.toLowerCase());
+
+  // Step 2 — fuzzy search on top of category-filtered list
+  const {results: filtered, mode: searchMode} = fuzzySearch(bycat, q, 'All');
+
+  // Controlled input handler — works on all browsers including mobile
+  function handleInput(e) { setQ(e.target.value); }
 
   function addToOrder(item) {
     const disc      = order.discountCode||'0%';
@@ -1107,48 +1105,63 @@ function SearchScreen({ctx}) {
     ctx.showToast(totalStock===0?item.name.slice(0,22)+'… added (OOS)':item.name.slice(0,30)+'… added', totalStock===0?'warn':'ok');
   }
 
-  const totalSKUs = allItems.length || items.length;
-
   return (
     <div className="screen">
       <div style={{flexShrink:0}}>
         <StockRibbon syncedAt={syncedAt}/>
         <div style={{padding:'14px 18px 8px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
           <div>
-            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>PRICE LIST · {totalSKUs} SKUs</div>
+            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>PRICE LIST · {allItems.length} SKUs</div>
             <div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2}}>{addMode&&order.customer?'Add item':'Search items'}</div>
           </div>
           {addMode&&order.customer&&<Btn size="sm" onClick={()=>nav('order')} icon={Icon.back()}>Order</Btn>}
         </div>
+
+        {/* Search input — controlled so React always drives the value */}
         <div style={{padding:'0 18px 10px'}}>
           <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',background:'#fff',border:`1.5px solid ${T.green}`,borderRadius:8,boxShadow:`0 0 0 4px ${T.greenSoft}`}}>
             {Icon.search(T.ink3)}
-            <input ref={inputRef} defaultValue="" placeholder="Search by name, code or category…" style={{flex:1,border:'none',outline:'none',fontSize:15,color:T.ink,background:'transparent'}}/>
-            {q&&<span onClick={()=>{setQ('');if(inputRef.current)inputRef.current.value='';}} style={{cursor:'pointer'}}>{Icon.close(T.ink4)}</span>}
+            <input
+              value={q}
+              onChange={handleInput}
+              onInput={handleInput}
+              placeholder="Search by name, code or category…"
+              style={{flex:1,border:'none',outline:'none',fontSize:15,color:T.ink,background:'transparent'}}
+            />
+            {q&&<span onClick={()=>setQ('')} style={{cursor:'pointer',lineHeight:1,padding:'0 2px'}}>{Icon.close(T.ink4)}</span>}
+            {q&&<span style={{fontFamily:T.mono,fontSize:11,color:T.ink4,flexShrink:0}}>{filtered.length}</span>}
           </div>
         </div>
+
+        {/* Category chips */}
         <div style={{padding:'0 18px 10px',display:'flex',gap:6,overflowX:'auto'}}>
-          {cats.map(c=><span key={c} onClick={()=>setCat(c)} style={{padding:'5px 11px',borderRadius:99,background:c===cat?T.ink:'#fff',color:c===cat?'#fff':T.ink2,border:`1px solid ${c===cat?T.ink:T.line}`,fontSize:12,fontWeight:600,whiteSpace:'nowrap',cursor:'pointer',flexShrink:0}}>{c}</span>)}
+          {cats.map(c=>(
+            <span key={c} onClick={()=>setCat(c)} style={{
+              padding:'5px 11px', borderRadius:99, whiteSpace:'nowrap', cursor:'pointer', flexShrink:0,
+              background:c===cat?T.ink:'#fff', color:c===cat?'#fff':T.ink2,
+              border:`1px solid ${c===cat?T.ink:T.line}`, fontSize:12, fontWeight:600,
+            }}>{c}</span>
+          ))}
         </div>
       </div>
-      <div className="scroll" style={{background:'#fff',borderTop:`1px solid ${T.line}`}}>
 
-        {/* Near-match banner */}
+      <div className="scroll" style={{background:'#fff',borderTop:`1px solid ${T.line}`}}>
+        {/* Match-quality banners */}
         {q&&searchMode==='near'&&filtered.length>0&&(
-          <div style={{padding:'8px 18px',background:T.warnSoft,borderBottom:`1px solid #e6cc95`,display:'flex',alignItems:'center',gap:8}}>
+          <div style={{padding:'8px 18px',background:T.warnSoft,borderBottom:`1px solid #e6cc95`}}>
             <span style={{fontSize:12,color:T.warn,fontWeight:600}}>Nearest matches for "{q}"</span>
           </div>
         )}
         {q&&searchMode==='far'&&filtered.length>0&&(
-          <div style={{padding:'8px 18px',background:T.badSoft,borderBottom:`1px solid #e2b8b0`,display:'flex',alignItems:'center',gap:8}}>
+          <div style={{padding:'8px 18px',background:T.badSoft,borderBottom:`1px solid #e2b8b0`}}>
             <span style={{fontSize:12,color:T.bad,fontWeight:600}}>No exact match — showing closest results</span>
           </div>
         )}
 
         {filtered.map(it=>{
-          const total = (it.stock||[]).reduce((s,x)=>s+x.q,0);
-          const oos   = total===0;
-          const mrp   = it.mrp||it.cpl||0;
+          const stockTotal = (it.stock||[]).reduce((s,x)=>s+x.q,0);
+          const oos = stockTotal===0;
+          const mrp = it.mrp||it.cpl||0;
           return (
             <div key={it.code} style={{padding:'12px 18px',borderBottom:`1px solid ${T.line}`}}>
               <div style={{display:'flex',gap:10}}>
@@ -1183,14 +1196,16 @@ function SearchScreen({ctx}) {
         })}
 
         {/* Empty states */}
-        {filtered.length===0&&searchMode==='none'&&q&&(
+        {filtered.length===0&&q&&searchMode==='none'&&(
           <div style={{padding:40,textAlign:'center'}}>
             <div style={{fontSize:15,fontWeight:700,color:T.bad,marginBottom:8}}>Item not found in Price list</div>
-            <div style={{fontSize:13,color:T.ink4,lineHeight:1.5}}>"{q}" does not match any item<br/>in the Price list or Price list Mattress catalogue.</div>
+            <div style={{fontSize:13,color:T.ink4,lineHeight:1.6}}>"{q}" does not match any item in the {cat!=='All'?cat+' ':''}catalogue.</div>
           </div>
         )}
         {filtered.length===0&&!q&&(
-          <div style={{padding:32,textAlign:'center',fontSize:13,color:T.ink4}}>No items found.</div>
+          <div style={{padding:32,textAlign:'center',fontSize:13,color:T.ink4}}>
+            {allItems.length===0?'Syncing price list…':'No items in this category.'}
+          </div>
         )}
         <div style={{height:8}}/>
       </div>
