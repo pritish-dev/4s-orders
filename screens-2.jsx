@@ -104,6 +104,7 @@ function OrderFormScreen() {
   const [items, setItems] = React.useState(o.items);
   const [showSearch, setShowSearch] = React.useState(false);
   const [query, setQuery] = React.useState('');
+  const inputRef = React.useRef(null);
 
   const subtotal = items.reduce((s, i) => s + i.total, 0);
   const cgst = Math.round(subtotal * 0.09);
@@ -115,6 +116,17 @@ function OrderFormScreen() {
     it.code.toLowerCase().includes(query.toLowerCase()) ||
     it.cat.toLowerCase().includes(query.toLowerCase())
   );
+
+  // Native event listener — more reliable than React onChange on mobile browsers
+  React.useEffect(() => {
+    if (!showSearch) return;
+    const el = inputRef.current;
+    if (!el) return;
+    const handler = (e) => setQuery(e.target.value);
+    el.addEventListener('input', handler);
+    setTimeout(() => el.focus(), 150);
+    return () => el.removeEventListener('input', handler);
+  }, [showSearch]);
 
   function addItem(it) {
     setItems(prev => [...prev, {
@@ -188,9 +200,8 @@ function OrderFormScreen() {
           }}>
             {Icon.search(18)}
             <input
-              autoFocus
-              value={query}
-              onChange={e => setQuery(e.target.value)}
+              ref={inputRef}
+              defaultValue=""
               placeholder="Search by name, code or category…"
               style={{
                 border: 'none', outline: 'none', background: 'transparent',
@@ -199,7 +210,10 @@ function OrderFormScreen() {
             />
             {query.length > 0 && (
               <span
-                onClick={() => setQuery('')}
+                onClick={() => {
+                  setQuery('');
+                  if (inputRef.current) inputRef.current.value = '';
+                }}
                 style={{ cursor: 'pointer', fontSize: 14, color: T.ink4, lineHeight: 1 }}
               >✕</span>
             )}
