@@ -28,6 +28,23 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 
+<!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
+<script>
+(function(){
+  var V = '6';
+  if (localStorage.getItem('4s_code_v') !== V) {
+    localStorage.setItem('4s_code_v', V);
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function(regs){
+        return Promise.all(regs.map(function(r){ return r.unregister(); }));
+      }).then(function(){ location.reload(true); });
+    } else {
+      location.reload(true);
+    }
+  }
+})();
+</script>
+
 <!-- CDN dependencies -->
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
