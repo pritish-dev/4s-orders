@@ -166,9 +166,9 @@ function _pick(row, ...keys) {
 }
 
 async function loadPriceListItems() {
-  const CACHE_KEY = '4s_price_items_v3';
-  const CACHE_TS  = '4s_price_items_v3_ts';
-  const AGE_MS    = 6 * 60 * 60 * 1000; // 6 hours
+  const CACHE_KEY = '4s_price_items_v4';
+  const CACHE_TS  = '4s_price_items_v4_ts';
+  const AGE_MS    = 6 * 60 * 60 * 1000;
   const cached    = localStorage.getItem(CACHE_KEY);
   const cachedAt  = localStorage.getItem(CACHE_TS);
   if (cached && cachedAt && Date.now() - Number(cachedAt) < AGE_MS) {
@@ -181,49 +181,56 @@ async function loadPriceListItems() {
     );
   }
 
+  // Paginate in batches of 2000 to get all rows (gviz/tq truncates large sheets)
+  async function fetchAllRows(sheetName) {
+    const base = `https://docs.google.com/spreadsheets/d/${PRICE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`;
+    const BATCH = 2000;
+    const allRows = [];
+    let offset = 0;
+    while (true) {
+      const tq = encodeURIComponent(`select * offset ${offset} limit ${BATCH}`);
+      const res = await fetch(`${base}&tq=${tq}`);
+      if (!res.ok) break;
+      const rows = parseLines(await res.text());
+      const data = rows.slice(1); // first row is always header in gviz CSV
+      if (data.length === 0) break;
+      allRows.push(...data);
+      if (data.length < BATCH) break;
+      offset += BATCH;
+    }
+    return allRows;
+  }
+
   const all = [];
 
-  // ── Price_list (furniture) ──────────────────────────────────────────
-  // Row 0: one giant merged cell (malformed header) — skip it
-  // Col: 0=Category  1=SubCategory  2=ItemCode  3=Name  4=CPL  5=GST  6=MRP
+  // Price_list (furniture) — col: 0=Category 1=SubCategory 2=Code 3=Description 4=CPL 5=GST 6=MRP
   try {
-    const res = await fetch(
-      `https://docs.google.com/spreadsheets/d/${PRICE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Price_list`
-    );
-    if (res.ok) {
-      parseLines(await res.text()).slice(1).forEach(v => {
-        const cat    = v[0] || 'Furniture';
-        const subcat = (v[1] || '').trim();
-        const code   = (v[2] || '').toUpperCase();
-        const desc   = (v[3] || '').trim();
-        // Combine sub-category + description so series names like "Osiris" are searchable
-        const name   = subcat && desc ? `${subcat} ${desc}` : (desc || subcat);
-        const cpl    = parseFloat((v[4]||'').replace(/[^\d.]/g,'')) || 0;
-        const mrp    = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || cpl;
-        if (!code && !name) return;
-        all.push({ code, name, cat, subcat, mrp, cpl, stock:[] });
-      });
-    }
+    const rows = await fetchAllRows('Price_list');
+    rows.forEach(v => {
+      const cat    = v[0] || 'Furniture';
+      const subcat = (v[1] || '').trim();
+      const code   = (v[2] || '').toUpperCase();
+      const desc   = (v[3] || '').trim();
+      const name   = subcat && desc ? `${subcat} ${desc}` : (desc || subcat);
+      const cpl    = parseFloat((v[4]||'').replace(/[^\d.]/g,'')) || 0;
+      const mrp    = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || cpl;
+      if (!code && !name) return;
+      all.push({ code, name, cat, subcat, mrp, cpl, stock:[], sheet:'furniture' });
+    });
   } catch(e) { console.warn('Price_list fetch failed:', e.message); }
 
-  // ── Price_List_Mattress ─────────────────────────────────────────────
-  // Row 0: proper header row — skip it
-  // Col: 0=CATEGORY  1=ITEM  2=ITEM CODE  3=ITEM DESCRIPTION  4=THICKNESS(IN)  5=THICKNESS(CM)  6=CPL  7=GST  8=PRICE(MRP)
+  // Price_List_Mattress — col: 0=Category 2=Code 3=Description 6=CPL 8=MRP
   try {
-    const res = await fetch(
-      `https://docs.google.com/spreadsheets/d/${PRICE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Price_List_Mattress`
-    );
-    if (res.ok) {
-      parseLines(await res.text()).slice(1).forEach(v => {
-        const cat  = v[0] || 'Mattress';
-        const code = (v[2] || '').toUpperCase();
-        const name = v[3] || '';
-        const cpl  = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || 0;
-        const mrp  = parseFloat((v[8]||'').replace(/[^\d.]/g,'')) || cpl;
-        if (!code && !name) return;
-        all.push({ code, name, cat, mrp, cpl, stock:[] });
-      });
-    }
+    const rows = await fetchAllRows('Price_List_Mattress');
+    rows.forEach(v => {
+      const cat  = v[0] || 'Mattress';
+      const code = (v[2] || '').toUpperCase();
+      const name = v[3] || '';
+      const cpl  = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || 0;
+      const mrp  = parseFloat((v[8]||'').replace(/[^\d.]/g,'')) || cpl;
+      if (!code && !name) return;
+      all.push({ code, name, cat, mrp, cpl, stock:[], sheet:'mattress' });
+    });
   } catch(e) { console.warn('Price_List_Mattress fetch failed:', e.message); }
 
   if (all.length > 0) {
@@ -768,7 +775,7 @@ function App() {
     if (!user) return;
     const cached = localStorage.getItem('4s_items');
     if (cached) try { setItems(JSON.parse(cached)); } catch {}
-    const cachedPL = localStorage.getItem('4s_price_items_v3');
+    const cachedPL = localStorage.getItem('4s_price_items_v4');
     if (cachedPL) try { setPriceItems(JSON.parse(cachedPL)); } catch {}
     syncStock();
     loadPriceListItems().then(pi => { if (pi.length > 0) setPriceItems(pi); }).catch(()=>{});
@@ -1057,7 +1064,7 @@ function HomeScreen({ctx}) {
 function SearchScreen({ctx}) {
   const {items, priceItems, syncedAt, nav, order, setOrder} = ctx;
   const [q,   setQ]   = useState('');
-  const [cat, setCat] = useState('All');
+  const [cat, setCat] = useState('all');
   const [addMode]     = useState(!!order.items);
 
   // Merge: price list catalogue + stock levels from Apps Script
@@ -1071,15 +1078,18 @@ function SearchScreen({ctx}) {
     });
   })();
 
-  // Build category chips from actual item data
-  const cats = ['All', ...Array.from(new Set(allItems.map(i => i.cat).filter(Boolean)))];
+  // Fixed two-category filter by sheet source
+  const CATS = [
+    { key:'all',       label:'All' },
+    { key:'furniture', label:'Home Storage & Furniture' },
+    { key:'mattress',  label:'Mattress' },
+  ];
 
-  // Step 1 — category filter (case-insensitive)
-  const bycat = cat === 'All'
+  const bycat = cat === 'all'
     ? allItems
-    : allItems.filter(i => (i.cat||'').toLowerCase() === cat.toLowerCase());
+    : allItems.filter(i => i.sheet === cat);
 
-  // Step 2 — fuzzy search on top of category-filtered list
+  // Fuzzy search on top of category-filtered list
   const {results: filtered, mode: searchMode} = fuzzySearch(bycat, q, 'All');
 
   // Controlled input handler — works on all browsers including mobile
@@ -1136,14 +1146,14 @@ function SearchScreen({ctx}) {
           </div>
         </div>
 
-        {/* Category chips */}
+        {/* Category chips — All / Home Storage & Furniture / Mattress */}
         <div style={{padding:'0 18px 10px',display:'flex',gap:6,overflowX:'auto'}}>
-          {cats.map(c=>(
-            <span key={c} onClick={()=>setCat(c)} style={{
-              padding:'5px 11px', borderRadius:99, whiteSpace:'nowrap', cursor:'pointer', flexShrink:0,
-              background:c===cat?T.ink:'#fff', color:c===cat?'#fff':T.ink2,
-              border:`1px solid ${c===cat?T.ink:T.line}`, fontSize:12, fontWeight:600,
-            }}>{c}</span>
+          {CATS.map(c=>(
+            <span key={c.key} onClick={()=>setCat(c.key)} style={{
+              padding:'5px 13px', borderRadius:99, whiteSpace:'nowrap', cursor:'pointer', flexShrink:0,
+              background:c.key===cat?T.ink:'#fff', color:c.key===cat?'#fff':T.ink2,
+              border:`1px solid ${c.key===cat?T.ink:T.line}`, fontSize:12, fontWeight:600,
+            }}>{c.label}</span>
           ))}
         </div>
       </div>
