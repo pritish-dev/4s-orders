@@ -4,7 +4,7 @@
 // Network-first for API calls to Google Apps Script.
 // ============================================================
 
-const CACHE  = '4s-orders-v4';
+const CACHE  = '4s-orders-v5';
 const SHELL  = [
   '/4s-orders/',
   '/4s-orders/index.html',
@@ -83,16 +83,13 @@ self.addEventListener('fetch', e => {
     return;
   }
 
-  // 4. App shell (HTML, manifest, icons) → cache-first, update in background
+  // 4. App shell (HTML, manifest, icons) → network-first so code updates deploy immediately
   if (url.includes(self.location.origin)) {
     e.respondWith(
-      caches.match(e.request).then(hit => {
-        const fetchPromise = fetch(e.request).then(resp => {
-          caches.open(CACHE).then(c => c.put(e.request, resp.clone()));
-          return resp;
-        });
-        return hit || fetchPromise;
-      })
+      fetch(e.request).then(resp => {
+        caches.open(CACHE).then(c => c.put(e.request, resp.clone()));
+        return resp;
+      }).catch(() => caches.match(e.request))
     );
     return;
   }

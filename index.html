@@ -166,8 +166,8 @@ function _pick(row, ...keys) {
 }
 
 async function loadPriceListItems() {
-  const CACHE_KEY = '4s_price_items_v4';
-  const CACHE_TS  = '4s_price_items_v4_ts';
+  const CACHE_KEY = '4s_price_items_v5';
+  const CACHE_TS  = '4s_price_items_v5_ts';
   const AGE_MS    = 6 * 60 * 60 * 1000;
   const cached    = localStorage.getItem(CACHE_KEY);
   const cachedAt  = localStorage.getItem(CACHE_TS);
@@ -203,19 +203,21 @@ async function loadPriceListItems() {
 
   const all = [];
 
-  // Price_list (furniture) — col: 0=Category 1=SubCategory 2=Code 3=Description 4=CPL 5=GST 6=MRP
+  // Price_list (furniture) — col: 0=Category/Series 1=SubCategory 2=Code 3=Description 4=CPL 5=GST 6=MRP
   try {
     const rows = await fetchAllRows('Price_list');
     rows.forEach(v => {
-      const cat    = v[0] || 'Furniture';
+      const cat    = (v[0] || 'Furniture').trim();
       const subcat = (v[1] || '').trim();
       const code   = (v[2] || '').toUpperCase();
       const desc   = (v[3] || '').trim();
-      const name   = subcat && desc ? `${subcat} ${desc}` : (desc || subcat);
-      const cpl    = parseFloat((v[4]||'').replace(/[^\d.]/g,'')) || 0;
-      const mrp    = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || cpl;
-      if (!code && !name) return;
-      all.push({ code, name, cat, subcat, mrp, cpl, stock:[], sheet:'furniture' });
+      if (!code && !desc) return;
+      const cpl  = parseFloat((v[4]||'').replace(/[^\d.]/g,'')) || 0;
+      const mrp  = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || cpl;
+      // name = display text (just description); searchName = full text for matching
+      const name       = desc || subcat || cat;
+      const searchName = [cat, subcat, desc].filter(Boolean).join(' ');
+      all.push({ code, name, searchName, cat, subcat, mrp, cpl, stock:[], sheet:'furniture' });
     });
   } catch(e) { console.warn('Price_list fetch failed:', e.message); }
 
@@ -223,13 +225,15 @@ async function loadPriceListItems() {
   try {
     const rows = await fetchAllRows('Price_List_Mattress');
     rows.forEach(v => {
-      const cat  = v[0] || 'Mattress';
+      const cat  = (v[0] || 'Mattress').trim();
       const code = (v[2] || '').toUpperCase();
-      const name = v[3] || '';
+      const desc = (v[3] || '').trim();
+      if (!code && !desc) return;
       const cpl  = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || 0;
       const mrp  = parseFloat((v[8]||'').replace(/[^\d.]/g,'')) || cpl;
-      if (!code && !name) return;
-      all.push({ code, name, cat, mrp, cpl, stock:[], sheet:'mattress' });
+      const name       = desc || cat;
+      const searchName = [cat, desc].filter(Boolean).join(' ');
+      all.push({ code, name, searchName, cat, mrp, cpl, stock:[], sheet:'mattress' });
     });
   } catch(e) { console.warn('Price_List_Mattress fetch failed:', e.message); }
 
@@ -249,20 +253,20 @@ function fuzzySearch(allItems, query, cat) {
   const words = q.split(/\s+/).filter(w => w.length > 0);
 
   function score(it) {
-    const nm = (it.name||'').toLowerCase();
+    // Use searchName (cat+subcat+desc) for matching, so series names like "Osiris" are found
+    const nm = (it.searchName || it.name || '').toLowerCase();
     const cd = (it.code||'').toLowerCase();
-    const ct = (it.cat ||'').toLowerCase();
-    // Exact substring match in name or code
+    // Exact substring match
     if (nm.includes(q) || cd.includes(q)) return 100;
-    // All words found in name/code
+    // All query words found
     if (words.length > 1 && words.every(w => nm.includes(w) || cd.includes(w))) return 90;
-    // Some words found (only count words length >= 3 to avoid single-letter noise)
-    const hit = words.filter(w => w.length >= 3 && (nm.includes(w) || cd.includes(w) || ct.includes(w)));
+    // Some query words found (min 3 chars to avoid noise)
+    const hit = words.filter(w => w.length >= 3 && (nm.includes(w) || cd.includes(w)));
     if (hit.length > 0) return Math.round(70 * hit.length / words.length);
-    // Word prefix match (require word length >= 3)
+    // Word prefix match (min 3 chars)
     const nmWords = nm.split(/[\s,\/\-]+/);
     if (words.some(w => w.length >= 3 && nmWords.some(nw => nw.startsWith(w)))) return 30;
-    // Code prefix match (require >= 5 chars to avoid noise)
+    // Code prefix match (min 5 chars)
     if (q.length >= 5 && cd.startsWith(q.slice(0,5))) return 25;
     return 0;
   }
@@ -775,7 +779,7 @@ function App() {
     if (!user) return;
     const cached = localStorage.getItem('4s_items');
     if (cached) try { setItems(JSON.parse(cached)); } catch {}
-    const cachedPL = localStorage.getItem('4s_price_items_v4');
+    const cachedPL = localStorage.getItem('4s_price_items_v5');
     if (cachedPL) try { setPriceItems(JSON.parse(cachedPL)); } catch {}
     syncStock();
     loadPriceListItems().then(pi => { if (pi.length > 0) setPriceItems(pi); }).catch(()=>{});
