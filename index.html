@@ -166,36 +166,66 @@ function _pick(row, ...keys) {
 }
 
 async function loadPriceListItems() {
-  const cached = localStorage.getItem('4s_price_items');
-  const cachedAt = localStorage.getItem('4s_price_items_ts');
-  const AGE_MS = 6 * 60 * 60 * 1000; // 6 hours
+  const CACHE_KEY = '4s_price_items_v2';
+  const CACHE_TS  = '4s_price_items_v2_ts';
+  const AGE_MS    = 6 * 60 * 60 * 1000; // 6 hours
+  const cached    = localStorage.getItem(CACHE_KEY);
+  const cachedAt  = localStorage.getItem(CACHE_TS);
   if (cached && cachedAt && Date.now() - Number(cachedAt) < AGE_MS) {
     try { return JSON.parse(cached); } catch {}
   }
-  const all = [];
-  for (const sheet of PRICE_SHEETS) {
-    try {
-      const url = `https://docs.google.com/spreadsheets/d/${PRICE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheet)}`;
-      const res = await fetch(url);
-      if (!res.ok) continue;
-      const rows = _parseCSV(await res.text());
-      const isMattress = sheet.toLowerCase().includes('mattress');
-      rows.forEach(row => {
-        const code = _pick(row,'article no','article no.','articleno','code','item code','sku','product code','article');
-        const name = _pick(row,'product description','description','name','product name','item description','item name','product');
-        const mrpRaw = _pick(row,'mrp','cpl','price','rate','unit price','list price');
-        const cplRaw = _pick(row,'cpl','mrp','price','rate');
-        const mrp = parseFloat(mrpRaw.replace(/[^\d.]/g,''))||0;
-        const cpl = parseFloat(cplRaw.replace(/[^\d.]/g,''))||0;
-        const cat = isMattress ? 'Mattress' : (_pick(row,'category','cat','product type','type','group')||'Furniture');
-        if (!code && !name) return;
-        all.push({ code:(code||'').toUpperCase(), name, cat, mrp:mrp||cpl, cpl:cpl||mrp, stock:[] });
-      });
-    } catch(e) { console.warn('Price list fetch failed:', sheet, e.message); }
+
+  function parseLines(text) {
+    return text.split(/\r?\n/).filter(l => l.trim()).map(
+      line => _parseCSVRow(line).map(s => s.replace(/^"|"$/g,'').trim())
+    );
   }
+
+  const all = [];
+
+  // ── Price_list (furniture) ──────────────────────────────────────────
+  // Row 0: one giant merged cell (malformed header) — skip it
+  // Col: 0=Category  1=SubCategory  2=ItemCode  3=Name  4=CPL  5=GST  6=MRP
+  try {
+    const res = await fetch(
+      `https://docs.google.com/spreadsheets/d/${PRICE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Price_list`
+    );
+    if (res.ok) {
+      parseLines(await res.text()).slice(1).forEach(v => {
+        const cat  = v[0] || 'Furniture';
+        const code = (v[2] || '').toUpperCase();
+        const name = v[3] || '';
+        const cpl  = parseFloat((v[4]||'').replace(/[^\d.]/g,'')) || 0;
+        const mrp  = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || cpl;
+        if (!code && !name) return;
+        all.push({ code, name, cat, mrp, cpl, stock:[] });
+      });
+    }
+  } catch(e) { console.warn('Price_list fetch failed:', e.message); }
+
+  // ── Price_List_Mattress ─────────────────────────────────────────────
+  // Row 0: proper header row — skip it
+  // Col: 0=CATEGORY  1=ITEM  2=ITEM CODE  3=ITEM DESCRIPTION  4=THICKNESS(IN)  5=THICKNESS(CM)  6=CPL  7=GST  8=PRICE(MRP)
+  try {
+    const res = await fetch(
+      `https://docs.google.com/spreadsheets/d/${PRICE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Price_List_Mattress`
+    );
+    if (res.ok) {
+      parseLines(await res.text()).slice(1).forEach(v => {
+        const cat  = v[0] || 'Mattress';
+        const code = (v[2] || '').toUpperCase();
+        const name = v[3] || '';
+        const cpl  = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || 0;
+        const mrp  = parseFloat((v[8]||'').replace(/[^\d.]/g,'')) || cpl;
+        if (!code && !name) return;
+        all.push({ code, name, cat, mrp, cpl, stock:[] });
+      });
+    }
+  } catch(e) { console.warn('Price_List_Mattress fetch failed:', e.message); }
+
   if (all.length > 0) {
-    localStorage.setItem('4s_price_items', JSON.stringify(all));
-    localStorage.setItem('4s_price_items_ts', String(Date.now()));
+    localStorage.setItem(CACHE_KEY, JSON.stringify(all));
+    localStorage.setItem(CACHE_TS,  String(Date.now()));
   }
   return all;
 }
@@ -735,7 +765,7 @@ function App() {
     if (!user) return;
     const cached = localStorage.getItem('4s_items');
     if (cached) try { setItems(JSON.parse(cached)); } catch {}
-    const cachedPL = localStorage.getItem('4s_price_items');
+    const cachedPL = localStorage.getItem('4s_price_items_v2');
     if (cachedPL) try { setPriceItems(JSON.parse(cachedPL)); } catch {}
     syncStock();
     loadPriceListItems().then(pi => { if (pi.length > 0) setPriceItems(pi); }).catch(()=>{});
