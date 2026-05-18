@@ -4,7 +4,7 @@
 // Network-first for API calls to Google Apps Script.
 // ============================================================
 
-const CACHE  = '4s-orders-v5';
+const CACHE  = '4s-orders-v6';
 const SHELL  = [
   '/4s-orders/',
   '/4s-orders/index.html',
@@ -37,9 +37,15 @@ self.addEventListener('install', e => {
 // ── Activate ─────────────────────────────────────────────────
 self.addEventListener('activate', e => {
   e.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-    ).then(() => self.clients.claim())
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
+      .then(() => {
+        // Force all open tabs to reload so they immediately get the new JS
+        return self.clients.matchAll({ type: 'window' }).then(clients =>
+          clients.forEach(c => c.navigate(c.url))
+        );
+      })
   );
 });
 

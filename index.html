@@ -166,8 +166,8 @@ function _pick(row, ...keys) {
 }
 
 async function loadPriceListItems() {
-  const CACHE_KEY = '4s_price_items_v5';
-  const CACHE_TS  = '4s_price_items_v5_ts';
+  const CACHE_KEY = '4s_price_items_v6';
+  const CACHE_TS  = '4s_price_items_v6_ts';
   const AGE_MS    = 6 * 60 * 60 * 1000;
   const cached    = localStorage.getItem(CACHE_KEY);
   const cachedAt  = localStorage.getItem(CACHE_TS);
@@ -181,61 +181,50 @@ async function loadPriceListItems() {
     );
   }
 
-  // Paginate in batches of 2000 to get all rows (gviz/tq truncates large sheets)
-  async function fetchAllRows(sheetName) {
-    const base = `https://docs.google.com/spreadsheets/d/${PRICE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`;
-    const BATCH = 2000;
-    const allRows = [];
-    let offset = 0;
-    while (true) {
-      const tq = encodeURIComponent(`select * offset ${offset} limit ${BATCH}`);
-      const res = await fetch(`${base}&tq=${tq}`);
-      if (!res.ok) break;
-      const rows = parseLines(await res.text());
-      const data = rows.slice(1); // first row is always header in gviz CSV
-      if (data.length === 0) break;
-      allRows.push(...data);
-      if (data.length < BATCH) break;
-      offset += BATCH;
-    }
-    return allRows;
-  }
+  const base = `https://docs.google.com/spreadsheets/d/${PRICE_SHEET_ID}/gviz/tq?tqx=out:csv`;
+
+  // Fetch both sheets in parallel — single request each, no pagination loops
+  const [r1, r2] = await Promise.allSettled([
+    fetch(`${base}&sheet=Price_list`),
+    fetch(`${base}&sheet=Price_List_Mattress`),
+  ]);
 
   const all = [];
 
   // Price_list (furniture) — col: 0=Category/Series 1=SubCategory 2=Code 3=Description 4=CPL 5=GST 6=MRP
-  try {
-    const rows = await fetchAllRows('Price_list');
-    rows.forEach(v => {
-      const cat    = (v[0] || 'Furniture').trim();
-      const subcat = (v[1] || '').trim();
-      const code   = (v[2] || '').toUpperCase();
-      const desc   = (v[3] || '').trim();
-      if (!code && !desc) return;
-      const cpl  = parseFloat((v[4]||'').replace(/[^\d.]/g,'')) || 0;
-      const mrp  = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || cpl;
-      // name = display text (just description); searchName = full text for matching
-      const name       = desc || subcat || cat;
-      const searchName = [cat, subcat, desc].filter(Boolean).join(' ');
-      all.push({ code, name, searchName, cat, subcat, mrp, cpl, stock:[], sheet:'furniture' });
-    });
-  } catch(e) { console.warn('Price_list fetch failed:', e.message); }
+  if (r1.status === 'fulfilled' && r1.value.ok) {
+    try {
+      parseLines(await r1.value.text()).slice(1).forEach(v => {
+        const cat    = (v[0] || 'Furniture').trim();
+        const subcat = (v[1] || '').trim();
+        const code   = (v[2] || '').toUpperCase();
+        const desc   = (v[3] || '').trim();
+        if (!code && !desc) return;
+        const cpl  = parseFloat((v[4]||'').replace(/[^\d.]/g,'')) || 0;
+        const mrp  = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || cpl;
+        const name       = desc || subcat || cat;
+        const searchName = [cat, subcat, desc].filter(Boolean).join(' ');
+        all.push({ code, name, searchName, cat, subcat, mrp, cpl, stock:[], sheet:'furniture' });
+      });
+    } catch(e) { console.warn('Price_list parse failed:', e); }
+  }
 
   // Price_List_Mattress — col: 0=Category 2=Code 3=Description 6=CPL 8=MRP
-  try {
-    const rows = await fetchAllRows('Price_List_Mattress');
-    rows.forEach(v => {
-      const cat  = (v[0] || 'Mattress').trim();
-      const code = (v[2] || '').toUpperCase();
-      const desc = (v[3] || '').trim();
-      if (!code && !desc) return;
-      const cpl  = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || 0;
-      const mrp  = parseFloat((v[8]||'').replace(/[^\d.]/g,'')) || cpl;
-      const name       = desc || cat;
-      const searchName = [cat, desc].filter(Boolean).join(' ');
-      all.push({ code, name, searchName, cat, mrp, cpl, stock:[], sheet:'mattress' });
-    });
-  } catch(e) { console.warn('Price_List_Mattress fetch failed:', e.message); }
+  if (r2.status === 'fulfilled' && r2.value.ok) {
+    try {
+      parseLines(await r2.value.text()).slice(1).forEach(v => {
+        const cat  = (v[0] || 'Mattress').trim();
+        const code = (v[2] || '').toUpperCase();
+        const desc = (v[3] || '').trim();
+        if (!code && !desc) return;
+        const cpl  = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || 0;
+        const mrp  = parseFloat((v[8]||'').replace(/[^\d.]/g,'')) || cpl;
+        const name       = desc || cat;
+        const searchName = [cat, desc].filter(Boolean).join(' ');
+        all.push({ code, name, searchName, cat, mrp, cpl, stock:[], sheet:'mattress' });
+      });
+    } catch(e) { console.warn('Price_List_Mattress parse failed:', e); }
+  }
 
   if (all.length > 0) {
     localStorage.setItem(CACHE_KEY, JSON.stringify(all));
@@ -779,7 +768,7 @@ function App() {
     if (!user) return;
     const cached = localStorage.getItem('4s_items');
     if (cached) try { setItems(JSON.parse(cached)); } catch {}
-    const cachedPL = localStorage.getItem('4s_price_items_v5');
+    const cachedPL = localStorage.getItem('4s_price_items_v6');
     if (cachedPL) try { setPriceItems(JSON.parse(cachedPL)); } catch {}
     syncStock();
     loadPriceListItems().then(pi => { if (pi.length > 0) setPriceItems(pi); }).catch(()=>{});
