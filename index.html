@@ -231,7 +231,7 @@ async function loadPriceListItems() {
 }
 
 // Fuzzy search — returns {results, mode}
-// mode: 'all' | 'exact' | 'near' (partial match) | 'far' (character match) | 'none'
+// mode: 'all' | 'exact' | 'near' (word/prefix match) | 'none'
 function fuzzySearch(allItems, query, cat) {
   const base = cat === 'All' ? allItems : allItems.filter(i => i.cat === cat);
   if (!query.trim()) return { results: base, mode: 'all' };
@@ -242,26 +242,26 @@ function fuzzySearch(allItems, query, cat) {
     const nm = (it.name||'').toLowerCase();
     const cd = (it.code||'').toLowerCase();
     const ct = (it.cat ||'').toLowerCase();
+    // Exact substring match in name or code
     if (nm.includes(q) || cd.includes(q)) return 100;
+    // All words found in name/code
     if (words.length > 1 && words.every(w => nm.includes(w) || cd.includes(w))) return 90;
-    const hit = words.filter(w => nm.includes(w) || cd.includes(w) || ct.includes(w));
+    // Some words found (only count words length >= 3 to avoid single-letter noise)
+    const hit = words.filter(w => w.length >= 3 && (nm.includes(w) || cd.includes(w) || ct.includes(w)));
     if (hit.length > 0) return Math.round(70 * hit.length / words.length);
+    // Word prefix match (require word length >= 3)
     const nmWords = nm.split(/[\s,\/\-]+/);
-    if (words.some(w => w.length >= 2 && nmWords.some(nw => nw.startsWith(w)))) return 30;
-    if (cd.startsWith(q.slice(0,5))) return 25;
-    let ovl = 0;
-    const nmSet = new Set(nm);
-    for (const ch of q) if (ch !== ' ' && nmSet.has(ch)) ovl++;
-    return Math.round(8 * ovl / Math.max(q.replace(/\s/g,'').length, 1));
+    if (words.some(w => w.length >= 3 && nmWords.some(nw => nw.startsWith(w)))) return 30;
+    // Code prefix match (require >= 5 chars to avoid noise)
+    if (q.length >= 5 && cd.startsWith(q.slice(0,5))) return 25;
+    return 0;
   }
 
-  const scored = base.map(it => ({ it, s: score(it) })).sort((a,b) => b.s - a.s);
+  const scored = base.map(it => ({ it, s: score(it) })).filter(x => x.s > 0).sort((a,b) => b.s - a.s);
   const exact  = scored.filter(x => x.s >= 70);
   if (exact.length)  return { results: exact.map(x=>x.it),              mode: 'exact' };
   const near   = scored.filter(x => x.s >= 25);
-  if (near.length)   return { results: near.slice(0,12).map(x=>x.it),   mode: 'near'  };
-  const far    = scored.filter(x => x.s >= 5).slice(0,5);
-  if (far.length)    return { results: far.map(x=>x.it),                 mode: 'far'   };
+  if (near.length)   return { results: near.slice(0,15).map(x=>x.it),   mode: 'near'  };
   return { results: [], mode: 'none' };
 }
 
