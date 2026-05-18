@@ -166,8 +166,8 @@ function _pick(row, ...keys) {
 }
 
 async function loadPriceListItems() {
-  const CACHE_KEY = '4s_price_items_v2';
-  const CACHE_TS  = '4s_price_items_v2_ts';
+  const CACHE_KEY = '4s_price_items_v3';
+  const CACHE_TS  = '4s_price_items_v3_ts';
   const AGE_MS    = 6 * 60 * 60 * 1000; // 6 hours
   const cached    = localStorage.getItem(CACHE_KEY);
   const cachedAt  = localStorage.getItem(CACHE_TS);
@@ -192,13 +192,16 @@ async function loadPriceListItems() {
     );
     if (res.ok) {
       parseLines(await res.text()).slice(1).forEach(v => {
-        const cat  = v[0] || 'Furniture';
-        const code = (v[2] || '').toUpperCase();
-        const name = v[3] || '';
-        const cpl  = parseFloat((v[4]||'').replace(/[^\d.]/g,'')) || 0;
-        const mrp  = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || cpl;
+        const cat    = v[0] || 'Furniture';
+        const subcat = (v[1] || '').trim();
+        const code   = (v[2] || '').toUpperCase();
+        const desc   = (v[3] || '').trim();
+        // Combine sub-category + description so series names like "Osiris" are searchable
+        const name   = subcat && desc ? `${subcat} ${desc}` : (desc || subcat);
+        const cpl    = parseFloat((v[4]||'').replace(/[^\d.]/g,'')) || 0;
+        const mrp    = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || cpl;
         if (!code && !name) return;
-        all.push({ code, name, cat, mrp, cpl, stock:[] });
+        all.push({ code, name, cat, subcat, mrp, cpl, stock:[] });
       });
     }
   } catch(e) { console.warn('Price_list fetch failed:', e.message); }
@@ -765,7 +768,7 @@ function App() {
     if (!user) return;
     const cached = localStorage.getItem('4s_items');
     if (cached) try { setItems(JSON.parse(cached)); } catch {}
-    const cachedPL = localStorage.getItem('4s_price_items_v2');
+    const cachedPL = localStorage.getItem('4s_price_items_v3');
     if (cachedPL) try { setPriceItems(JSON.parse(cachedPL)); } catch {}
     syncStock();
     loadPriceListItems().then(pi => { if (pi.length > 0) setPriceItems(pi); }).catch(()=>{});
