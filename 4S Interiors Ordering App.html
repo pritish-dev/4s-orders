@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>4S Interiors — Ordering App</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #1A1F1D; font-family: 'Inter', system-ui, sans-serif; color: #fff; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  @keyframes blink { 50% { opacity: 0; } }
+  /* hide scrollbars inside phones */
+  .pscreen ::-webkit-scrollbar { display: none; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" src="tokens.jsx"></script>
+<script type="text/babel" src="brand.jsx"></script>
+<script type="text/babel" src="data.jsx"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="ios-frame.jsx"></script>
+<script type="text/babel" src="android-frame.jsx"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+
+<script type="text/babel" src="screens-1.jsx"></script>
+<script type="text/babel" src="screens-2.jsx"></script>
+<script type="text/babel" src="screens-3.jsx"></script>
+<script type="text/babel" src="screens-4.jsx"></script>
+<script type="text/babel" src="screens-5.jsx"></script>
+
+<script type="text/babel">
+const TWEAKS = /*EDITMODE-BEGIN*/{
+  "accent": "#B85042",
+  "density": "compact",
+  "showStockChips": true,
+  "monoFontEverywhere": false
+}/*EDITMODE-END*/;
+
+function App() {
+  const [t, setTweak] = useTweaks(TWEAKS);
+
+  // Apply accent override live
+  React.useEffect(() => {
+    if (window.T) {
+      window.T.green = t.accent;
+      // re-derive soft variants
+      const c = t.accent.toLowerCase();
+      window.T.greenSoft = c === '#0f4c3a' ? '#E5EDE9'
+                         : c === '#1f4e8c' ? '#E2EAF4'
+                         : c === '#7c5e3c' ? '#F2EBE0'
+                         : c === '#b85042' ? '#F6E1DD'
+                         : c === '#1a1a1a' ? '#ECECEC'
+                         : '#E5EDE9';
+      window.T.greenLine = c === '#0f4c3a' ? '#B6CFC4'
+                         : c === '#1f4e8c' ? '#B6C7DE'
+                         : c === '#7c5e3c' ? '#D6C6AC'
+                         : c === '#b85042' ? '#E2B6AC'
+                         : c === '#1a1a1a' ? '#CCC' : '#B6CFC4';
+    }
+  }, [t.accent]);
+
+  // Force-rerender when accent changes by keying the canvas
+  const k = `${t.accent}|${t.density}|${t.showStockChips}|${t.monoFontEverywhere}`;
+
+  return (
+    <>
+      <DesignCanvas key={k}
+        title="4S Interiors · Sales Ordering App"
+        subtitle="Internal team tool · Bold ledger aesthetic · iOS + Android"
+        background="#1A1F1D"
+      >
+        <DCSection id="ios" title="iOS · Primary flow">
+          <DCArtboard id="ios-login" label="01. Sign in" width={402} height={874}>
+            <IOSDevice><LoginScreen /></IOSDevice>
+          </DCArtboard>
+          <DCArtboard id="ios-home" label="02. Dashboard" width={402} height={874}>
+            <IOSDevice><HomeScreen /></IOSDevice>
+          </DCArtboard>
+          <DCArtboard id="ios-search" label="03. Search stock" width={402} height={874}>
+            <IOSDevice><SearchScreen /></IOSDevice>
+          </DCArtboard>
+          <DCArtboard id="ios-order" label="04. New order" width={402} height={874}>
+            <IOSDevice><OrderFormScreen /></IOSDevice>
+          </DCArtboard>
+          <DCArtboard id="ios-pdf" label="05. PDF + share" width={402} height={874}>
+            <IOSDevice><PDFPreviewScreen /></IOSDevice>
+          </DCArtboard>
+          <DCArtboard id="ios-won" label="06. Update WON" width={402} height={874}>
+            <IOSDevice><WONUpdateScreen /></IOSDevice>
+          </DCArtboard>
+          <DCArtboard id="ios-history" label="07. Order history" width={402} height={874}>
+            <IOSDevice><HistoryScreen /></IOSDevice>
+          </DCArtboard>
+          <DCArtboard id="ios-settings" label="08. Sync & settings" width={402} height={874}>
+            <IOSDevice><SettingsScreen /></IOSDevice>
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="android" title="Android · Material parity">
+          <DCArtboard id="and-home" label="Dashboard" width={412} height={892}>
+            <AndroidDevice><AndroidHomeScreen /></AndroidDevice>
+          </DCArtboard>
+          <DCArtboard id="and-order" label="New order" width={412} height={892}>
+            <AndroidDevice><OrderFormScreen /></AndroidDevice>
+          </DCArtboard>
+          <DCArtboard id="and-pdf" label="PDF + share" width={412} height={892}>
+            <AndroidDevice><PDFPreviewScreen /></AndroidDevice>
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="notes" title="Design notes">
+          <DCArtboard id="notes-1" label="System & decisions" width={720} height={874}>
+            <NotesCard />
+          </DCArtboard>
+        </DCSection>
+      </DesignCanvas>
+
+      <TweaksPanel title="Tweaks">
+        <TweakSection title="Brand">
+          <TweakColor
+            label="Accent color"
+            value={t.accent}
+            options={['#0F4C3A', '#1F4E8C', '#7C5E3C', '#B85042', '#1A1A1A']}
+            onChange={(v) => setTweak('accent', v)}
+          />
+        </TweakSection>
+        <TweakSection title="Display">
+          <TweakRadio
+            label="Row density"
+            value={t.density}
+            options={[{value:'compact', label:'Compact'},{value:'comfy', label:'Comfy'}]}
+            onChange={(v) => setTweak('density', v)}
+          />
+          <TweakToggle label="Stock chips on cards" value={t.showStockChips} onChange={(v) => setTweak('showStockChips', v)} />
+          <TweakToggle label="Mono everywhere (data-dense)" value={t.monoFontEverywhere} onChange={(v) => setTweak('monoFontEverywhere', v)} />
+        </TweakSection>
+        <TweakSection title="Live data">
+          <TweakButton onClick={() => alert('Force-syncing stock sheet…')}>Force sync stock now</TweakButton>
+          <TweakButton onClick={() => alert('Rotating mock orders…')}>Refresh mock orders</TweakButton>
+        </TweakSection>
+      </TweaksPanel>
+    </>
+  );
+}
+
+function NotesCard() {
+  const Bullet = ({ k, v }) => (
+    <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: 16, padding: '10px 0', borderBottom: `1px solid ${T.line}` }}>
+      <div style={{ fontSize: 10, color: T.ink4, fontFamily: T.mono, letterSpacing: 0.5, textTransform: 'uppercase' }}>{k}</div>
+      <div style={{ fontSize: 13, color: T.ink2, lineHeight: 1.5 }}>{v}</div>
+    </div>
+  );
+  return (
+    <div style={{ width: '100%', height: '100%', background: '#fff', padding: 32, fontFamily: T.sans, color: T.ink, overflowY: 'auto' }}>
+      <FSLogo size={32} />
+      <div style={{ marginTop: 24, fontSize: 11, fontFamily: T.mono, color: T.ink4, letterSpacing: 1.2 }}>SYSTEM SPEC · v1</div>
+      <h1 style={{ fontSize: 36, fontWeight: 700, letterSpacing: -1.2, lineHeight: 1.05, marginTop: 8 }}>
+        A ledger app for sales staff,<br/><span style={{ color: T.green }}>not a flashy retail app.</span>
+      </h1>
+      <p style={{ fontSize: 14, color: T.ink3, lineHeight: 1.6, marginTop: 12, maxWidth: 560 }}>
+        Bold and data-dense. Salespeople tap through this 30+ times a day in front of customers — the screens read like a printed ledger so any number can be confirmed at a glance.
+      </p>
+
+      <div style={{ marginTop: 24, fontSize: 11, color: T.ink4, fontFamily: T.mono, letterSpacing: 1, fontWeight: 700 }}>SYSTEM</div>
+      <Bullet k="Type" v="Inter for UI · JetBrains Mono for codes, totals and freshness timestamps. Mono on numerals so column edges line up." />
+      <Bullet k="Color" v="Deep green #0F4C3A as accent (changeable from Tweaks). Warm paper neutrals — no glossy gradients. Status uses earthy ok/warn/bad swatches." />
+      <Bullet k="Stock chips" v="Branch code (KB · B2CB · PTA · CTC pulled from sheet) on dark, count on color tone. Salesperson sees availability in <0.5s." />
+      <Bullet k="Freshness" v="Every working screen has a green ribbon: 'STOCK · Today 09 May · 11:02 AM · SYNC NOW'. Turns amber if older than today." />
+      <Bullet k="WON later" v="Order saves first as a numbered draft (215/43527). Godrej WON gets added later — re-issues the PDF, updates QR copy, and writes to change-log sheet." />
+      <Bullet k="Sheets" v="Every save mirrors to Orders Master sheet. Every edit writes to Change-log sheet (who · when · what)." />
+      <Bullet k="Sharing" v="QR on the PDF goes to a short customer URL. Direct WhatsApp button uses pre-filled message." />
+      <Bullet k="Branches" v="Discovered from the stock sheet — not hard-coded. Settings page lets manager rename." />
+
+      <div style={{ marginTop: 24, fontSize: 11, color: T.ink4, fontFamily: T.mono, letterSpacing: 1, fontWeight: 700 }}>NEW FIELDS BEYOND PAPER FORM</div>
+      <ul style={{ fontSize: 13, color: T.ink2, lineHeight: 1.7, paddingLeft: 18 }}>
+        <li><b>Lead source</b> — walk-in / digital / reference / repeat</li>
+        <li><b>Lift availability</b> — flags installation handling fee</li>
+        <li><b>Follow-up date</b> — auto reminder 10:00 AM</li>
+        <li><b>Branch per item</b> — which godown the unit ships from</li>
+        <li><b>Per-item discount</b> — captured even when multiple schemes apply</li>
+        <li><b>Salesman code</b> — auto-filled from login</li>
+        <li><b>Customer signature</b> — captured on screen</li>
+        <li><b>Status</b> — draft → pending-WON → billed → delivered</li>
+      </ul>
+
+      <div style={{ marginTop: 24, padding: 16, background: T.paper, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: T.ink4, letterSpacing: 1 }}>NEXT</div>
+        <div style={{ fontSize: 13, color: T.ink2, marginTop: 4, lineHeight: 1.6 }}>
+          1. Confirm field list with floor staff before build.<br/>
+          2. Decide signature: stylus drawing vs. typed name.<br/>
+          3. Lock the WhatsApp message template.<br/>
+          4. Branch list & permissions (manager-only screens).
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
