@@ -44,9 +44,9 @@ var COL_ORD = {
   SUBTOTAL:25, CGST:26, SGST:27, TOTAL_WITH_TAX:28, DATE:29
 };
 
-// Users columns:
-//   A=Username  B=Password  C=Name  D=Code  E=Role  F=Branch  G=Active
-var COL_USR = { USERNAME:0, PASSWORD:1, NAME:2, CODE:3, ROLE:4, BRANCH:5, ACTIVE:6 };
+// Staff columns:
+//   A=username  B=password  C=name  D=code  E=role
+var COL_USR = { USERNAME:0, PASSWORD:1, NAME:2, CODE:3, ROLE:4 };
 
 // Change_Log columns:
 //   A=Timestamp  B=User  C=OrderNo  D=Action  E=Detail
@@ -148,7 +148,7 @@ function handlePing() {
 }
 
 // ── LOGIN ────────────────────────────────────────────────────────────────────
-// Checks username + password against the Users sheet.
+// Checks username + password against the Staff sheet.
 // Returns: { ok:true, user:{ name, code, role, branch } }
 //       or { ok:false, error:'...' }
 function handleLogin(p) {
@@ -156,8 +156,8 @@ function handleLogin(p) {
   var password = (p.password || '').trim();
   if (!username || !password) return { ok: false, error: 'Username and password required.' };
 
-  var sh   = _getSheet('Users');
-  if (!sh) return { ok: false, error: 'Users sheet not found. Run ensureSheets() from the Apps Script editor.' };
+  var sh = _getSheet('Staff');
+  if (!sh) return { ok: false, error: 'Staff sheet not found in the master spreadsheet. Please create it with columns: username, password, name, code, role.' };
 
   var rows = sh.getDataRange().getValues();
 
@@ -167,27 +167,25 @@ function handleLogin(p) {
   });
 
   if (dataRows.length === 0) {
-    return { ok: false, error: 'No users found in the Users sheet. Open your master spreadsheet → Users tab → add users, or run ensureSheets() to seed defaults.' };
+    return { ok: false, error: 'No staff found in the Staff sheet. Add rows with username, password, name, code, role.' };
   }
 
   for (var i = 0; i < dataRows.length; i++) {
     var r = dataRows[i];
-    var active = String(r[COL_USR.ACTIVE]).toUpperCase().trim();
-    if (active !== 'TRUE' && active !== 'YES' && active !== '1') continue;
     if (String(r[COL_USR.USERNAME]).toLowerCase().trim() === username &&
         String(r[COL_USR.PASSWORD]).trim() === password) {
       return {
         ok:   true,
         user: {
-          name:   String(r[COL_USR.NAME]   || ''),
-          code:   String(r[COL_USR.CODE]   || ''),
-          role:   String(r[COL_USR.ROLE]   || 'sales'),
-          branch: String(r[COL_USR.BRANCH] || ''),
+          name:   String(r[COL_USR.NAME] || ''),
+          code:   String(r[COL_USR.CODE] || ''),
+          role:   String(r[COL_USR.ROLE] || 'sales'),
+          branch: 'Patia',
         },
       };
     }
   }
-  return { ok: false, error: 'Invalid username or password. Check the Users tab in your master spreadsheet for the correct credentials.' };
+  return { ok: false, error: 'Invalid username or password. Check the Staff sheet in your master spreadsheet.' };
 }
 
 // ── STOCK SYNC ───────────────────────────────────────────────────────────────
@@ -489,18 +487,21 @@ function ensureSheets() {
     Logger.log('Created new spreadsheet: ' + ss.getUrl());
   }
 
-  // ── Users ─────────────────────────────────────────────────────────────────
-  var users = ss.getSheetByName('Users');
-  if (!users) {
-    users = ss.insertSheet('Users');
-    users.appendRow(['Username', 'Password', 'Name', 'Code', 'Role', 'Branch', 'Active']);
-    // Default users — change passwords before going live
-    users.appendRow(['admin',         'Admin@123',  'Admin',   'AD-01', 'manager', 'KB',   'TRUE']);
-    users.appendRow(['swati.patia',   'Pass@123',   'Swati',   'SW-04', 'sales',   'PTA',  'TRUE']);
-    users.appendRow(['archita',       'Pass@123',   'Archita', 'AR-03', 'sales',   'B2CB', 'TRUE']);
-    users.appendRow(['jitendra',      'Pass@123',   'Jitendra','JT-05', 'sales',   'KB',   'TRUE']);
-    _boldHeader(users);
-    Logger.log('✓ Users sheet created');
+  // ── Staff ──────────────────────────────────────────────────────────────────
+  var staff = ss.getSheetByName('Staff');
+  if (!staff) {
+    staff = ss.insertSheet('Staff');
+    staff.appendRow(['username', 'password', 'name', 'code', 'role']);
+    staff.appendRow(['soubhagya.patia', 'staff123',   'Soubhagya', 'SO-04', 'sales']);
+    staff.appendRow(['archita.patia',   'staff123',   'Archita',   'AR-02', 'sales']);
+    staff.appendRow(['nazrin.patia',    'staff123',   'Nazrin',    'NZ-05', 'sales']);
+    staff.appendRow(['krupa.patia',     'staff123',   'Krupa',     'KR-06', 'sales']);
+    staff.appendRow(['swasti.patia',    'staff123',   'Swasti',    'SW-03', 'sales']);
+    staff.appendRow(['saroj.patia',     'staff123',   'Saroj',     'SR-07', 'sales']);
+    staff.appendRow(['manager',         'manager123', 'Shaktiman', 'MG-01', 'manager']);
+    staff.appendRow(['pritish',         'pritish123', 'Pritish',   'PK-07', 'admin']);
+    _boldHeader(staff);
+    Logger.log('✓ Staff sheet created with 8 users');
   }
 
   // ── Stock_Master ──────────────────────────────────────────────────────────
@@ -555,7 +556,7 @@ function ensureSheets() {
   Logger.log('     Execute as: Me | Anyone can access');
   Logger.log('  2. Copy the Web App URL → paste in app Settings');
   Logger.log('  3. Paste your Godrej stock data into the Stock_Master tab');
-  Logger.log('  4. Change the default passwords in the Users tab');
+  Logger.log('  4. Update passwords in the Staff tab as needed.');
   Logger.log('============================================================');
 }
 
