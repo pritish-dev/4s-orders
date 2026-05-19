@@ -58,9 +58,21 @@ var PRICE_SHEET_ID = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 // Price_List_Mattress columns: A=CATEGORY  B=ITEM  C=ITEM CODE  D=ITEM DESCRIPTION  E=THICKNESS(IN)  F=THICKNESS(CM)  G=CPL  H=GST  I=PRICE
 
 // ── Master spreadsheet helper ────────────────────────────────────────────────
+// Auto-creates the master spreadsheet on first use — no manual ensureSheets() needed.
 function _getMasterSS() {
-  var id = PropertiesService.getScriptProperties().getProperty('MASTER_SHEET_ID');
-  if (!id) throw new Error('Master spreadsheet not set up. Run ensureSheets() first.');
+  var props = PropertiesService.getScriptProperties();
+  var id    = props.getProperty('MASTER_SHEET_ID');
+  if (id) {
+    try { return SpreadsheetApp.openById(id); }
+    catch (e) {
+      // Spreadsheet was deleted or access lost — recreate it
+      Logger.log('Could not open saved spreadsheet (' + e.message + ') — recreating.');
+    }
+  }
+  // First run: auto-setup
+  ensureSheets();
+  id = props.getProperty('MASTER_SHEET_ID');
+  if (!id) throw new Error('Auto-setup failed. Please run ensureSheets() manually from the Apps Script editor.');
   return SpreadsheetApp.openById(id);
 }
 
@@ -91,6 +103,7 @@ function doGet(e) {
     else if (action === 'stock')     result = handleStock();
     else if (action === 'priceList') result = handlePriceList();
     else if (action === 'orders')    result = handleOrders(p);
+    else if (action === 'ping')      result = handlePing();
     else result = { ok: false, error: 'Unknown action: ' + action };
   } catch (err) {
     result = { ok: false, error: err.message };
@@ -112,6 +125,26 @@ function doPost(e) {
     result = { ok: false, error: err.message };
   }
   return _jsonPost(result);
+}
+
+// ── PING / CONNECTION TEST ────────────────────────────────────────────────────
+// Called by the app Settings screen to verify the API URL is working.
+// Also triggers auto-setup on first call if master sheet doesn't exist yet.
+function handlePing() {
+  var props = PropertiesService.getScriptProperties();
+  var id    = props.getProperty('MASTER_SHEET_ID');
+  if (!id) {
+    ensureSheets();
+    id = props.getProperty('MASTER_SHEET_ID');
+  }
+  var ss  = SpreadsheetApp.openById(id);
+  return {
+    ok:      true,
+    message: 'Connected ✓',
+    spreadsheetUrl: ss.getUrl(),
+    spreadsheetId:  id,
+    sheets: ss.getSheets().map(function(s){ return s.getName(); }),
+  };
 }
 
 // ── LOGIN ────────────────────────────────────────────────────────────────────

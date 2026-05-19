@@ -1695,12 +1695,35 @@ function WONUpdateScreen({ctx,orderOverride,onClose}) {
 
 // ─── Settings ────────────────────────────────────────────────
 function SettingsScreen({ctx}) {
-  const {user,syncedAt,priceSyncedAt,priceItems,nav,syncStock,syncPriceList,doSignOut} = ctx;
-  const [apiUrl,setApiUrl] = useState(localStorage.getItem('4s_api_url')||'');
+  const {user,syncedAt,priceSyncedAt,priceItems,nav,syncStock,syncPriceList,doSignOut,showToast,loading} = ctx;
+  const [apiUrl,setApiUrl]       = useState(localStorage.getItem('4s_api_url')||'');
+  const [pingResult,setPingResult] = useState(null);
+  const [pinging,setPinging]     = useState(false);
+
   function saveUrl() {
-    localStorage.setItem('4s_api_url',apiUrl.trim());
-    ctx.showToast('URL updated ✓');
+    const trimmed = apiUrl.trim();
+    localStorage.setItem('4s_api_url', trimmed);
+    setPingResult(null);
+    showToast('URL saved ✓ — tap "Test connection" to verify');
   }
+
+  async function testConnection() {
+    const url = (apiUrl||'').trim() || localStorage.getItem('4s_api_url');
+    if (!url) { showToast('Paste your Apps Script URL first', 'warn'); return; }
+    setPinging(true); setPingResult(null);
+    try {
+      const res = await apiGet('ping', {}, 20000);
+      if (res && res.ok) {
+        setPingResult({ ok:true, msg:'Connected ✓', detail: res.sheets ? res.sheets.join(', ') : '' });
+        showToast('Connection OK ✓');
+      } else {
+        setPingResult({ ok:false, msg: res?.error || 'Server returned an error' });
+      }
+    } catch(e) {
+      setPingResult({ ok:false, msg: e.message });
+    } finally { setPinging(false); }
+  }
+
   return (
     <div className="screen">
       <div style={{flexShrink:0,padding:'14px 18px 12px'}}>
@@ -1708,58 +1731,87 @@ function SettingsScreen({ctx}) {
         <div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2}}>Sync & data</div>
       </div>
       <div className="scroll">
+
+        {/* ── Apps Script URL card (moved to top) ── */}
         <div style={{padding:'0 18px 14px'}}>
-          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:16}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12}}>
-              <div>
-                <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:.8}}>STOCK SHEET</div>
-                <div style={{fontSize:16,fontWeight:700,marginTop:3,letterSpacing:-0.3}}>Stock Master · {new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})}</div>
-                <div style={{fontSize:11,color:T.ink3,marginTop:4,lineHeight:1.4}}>Last synced: {syncedAt?new Date(syncedAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}):'Never'}</div>
-              </div>
-              <Pill tone={syncedAt?'ok':'warn'} mono>{syncedAt?'FRESH':'STALE'}</Pill>
+          <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>APPS SCRIPT URL</div>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,overflow:'hidden'}}>
+            <div style={{padding:'12px 14px',borderBottom:`1px solid ${T.line}`}}>
+              <input value={apiUrl} onChange={e=>setApiUrl(e.target.value)}
+                style={{width:'100%',border:'none',outline:'none',fontFamily:T.mono,fontSize:11,color:T.ink,background:'transparent'}}
+                placeholder="https://script.google.com/macros/s/…/exec"/>
             </div>
-            <div style={{marginTop:12}}><Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncStock}>Force sync now</Btn></div>
+            <div style={{display:'flex',gap:8,padding:'10px 12px'}}>
+              <Btn full onClick={saveUrl}>Save URL</Btn>
+              <Btn full primary onClick={testConnection} disabled={pinging}>
+                {pinging ? 'Testing…' : 'Test connection'}
+              </Btn>
+            </div>
           </div>
+          {pingResult && (
+            <div style={{marginTop:8,padding:'10px 12px',borderRadius:6,background:pingResult.ok?T.okSoft:T.badSoft,border:`1px solid ${pingResult.ok?T.ok:T.bad}`}}>
+              <div style={{fontSize:12,fontWeight:700,color:pingResult.ok?T.ok:T.bad}}>{pingResult.msg}</div>
+              {pingResult.detail && <div style={{fontSize:11,color:T.ink3,marginTop:3,fontFamily:T.mono}}>Sheets: {pingResult.detail}</div>}
+              {!pingResult.ok && <div style={{fontSize:11,color:T.ink3,marginTop:4,lineHeight:1.5}}>
+                Make sure the Web App is deployed with <b>Execute as: Me</b> and <b>Anyone can access</b>. Then copy the latest deployment URL.
+              </div>}
+            </div>
+          )}
         </div>
 
-        {/* Price list sync card */}
+        {/* ── Price list sync card ── */}
         <div style={{padding:'0 18px 14px'}}>
-          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:16}}>
+          <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>PRICE LIST SYNC</div>
+          <div style={{background:'#fff',border:`2px solid ${priceSyncedAt?T.greenLine:T.warn}`,borderRadius:8,padding:16}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12}}>
               <div>
-                <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:.8}}>PRICE LIST · GOOGLE SHEETS</div>
-                <div style={{fontSize:16,fontWeight:700,marginTop:3,letterSpacing:-0.3}}>Home Storage, Furniture & Mattress</div>
-                <div style={{fontSize:11,color:T.ink3,marginTop:4,lineHeight:1.4}}>
-                  Last synced: {priceSyncedAt ? new Date(priceSyncedAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}) : 'Never'}
+                <div style={{fontSize:15,fontWeight:700,letterSpacing:-0.3}}>Home Storage, Furniture &amp; Mattress</div>
+                <div style={{fontSize:11,color:T.ink3,marginTop:4,lineHeight:1.5}}>
+                  {priceSyncedAt
+                    ? <>Last synced: <b>{new Date(priceSyncedAt).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</b></>
+                    : <span style={{color:T.warn,fontWeight:600}}>Not synced yet — tap button below</span>}
                 </div>
               </div>
               <Pill tone={priceSyncedAt?'ok':'warn'} mono>{priceSyncedAt?'FRESH':'STALE'}</Pill>
             </div>
             <div style={{marginTop:10,padding:'10px 12px',background:T.paper,border:`1px solid ${T.line}`,borderRadius:6,fontFamily:T.mono,fontSize:11}}>
               <div style={{display:'flex',justifyContent:'space-between',color:T.ink2}}>
-                <span>Sheet 1 — Home Storage &amp; Furniture</span>
+                <span>Sheet 1 · Home Storage &amp; Furniture</span>
                 <span style={{fontWeight:700,color:T.ink}}>Price_list</span>
               </div>
               <div style={{display:'flex',justifyContent:'space-between',color:T.ink2,marginTop:4}}>
-                <span>Sheet 2 — Mattress</span>
+                <span>Sheet 2 · Mattress</span>
                 <span style={{fontWeight:700,color:T.ink}}>Price_List_Mattress</span>
               </div>
-              <div style={{display:'flex',justifyContent:'space-between',color:T.ink2,marginTop:4}}>
-                <span>TOTAL SKUs LOADED</span>
-                <span style={{fontWeight:700,color:T.ink}}>{(priceItems||[]).length}</span>
+              <div style={{display:'flex',justifyContent:'space-between',color:T.ink2,marginTop:4,borderTop:`1px solid ${T.line}`,paddingTop:6}}>
+                <span>SKUs loaded</span>
+                <span style={{fontWeight:700,color:(priceItems||[]).length>0?T.ok:T.warn}}>{(priceItems||[]).length}</span>
               </div>
             </div>
-            <div style={{marginTop:12}}><Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncPriceList}>Sync price list now</Btn></div>
+            <div style={{marginTop:12}}>
+              <Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncPriceList}>
+                {(priceItems||[]).length===0 ? '⬇ Load price list now' : 'Sync price list now'}
+              </Btn>
+            </div>
           </div>
         </div>
 
+        {/* ── Stock sync card ── */}
         <div style={{padding:'0 18px 14px'}}>
-          <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>APPS SCRIPT URL</div>
-          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
-            <input value={apiUrl} onChange={e=>setApiUrl(e.target.value)} style={{width:'100%',border:'none',outline:'none',fontFamily:T.mono,fontSize:12,color:T.ink,background:'transparent'}} placeholder="https://script.google.com/macros/s/…/exec"/>
+          <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>STOCK SYNC</div>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:16}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12}}>
+              <div>
+                <div style={{fontSize:15,fontWeight:700,letterSpacing:-0.3}}>Stock Master</div>
+                <div style={{fontSize:11,color:T.ink3,marginTop:4}}>Last synced: {syncedAt?new Date(syncedAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}):'Never'}</div>
+              </div>
+              <Pill tone={syncedAt?'ok':'warn'} mono>{syncedAt?'FRESH':'STALE'}</Pill>
+            </div>
+            <div style={{marginTop:12}}><Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncStock}>Sync stock now</Btn></div>
           </div>
-          <div style={{marginTop:8}}><Btn full onClick={saveUrl}>Save URL</Btn></div>
         </div>
+
+        {/* ── Account ── */}
         <div style={{padding:'0 18px 14px'}}>
           <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>ACCOUNT</div>
           <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'14px'}}>
@@ -1767,15 +1819,15 @@ function SettingsScreen({ctx}) {
               <div style={{width:40,height:40,borderRadius:8,background:T.green,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:T.mono,fontSize:16,fontWeight:700}}>{(user?.name||'?').slice(0,2).toUpperCase()}</div>
               <div>
                 <div style={{fontSize:14,fontWeight:700}}>{user?.name||'—'}</div>
-                <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono}}>{user?.code||'—'} · {user?.role||'—'}</div>
+                <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono}}>{user?.code||'—'} · {user?.role||'—'} · {user?.branch||'—'}</div>
               </div>
             </div>
           </div>
         </div>
+
         <div style={{padding:'0 18px 8px'}}>
           <Btn full danger onClick={doSignOut}>Sign out</Btn>
-          <div style={{textAlign:'center',fontSize:10,color:T.ink4,marginTop:14,fontFamily:T.mono}}>4S INTERIORS · BUILD 2026.05.14 · v2.1-pwa</div>
-          <div style={{textAlign:'center',fontSize:11,color:T.ink4,marginTop:6,cursor:'pointer',textDecoration:'underline'}} onClick={()=>nav('setup')}>Change API URL</div>
+          <div style={{textAlign:'center',fontSize:10,color:T.ink4,marginTop:14,fontFamily:T.mono}}>4S INTERIORS · BUILD 2026.05.20 · v2.2-pwa</div>
         </div>
         <div style={{height:24}}/>
       </div>
