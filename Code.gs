@@ -563,3 +563,35 @@ function ensureSheets() {
 function _boldHeader(sheet) {
   sheet.getRange(1, 1, 1, sheet.getLastColumn()).setFontWeight('bold');
 }
+
+// ── setMasterSheet ────────────────────────────────────────────────────────────
+// Run this from the Apps Script editor when you already have an existing
+// spreadsheet that you want to use as the master.
+//
+// HOW TO USE:
+//   1. Get your spreadsheet ID from its URL:
+//      https://docs.google.com/spreadsheets/d/  ← COPY THIS PART →  /edit
+//   2. Paste it between the quotes below, replacing YOUR_SPREADSHEET_ID_HERE
+//   3. Click Run → setMasterSheet
+//   4. Check the Logs — it will confirm which spreadsheet is now active
+//
+function setMasterSheet() {
+  var id = 'YOUR_SPREADSHEET_ID_HERE'; // ← paste your spreadsheet ID here
+
+  if (id === 'YOUR_SPREADSHEET_ID_HERE' || !id.trim()) {
+    Logger.log('ERROR: Paste your spreadsheet ID into the setMasterSheet function first.');
+    return;
+  }
+
+  try {
+    var ss = SpreadsheetApp.openById(id.trim());
+    PropertiesService.getScriptProperties().setProperty('MASTER_SHEET_ID', id.trim());
+    Logger.log('✓ Master spreadsheet set to: ' + ss.getName());
+    Logger.log('  URL: ' + ss.getUrl());
+    Logger.log('  Sheets found: ' + ss.getSheets().map(function(s){ return s.getName(); }).join(', '));
+  } catch(e) {
+    Logger.log('ERROR: Could not open spreadsheet with ID "' + id + '"');
+    Logger.log('  ' + e.message);
+    Logger.log('  Make sure the ID is correct and the script has access to it.');
+  }
+}
