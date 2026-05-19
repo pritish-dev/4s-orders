@@ -200,10 +200,17 @@ async function loadPriceListItems() {
 
   const base = `https://docs.google.com/spreadsheets/d/${PRICE_SHEET_ID}/gviz/tq?tqx=out:csv`;
 
+  // Fetch with 30 s abort — gviz endpoint can hang indefinitely without a timeout
+  function _fetchSheet(url) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 30000);
+    return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
+  }
+
   // Fetch both sheets in parallel — single request each, no pagination loops
   const [r1, r2] = await Promise.allSettled([
-    fetch(`${base}&sheet=Price_list`),
-    fetch(`${base}&sheet=Price_List_Mattress`),
+    _fetchSheet(`${base}&sheet=Price_list`),
+    _fetchSheet(`${base}&sheet=Price_List_Mattress`),
   ]);
 
   const all = [];
@@ -743,16 +750,17 @@ const BLANK_ORDER = () => ({
 });
 
 function App() {
-  const [screen,   setScreen]  = useState('loading');
-  const [user,     setUser]    = useState(null);
-  const [items,    setItems]   = useState([]);
-  const [priceItems, setPriceItems] = useState([]);
-  const [orders,   setOrders]  = useState([]);
-  const [syncedAt, setSyncedAt]= useState(null);
-  const [order,    setOrder]   = useState(BLANK_ORDER());
-  const [selOrder, setSelOrder]= useState(null);
-  const [toast,    setToast]   = useState(null);
-  const [loading,  setLoading] = useState(false);
+  const [screen,        setScreen]       = useState('loading');
+  const [user,          setUser]         = useState(null);
+  const [items,         setItems]        = useState([]);
+  const [priceItems,    setPriceItems]   = useState([]);
+  const [orders,        setOrders]       = useState([]);
+  const [syncedAt,      setSyncedAt]     = useState(null);
+  const [priceSyncedAt, setPriceSyncedAt]= useState(() => localStorage.getItem('4s_price_items_v6_ts') ? new Date(Number(localStorage.getItem('4s_price_items_v6_ts'))).toISOString() : null);
+  const [order,         setOrder]        = useState(BLANK_ORDER());
+  const [selOrder,      setSelOrder]     = useState(null);
+  const [toast,         setToast]        = useState(null);
+  const [loading,       setLoading]      = useState(false);
 
   const showToast = (msg,type='ok') => setToast({msg,type});
   const nav = useCallback((s) => {
@@ -788,7 +796,15 @@ function App() {
     const cachedPL = localStorage.getItem('4s_price_items_v6');
     if (cachedPL) try { setPriceItems(JSON.parse(cachedPL)); } catch {}
     syncStock();
-    loadPriceListItems().then(pi => { if (pi.length > 0) setPriceItems(pi); }).catch(()=>{});
+    loadPriceListItems()
+      .then(pi => {
+        if (pi.length > 0) {
+          setPriceItems(pi);
+          const ts = localStorage.getItem('4s_price_items_v6_ts');
+          if (ts) setPriceSyncedAt(new Date(Number(ts)).toISOString());
+        }
+      })
+      .catch(e => showToast('Price list load failed: ' + e.message, 'bad'));
   }, [user]);
 
   // Handle deep-link action from PWA shortcut (?action=...)
@@ -813,6 +829,27 @@ function App() {
       }
     } catch(e) {
       showToast('Sync failed: ' + e.message, 'bad');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function syncPriceList() {
+    localStorage.removeItem('4s_price_items_v6');
+    localStorage.removeItem('4s_price_items_v6_ts');
+    setLoading(true);
+    try {
+      const pi = await loadPriceListItems();
+      if (pi.length > 0) {
+        setPriceItems(pi);
+        const ts = new Date().toISOString();
+        setPriceSyncedAt(ts);
+        showToast(pi.length + ' price list items synced ✓');
+      } else {
+        showToast('Price list returned 0 items — check sheet access', 'warn');
+      }
+    } catch(e) {
+      showToast('Price list sync failed: ' + e.message, 'bad');
     } finally {
       setLoading(false);
     }
@@ -889,7 +926,7 @@ function App() {
     nav('login');
   }
 
-  const ctx = { user, items, priceItems, orders, syncedAt, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, doLogin, doSaveOrder, doUpdateWON, doSignOut, syncStock, loadOrders };
+  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, doLogin, doSaveOrder, doUpdateWON, doSignOut, syncStock, syncPriceList, loadOrders };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -1072,7 +1109,7 @@ function HomeScreen({ctx}) {
 
 // ─── Stock Search ────────────────────────────────────────────
 function SearchScreen({ctx}) {
-  const {items, priceItems, syncedAt, nav, order, setOrder} = ctx;
+  const {items, priceItems, syncedAt, priceSyncedAt, nav, order, setOrder, syncPriceList} = ctx;
   const [q,   setQ]   = useState('');
   const [cat, setCat] = useState('all');
   const [addMode]     = useState(!!order.items);
@@ -1134,10 +1171,16 @@ function SearchScreen({ctx}) {
         <StockRibbon syncedAt={syncedAt}/>
         <div style={{padding:'14px 18px 8px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
           <div>
-            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>PRICE LIST · {allItems.length} SKUs</div>
+            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>
+              PRICE LIST · {allItems.length} SKUs
+              {priceSyncedAt && <span style={{color:T.ok,marginLeft:6}}>· synced {new Date(priceSyncedAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}</span>}
+            </div>
             <div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2}}>{addMode&&order.customer?'Add item':'Search items'}</div>
           </div>
-          {addMode&&order.customer&&<Btn size="sm" onClick={()=>nav('order')} icon={Icon.back()}>Order</Btn>}
+          <div style={{display:'flex',gap:8,alignItems:'center'}}>
+            {allItems.length===0&&<Btn size="sm" icon={Icon.refresh(T.green,14)} onClick={syncPriceList}>Sync</Btn>}
+            {addMode&&order.customer&&<Btn size="sm" onClick={()=>nav('order')} icon={Icon.back()}>Order</Btn>}
+          </div>
         </div>
 
         {/* Search input — controlled so React always drives the value */}
@@ -1222,13 +1265,17 @@ function SearchScreen({ctx}) {
         {filtered.length===0&&q&&searchMode==='none'&&(
           <div style={{padding:40,textAlign:'center'}}>
             <div style={{fontSize:15,fontWeight:700,color:T.bad,marginBottom:8}}>Item not found in Price list</div>
-            <div style={{fontSize:13,color:T.ink4,lineHeight:1.6}}>"{q}" does not match any item in the {cat!=='All'?cat+' ':''}catalogue.</div>
+            <div style={{fontSize:13,color:T.ink4,lineHeight:1.6}}>"{q}" does not match any item in the {cat!=='all'?cat+' ':''}catalogue.</div>
           </div>
         )}
-        {filtered.length===0&&!q&&(
-          <div style={{padding:32,textAlign:'center',fontSize:13,color:T.ink4}}>
-            {allItems.length===0?'Syncing price list…':'No items in this category.'}
+        {filtered.length===0&&!q&&allItems.length===0&&(
+          <div style={{padding:32,textAlign:'center'}}>
+            <div style={{fontSize:13,color:T.ink4,marginBottom:16}}>Price list not loaded yet.</div>
+            <Btn primary icon={Icon.refresh('#fff',15)} onClick={syncPriceList}>Sync price list now</Btn>
           </div>
+        )}
+        {filtered.length===0&&!q&&allItems.length>0&&(
+          <div style={{padding:32,textAlign:'center',fontSize:13,color:T.ink4}}>No items in this category.</div>
         )}
         <div style={{height:8}}/>
       </div>
@@ -1594,7 +1641,7 @@ function WONUpdateScreen({ctx,orderOverride,onClose}) {
 
 // ─── Settings ────────────────────────────────────────────────
 function SettingsScreen({ctx}) {
-  const {user,syncedAt,nav,syncStock,doSignOut} = ctx;
+  const {user,syncedAt,priceSyncedAt,priceItems,nav,syncStock,syncPriceList,doSignOut} = ctx;
   const [apiUrl,setApiUrl] = useState(localStorage.getItem('4s_api_url')||'');
   function saveUrl() {
     localStorage.setItem('4s_api_url',apiUrl.trim());
@@ -1620,6 +1667,38 @@ function SettingsScreen({ctx}) {
             <div style={{marginTop:12}}><Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncStock}>Force sync now</Btn></div>
           </div>
         </div>
+
+        {/* Price list sync card */}
+        <div style={{padding:'0 18px 14px'}}>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:16}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12}}>
+              <div>
+                <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:.8}}>PRICE LIST · GOOGLE SHEETS</div>
+                <div style={{fontSize:16,fontWeight:700,marginTop:3,letterSpacing:-0.3}}>Home Storage, Furniture & Mattress</div>
+                <div style={{fontSize:11,color:T.ink3,marginTop:4,lineHeight:1.4}}>
+                  Last synced: {priceSyncedAt ? new Date(priceSyncedAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}) : 'Never'}
+                </div>
+              </div>
+              <Pill tone={priceSyncedAt?'ok':'warn'} mono>{priceSyncedAt?'FRESH':'STALE'}</Pill>
+            </div>
+            <div style={{marginTop:10,padding:'10px 12px',background:T.paper,border:`1px solid ${T.line}`,borderRadius:6,fontFamily:T.mono,fontSize:11}}>
+              <div style={{display:'flex',justifyContent:'space-between',color:T.ink2}}>
+                <span>Sheet 1 — Home Storage &amp; Furniture</span>
+                <span style={{fontWeight:700,color:T.ink}}>Price_list</span>
+              </div>
+              <div style={{display:'flex',justifyContent:'space-between',color:T.ink2,marginTop:4}}>
+                <span>Sheet 2 — Mattress</span>
+                <span style={{fontWeight:700,color:T.ink}}>Price_List_Mattress</span>
+              </div>
+              <div style={{display:'flex',justifyContent:'space-between',color:T.ink2,marginTop:4}}>
+                <span>TOTAL SKUs LOADED</span>
+                <span style={{fontWeight:700,color:T.ink}}>{(priceItems||[]).length}</span>
+              </div>
+            </div>
+            <div style={{marginTop:12}}><Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncPriceList}>Sync price list now</Btn></div>
+          </div>
+        </div>
+
         <div style={{padding:'0 18px 14px'}}>
           <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>APPS SCRIPT URL</div>
           <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
