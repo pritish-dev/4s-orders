@@ -1055,32 +1055,84 @@ function LoginScreen({ctx}) {
   const [username,setUsername] = useState('');
   const [password,setPassword] = useState('');
   const [show,setShow]         = useState(false);
-  function submit(e) { e.preventDefault(); if(username&&password) ctx.doLogin(username,password); }
+  const [lastError,setLastError] = useState('');
+  function submit(e) {
+    e.preventDefault();
+    if(username&&password) {
+      setLastError('');
+      ctx.doLogin(username,password).catch(()=>{});
+    }
+  }
+  // Capture login errors from toast via a hook workaround — we monkey-patch showToast
+  const wrappedLogin = async (u,p) => {
+    setLastError('');
+    try {
+      const res = await apiGet('login', { username: u, password: p });
+      if (res.ok) {
+        ctx.doLogin(u, p);
+      } else {
+        setLastError(res.error || 'Login failed');
+        ctx.showToast(res.error || 'Login failed', 'bad');
+      }
+    } catch(e) {
+      setLastError(e.message);
+      ctx.showToast(e.message, 'bad');
+    }
+  };
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (username && password) wrappedLogin(username.trim(), password);
+  }
   return (
     <div className="screen" style={{background:T.paper}}>
-      <div style={{flex:1,padding:'60px 28px 0',display:'flex',flexDirection:'column'}}>
+      <div style={{flex:1,padding:'52px 28px 0',display:'flex',flexDirection:'column'}}>
         <FSLogo size={36}/>
-        <div style={{marginTop:36,fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1.2,textTransform:'uppercase'}}>STAFF SIGN-IN</div>
-        <h1 style={{fontSize:30,fontWeight:700,lineHeight:1.05,letterSpacing:-1,margin:'10px 0 6px',color:T.ink}}>Order desk.<br/><span style={{color:T.green}}>Patia store.</span></h1>
-        <p style={{fontSize:13,color:T.ink3,lineHeight:1.5,marginBottom:28}}>Sales team only. Use the username issued by your store manager.</p>
-        <form onSubmit={submit}>
-          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,overflow:'hidden'}}>
+        <div style={{marginTop:28,fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1.2,textTransform:'uppercase'}}>STAFF SIGN-IN</div>
+        <h1 style={{fontSize:28,fontWeight:700,lineHeight:1.05,letterSpacing:-1,margin:'8px 0 6px',color:T.ink}}>Order desk.<br/><span style={{color:T.green}}>Patia store.</span></h1>
+        <p style={{fontSize:12,color:T.ink3,lineHeight:1.5,marginBottom:20}}>Sales team only. Use the credentials from the <b>Users</b> tab of the master spreadsheet.</p>
+        <form onSubmit={handleSubmit}>
+          <div style={{background:'#fff',border:`1px solid ${lastError?T.bad:T.line}`,borderRadius:8,overflow:'hidden'}}>
             <div style={{padding:'12px 14px',borderBottom:`1px solid ${T.line}`}}>
               <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.8,textTransform:'uppercase',marginBottom:4}}>USERNAME</div>
-              <input value={username} onChange={e=>setUsername(e.target.value)} autoCapitalize="none" autoCorrect="off" placeholder="e.g. name.patia" style={{width:'100%',border:'none',outline:'none',fontFamily:T.mono,fontSize:16,color:T.ink,padding:0,background:'transparent'}}/>
+              <input value={username} onChange={e=>{setUsername(e.target.value);setLastError('');}}
+                autoCapitalize="none" autoCorrect="off" spellCheck="false"
+                placeholder="e.g. admin or swati.patia"
+                style={{width:'100%',border:'none',outline:'none',fontFamily:T.mono,fontSize:16,color:T.ink,padding:0,background:'transparent'}}/>
             </div>
             <div style={{padding:'12px 14px',position:'relative'}}>
               <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.8,textTransform:'uppercase',marginBottom:4}}>PASSWORD</div>
-              <input type={show?'text':'password'} value={password} onChange={e=>setPassword(e.target.value)} placeholder="••••••••" style={{width:'100%',border:'none',outline:'none',fontFamily:T.mono,fontSize:16,color:T.ink,padding:0,background:'transparent'}}/>
+              <input type={show?'text':'password'} value={password} onChange={e=>{setPassword(e.target.value);setLastError('');}}
+                placeholder="••••••••"
+                style={{width:'100%',border:'none',outline:'none',fontFamily:T.mono,fontSize:16,color:T.ink,padding:0,background:'transparent'}}/>
               <span onClick={()=>setShow(!show)} style={{position:'absolute',right:14,top:'50%',transform:'translateY(-50%)',fontSize:11,fontFamily:T.sans,fontWeight:600,color:T.green,cursor:'pointer'}}>{show?'HIDE':'SHOW'}</span>
             </div>
           </div>
-          <div style={{marginTop:20}}>
+
+          {/* Error with diagnostic hint */}
+          {lastError && (
+            <div style={{marginTop:8,padding:'10px 12px',background:T.badSoft,border:`1px solid ${T.bad}`,borderRadius:6}}>
+              <div style={{fontSize:12,fontWeight:700,color:T.bad,marginBottom:2}}>Sign-in failed</div>
+              <div style={{fontSize:11,color:T.ink3,lineHeight:1.5}}>{lastError}</div>
+            </div>
+          )}
+
+          {/* Default credentials hint */}
+          <div style={{marginTop:10,padding:'10px 12px',background:T.paper2,borderRadius:6,border:`1px solid ${T.line}`}}>
+            <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.5,marginBottom:5}}>DEFAULT CREDENTIALS (change after first login)</div>
+            <div style={{fontFamily:T.mono,fontSize:11,color:T.ink3,lineHeight:1.8}}>
+              admin / Admin@123<br/>
+              swati.patia / Pass@123<br/>
+              archita / Pass@123<br/>
+              jitendra / Pass@123
+            </div>
+          </div>
+
+          <div style={{marginTop:14}}>
             <Btn primary full size="lg" type="submit" disabled={!username||!password}>Sign in →</Btn>
           </div>
         </form>
       </div>
-      <div style={{padding:'16px 28px 36px',textAlign:'center'}}>
+      <div style={{padding:'16px 28px 28px',textAlign:'center'}}>
         <span onClick={()=>ctx.nav('setup')} style={{fontSize:12,color:T.ink4,cursor:'pointer',textDecoration:'underline'}}>Change API URL</span>
       </div>
     </div>
@@ -1724,7 +1776,12 @@ function SettingsScreen({ctx}) {
     try {
       const res = await apiGet('ping', {}, 20000);
       if (res && res.ok) {
-        setPingResult({ ok:true, msg:'Connected ✓', detail: res.sheets ? res.sheets.join(', ') : '' });
+        setPingResult({
+          ok: true,
+          msg: 'Connected ✓',
+          detail: res.sheets ? res.sheets.join(', ') : '',
+          sheetUrl: res.spreadsheetUrl || '',
+        });
         showToast('Connection OK ✓');
       } else {
         setPingResult({ ok:false, msg: res?.error || 'Server returned an error' });
@@ -1759,11 +1816,20 @@ function SettingsScreen({ctx}) {
             </div>
           </div>
           {pingResult && (
-            <div style={{marginTop:8,padding:'10px 12px',borderRadius:6,background:pingResult.ok?T.okSoft:T.badSoft,border:`1px solid ${pingResult.ok?T.ok:T.bad}`}}>
-              <div style={{fontSize:12,fontWeight:700,color:pingResult.ok?T.ok:T.bad}}>{pingResult.msg}</div>
-              {pingResult.detail && <div style={{fontSize:11,color:T.ink3,marginTop:3,fontFamily:T.mono}}>Sheets: {pingResult.detail}</div>}
-              {!pingResult.ok && <div style={{fontSize:11,color:T.ink3,marginTop:4,lineHeight:1.5}}>
-                Make sure the Web App is deployed with <b>Execute as: Me</b> and <b>Anyone can access</b>. Then copy the latest deployment URL.
+            <div style={{marginTop:8,padding:'12px',borderRadius:6,background:pingResult.ok?T.okSoft:T.badSoft,border:`1px solid ${pingResult.ok?T.ok:T.bad}`}}>
+              <div style={{fontSize:13,fontWeight:700,color:pingResult.ok?T.ok:T.bad}}>{pingResult.msg}</div>
+              {pingResult.detail && <div style={{fontSize:11,color:T.ink3,marginTop:3,fontFamily:T.mono}}>Sheets found: {pingResult.detail}</div>}
+              {pingResult.ok && pingResult.sheetUrl && (
+                <div style={{marginTop:8,padding:'8px 10px',background:'#fff',borderRadius:4,border:`1px solid ${T.greenLine}`}}>
+                  <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:.5,marginBottom:4}}>MASTER SPREADSHEET</div>
+                  <a href={pingResult.sheetUrl} target="_blank" rel="noreferrer"
+                    style={{fontSize:11,color:T.green,fontFamily:T.mono,wordBreak:'break-all',textDecoration:'underline'}}>
+                    Open spreadsheet (Users tab → check login credentials) ↗
+                  </a>
+                </div>
+              )}
+              {!pingResult.ok && <div style={{fontSize:11,color:T.ink3,marginTop:6,lineHeight:1.6}}>
+                Make sure the Web App is deployed with <b>Execute as: Me</b> and <b>Anyone can access</b>. Then copy the latest deployment URL and paste above.
               </div>}
             </div>
           )}

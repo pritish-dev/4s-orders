@@ -157,11 +157,22 @@ function handleLogin(p) {
   if (!username || !password) return { ok: false, error: 'Username and password required.' };
 
   var sh   = _getSheet('Users');
+  if (!sh) return { ok: false, error: 'Users sheet not found. Run ensureSheets() from the Apps Script editor.' };
+
   var rows = sh.getDataRange().getValues();
-  // skip header row (row index 0)
-  for (var i = 1; i < rows.length; i++) {
-    var r = rows[i];
-    var active = String(r[COL_USR.ACTIVE]).toUpperCase();
+
+  // Only data rows (skip header)
+  var dataRows = rows.slice(1).filter(function(r) {
+    return String(r[COL_USR.USERNAME] || '').trim() !== '';
+  });
+
+  if (dataRows.length === 0) {
+    return { ok: false, error: 'No users found in the Users sheet. Open your master spreadsheet → Users tab → add users, or run ensureSheets() to seed defaults.' };
+  }
+
+  for (var i = 0; i < dataRows.length; i++) {
+    var r = dataRows[i];
+    var active = String(r[COL_USR.ACTIVE]).toUpperCase().trim();
     if (active !== 'TRUE' && active !== 'YES' && active !== '1') continue;
     if (String(r[COL_USR.USERNAME]).toLowerCase().trim() === username &&
         String(r[COL_USR.PASSWORD]).trim() === password) {
@@ -176,7 +187,7 @@ function handleLogin(p) {
       };
     }
   }
-  return { ok: false, error: 'Invalid username or password.' };
+  return { ok: false, error: 'Invalid username or password. Check the Users tab in your master spreadsheet for the correct credentials.' };
 }
 
 // ── STOCK SYNC ───────────────────────────────────────────────────────────────
