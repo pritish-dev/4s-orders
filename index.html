@@ -115,14 +115,14 @@ const T = {
 // ═══════════════════════════════════════════════════════════
 function getApiUrl() { return localStorage.getItem('4s_api_url') || ''; }
 
-async function apiGet(action, params = {}) {
+async function apiGet(action, params = {}, timeoutMs = 15000) {
   const url = getApiUrl();
   if (!url) throw new Error('API URL not configured. Go to Settings.');
   const cb  = 'cb' + Date.now();
   const qs  = new URLSearchParams({ action, callback: cb, ...params }).toString();
   return new Promise((res, rej) => {
     const script = document.createElement('script');
-    const timeout = setTimeout(() => { cleanup(); rej(new Error('Request timed out.')); }, 15000);
+    const timeout = setTimeout(() => { cleanup(); rej(new Error('Request timed out after ' + Math.round(timeoutMs/1000) + 's.')); }, timeoutMs);
     function cleanup() { clearTimeout(timeout); delete window[cb]; script.remove(); }
     window[cb] = (data) => { cleanup(); res(data); };
     script.onerror = () => { cleanup(); rej(new Error('Network error — check API URL.')); };
@@ -145,11 +145,15 @@ async function apiPost(body) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// PRICE LIST — direct Google Sheets fetch
+// PRICE LIST
+// Primary path  : Apps Script backend  (action=priceList)
+//   — server-side, no CORS, works with private sheets
+// Fallback path : direct gviz CSV fetch
+//   — only works when the sheet is set to "Anyone can view"
 // ═══════════════════════════════════════════════════════════
 const PRICE_SHEET_ID = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
-const PRICE_SHEETS   = ['Price_list', 'Price_List_Mattress'];
 
+// Parse a single CSV row, handling quoted fields
 function _parseCSVRow(line) {
   const out = []; let cur = '', inQ = false;
   for (let i = 0; i < line.length; i++) {
@@ -162,52 +166,92 @@ function _parseCSVRow(line) {
   return out;
 }
 
-function _parseCSV(text) {
-  const lines = text.split(/\r?\n/).filter(l => l.trim());
-  if (lines.length < 2) return [];
-  const hdrs = _parseCSVRow(lines[0]).map(h => h.replace(/"/g,'').trim().toLowerCase());
-  return lines.slice(1).map(line => {
-    const vals = _parseCSVRow(line);
-    const row = {};
-    hdrs.forEach((h,i) => row[h] = (vals[i]||'').replace(/"/g,'').trim());
-    return row;
-  }).filter(r => Object.values(r).some(v=>v));
+// Split raw CSV text into array-of-arrays, stripping outer quotes
+function _parseLines(text) {
+  return text.split(/\r?\n/).filter(l => l.trim()).map(
+    line => _parseCSVRow(line).map(s => s.replace(/^"|"$/g, '').trim())
+  );
 }
 
-function _pick(row, ...keys) {
-  for (const k of keys) {
-    const v = row[k] || row[k.toLowerCase()] || '';
-    if (v) return v;
-  }
-  return '';
+// Build a normalised item from a Price_list row (furniture sheet)
+// cols: 0=Category/Series  1=SubCategory  2=Code  3=Description  4=CPL  5=GST  6=MRP
+function _rowToFurniture(v) {
+  const cat    = (v[0] || 'Furniture').trim();
+  const subcat = (v[1] || '').trim();
+  const code   = (v[2] || '').toUpperCase().trim();
+  const desc   = (v[3] || '').trim();
+  if (!code && !desc) return null;
+  const cpl        = parseFloat((v[4] || '').replace(/[^\d.]/g, '')) || 0;
+  const mrp        = parseFloat((v[6] || '').replace(/[^\d.]/g, '')) || cpl;
+  const name       = desc || subcat || cat;
+  const searchName = [cat, subcat, desc].filter(Boolean).join(' ');
+  return { code, name, searchName, cat, subcat, mrp, cpl, stock: [], sheet: 'furniture' };
+}
+
+// Build a normalised item from a Price_List_Mattress row
+// cols: 0=Category  2=Code  3=Description  6=CPL  8=MRP
+function _rowToMattress(v) {
+  const cat  = (v[0] || 'Mattress').trim();
+  const code = (v[2] || '').toUpperCase().trim();
+  const desc = (v[3] || '').trim();
+  if (!code && !desc) return null;
+  const cpl        = parseFloat((v[6] || '').replace(/[^\d.]/g, '')) || 0;
+  const mrp        = parseFloat((v[8] || '').replace(/[^\d.]/g, '')) || cpl;
+  const name       = desc || cat;
+  const searchName = [cat, desc].filter(Boolean).join(' ');
+  return { code, name, searchName, cat, mrp, cpl, stock: [], sheet: 'mattress' };
 }
 
 async function loadPriceListItems() {
   const CACHE_KEY = '4s_price_items_v6';
   const CACHE_TS  = '4s_price_items_v6_ts';
-  const AGE_MS    = 6 * 60 * 60 * 1000;
-  const cached    = localStorage.getItem(CACHE_KEY);
-  const cachedAt  = localStorage.getItem(CACHE_TS);
+  const AGE_MS    = 6 * 60 * 60 * 1000; // 6 hours
+
+  // Serve from cache if fresh
+  const cached   = localStorage.getItem(CACHE_KEY);
+  const cachedAt = localStorage.getItem(CACHE_TS);
   if (cached && cachedAt && Date.now() - Number(cachedAt) < AGE_MS) {
-    try { return JSON.parse(cached); } catch {}
+    try { const p = JSON.parse(cached); if (p.length > 0) return p; } catch {}
   }
 
-  function parseLines(text) {
-    return text.split(/\r?\n/).filter(l => l.trim()).map(
-      line => _parseCSVRow(line).map(s => s.replace(/^"|"$/g,'').trim())
-    );
+  // ── PRIMARY: Apps Script backend ────────────────────────────
+  // The Apps Script runs server-side with Google account access,
+  // so it works regardless of sheet sharing settings, with no CORS issues.
+  // Requires the priceList action to be added to your Code.gs (see Code.gs).
+  if (getApiUrl()) {
+    try {
+      const res = await apiGet('priceList', {}, 30000); // 30 s — sheets can be large
+      if (res && res.ok && Array.isArray(res.items) && res.items.length > 0) {
+        localStorage.setItem(CACHE_KEY, JSON.stringify(res.items));
+        localStorage.setItem(CACHE_TS,  String(Date.now()));
+        return res.items;
+      }
+      if (res && !res.ok) {
+        throw new Error(res.error || 'Apps Script returned ok:false for priceList');
+      }
+      // ok:true but 0 items — fall through to gviz
+    } catch (e) {
+      // If the action doesn't exist yet (returns a parse error or network error),
+      // fall through to the gviz fallback rather than blocking the user.
+      console.warn('Apps Script priceList failed, trying gviz fallback:', e.message);
+    }
   }
 
+  // ── FALLBACK: direct gviz CSV fetch ─────────────────────────
+  // Only works when the Google Sheet is set to "Anyone with the link can view".
+  // If the sheet is private you'll get a CORS error or an HTML login redirect.
   const base = `https://docs.google.com/spreadsheets/d/${PRICE_SHEET_ID}/gviz/tq?tqx=out:csv`;
 
-  // Fetch with 30 s abort — gviz endpoint can hang indefinitely without a timeout
   function _fetchSheet(url) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 30000);
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 25000);
     return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
   }
 
-  // Fetch both sheets in parallel — single request each, no pagination loops
+  function _isHtml(text) {
+    return text.trimStart().startsWith('<!');
+  }
+
   const [r1, r2] = await Promise.allSettled([
     _fetchSheet(`${base}&sheet=Price_list`),
     _fetchSheet(`${base}&sheet=Price_List_Mattress`),
@@ -215,45 +259,55 @@ async function loadPriceListItems() {
 
   const all = [];
 
-  // Price_list (furniture) — col: 0=Category/Series 1=SubCategory 2=Code 3=Description 4=CPL 5=GST 6=MRP
   if (r1.status === 'fulfilled' && r1.value.ok) {
     try {
-      parseLines(await r1.value.text()).slice(1).forEach(v => {
-        const cat    = (v[0] || 'Furniture').trim();
-        const subcat = (v[1] || '').trim();
-        const code   = (v[2] || '').toUpperCase();
-        const desc   = (v[3] || '').trim();
-        if (!code && !desc) return;
-        const cpl  = parseFloat((v[4]||'').replace(/[^\d.]/g,'')) || 0;
-        const mrp  = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || cpl;
-        const name       = desc || subcat || cat;
-        const searchName = [cat, subcat, desc].filter(Boolean).join(' ');
-        all.push({ code, name, searchName, cat, subcat, mrp, cpl, stock:[], sheet:'furniture' });
-      });
+      const text = await r1.value.text();
+      if (_isHtml(text)) {
+        console.warn('Price_list: got HTML (sheet may be private or login redirect)');
+      } else {
+        _parseLines(text).slice(1).forEach(v => {
+          const item = _rowToFurniture(v);
+          if (item) all.push(item);
+        });
+      }
     } catch(e) { console.warn('Price_list parse failed:', e); }
+  } else if (r1.status === 'rejected') {
+    console.warn('Price_list fetch failed:', r1.reason?.message);
   }
 
-  // Price_List_Mattress — col: 0=Category 2=Code 3=Description 6=CPL 8=MRP
   if (r2.status === 'fulfilled' && r2.value.ok) {
     try {
-      parseLines(await r2.value.text()).slice(1).forEach(v => {
-        const cat  = (v[0] || 'Mattress').trim();
-        const code = (v[2] || '').toUpperCase();
-        const desc = (v[3] || '').trim();
-        if (!code && !desc) return;
-        const cpl  = parseFloat((v[6]||'').replace(/[^\d.]/g,'')) || 0;
-        const mrp  = parseFloat((v[8]||'').replace(/[^\d.]/g,'')) || cpl;
-        const name       = desc || cat;
-        const searchName = [cat, desc].filter(Boolean).join(' ');
-        all.push({ code, name, searchName, cat, mrp, cpl, stock:[], sheet:'mattress' });
-      });
+      const text = await r2.value.text();
+      if (_isHtml(text)) {
+        console.warn('Price_List_Mattress: got HTML (sheet may be private or login redirect)');
+      } else {
+        _parseLines(text).slice(1).forEach(v => {
+          const item = _rowToMattress(v);
+          if (item) all.push(item);
+        });
+      }
     } catch(e) { console.warn('Price_List_Mattress parse failed:', e); }
+  } else if (r2.status === 'rejected') {
+    console.warn('Price_List_Mattress fetch failed:', r2.reason?.message);
   }
 
-  if (all.length > 0) {
-    localStorage.setItem(CACHE_KEY, JSON.stringify(all));
-    localStorage.setItem(CACHE_TS,  String(Date.now()));
+  if (all.length === 0) {
+    // Build a clear error so the caller can show it to the user
+    const why1 = r1.status === 'rejected'
+      ? r1.reason?.name === 'AbortError' ? 'timed out' : r1.reason?.message
+      : (!r1.value?.ok ? 'HTTP ' + r1.value?.status : 'got HTML — sheet may be private');
+    const why2 = r2.status === 'rejected'
+      ? r2.reason?.name === 'AbortError' ? 'timed out' : r2.reason?.message
+      : (!r2.value?.ok ? 'HTTP ' + r2.value?.status : 'got HTML — sheet may be private');
+    throw new Error(
+      'Price list could not be loaded.\n' +
+      'Add the priceList action to your Apps Script (see Code.gs).\n' +
+      `Sheet1: ${why1 || 'no data'} · Sheet2: ${why2 || 'no data'}`
+    );
   }
+
+  localStorage.setItem(CACHE_KEY, JSON.stringify(all));
+  localStorage.setItem(CACHE_TS,  String(Date.now()));
   return all;
 }
 
