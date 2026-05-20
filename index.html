@@ -311,39 +311,68 @@ async function loadPriceListItems() {
   return all;
 }
 
-// Fuzzy search — returns {results, mode}
-// mode: 'all' | 'exact' | 'near' (word/prefix match) | 'none'
-function fuzzySearch(allItems, query, cat) {
-  const base = cat === 'All' ? allItems : allItems.filter(i => i.cat === cat);
-  if (!query.trim()) return { results: base, mode: 'all' };
-  const q = query.toLowerCase().trim();
+// Search — strict tiered matching. Best tier wins exclusively; no mixing tiers.
+// Tiers (descending priority):
+//   S4 (100) — full query is a substring of name or code  → show all S4, nothing else
+//   S3  (90) — every word in query found in name or code  → show all S3, nothing else
+//   S2  (50) — majority of words found (>50%)             → show top S2, nothing else
+//   S1  (25) — any single long word (≥4 chars) found      → show top 20, labelled "near"
+//   S0  (20) — item code starts with query                → show top 10, labelled "near"
+function fuzzySearch(allItems, query) {
+  if (!query.trim()) return { results: allItems, mode: 'all' };
+  const q     = query.toLowerCase().trim();
   const words = q.split(/\s+/).filter(w => w.length > 0);
 
   function score(it) {
-    // Use searchName (cat+subcat+desc) for matching, so series names like "Osiris" are found
     const nm = (it.searchName || it.name || '').toLowerCase();
-    const cd = (it.code||'').toLowerCase();
-    // Exact substring match
+    const cd = (it.code || '').toLowerCase();
+
+    // S4: entire query is a direct substring match
     if (nm.includes(q) || cd.includes(q)) return 100;
-    // All query words found
+
+    // S3: every word in the query is found somewhere in name/code
     if (words.length > 1 && words.every(w => nm.includes(w) || cd.includes(w))) return 90;
-    // Some query words found (min 3 chars to avoid noise)
-    const hit = words.filter(w => w.length >= 3 && (nm.includes(w) || cd.includes(w)));
-    if (hit.length > 0) return Math.round(70 * hit.length / words.length);
-    // Word prefix match (min 3 chars)
-    const nmWords = nm.split(/[\s,\/\-]+/);
-    if (words.some(w => w.length >= 3 && nmWords.some(nw => nw.startsWith(w)))) return 30;
-    // Code prefix match (min 5 chars)
-    if (q.length >= 5 && cd.startsWith(q.slice(0,5))) return 25;
+
+    // S2: majority of words found (>50%), only count words ≥3 chars
+    const longWords = words.filter(w => w.length >= 3);
+    if (longWords.length > 0) {
+      const hits = longWords.filter(w => nm.includes(w) || cd.includes(w));
+      if (hits.length > 0 && hits.length / longWords.length > 0.5) return 50;
+    }
+
+    // S1: at least one long word (≥4 chars) found
+    if (words.some(w => w.length >= 4 && (nm.includes(w) || cd.includes(w)))) return 25;
+
+    // S0: item code starts with the query (min 4 chars)
+    if (q.length >= 4 && cd.startsWith(q.slice(0, Math.min(q.length, 8)))) return 20;
+
     return 0;
   }
 
-  const scored = base.map(it => ({ it, s: score(it) })).filter(x => x.s > 0).sort((a,b) => b.s - a.s);
-  const exact  = scored.filter(x => x.s >= 70);
-  if (exact.length)  return { results: exact.map(x=>x.it),              mode: 'exact' };
-  const near   = scored.filter(x => x.s >= 25);
-  if (near.length)   return { results: near.slice(0,15).map(x=>x.it),   mode: 'near'  };
-  return { results: [], mode: 'none' };
+  // Score everything, drop zeros, sort best first
+  const scored = allItems
+    .map(it => ({ it, s: score(it) }))
+    .filter(x => x.s > 0)
+    .sort((a, b) => b.s - a.s);
+
+  if (!scored.length) return { results: [], mode: 'none' };
+
+  const best = scored[0].s;
+
+  // S4 or S3 present → show ONLY those items (exact match, no noise)
+  if (best >= 90) {
+    const top = scored.filter(x => x.s >= 90);
+    return { results: top.map(x => x.it), mode: 'exact' };
+  }
+
+  // S2 present → show only majority-word matches
+  if (best >= 50) {
+    const top = scored.filter(x => x.s >= 50);
+    return { results: top.map(x => x.it), mode: 'near' };
+  }
+
+  // S1/S0 → loose match, cap at 20 results
+  return { results: scored.slice(0, 20).map(x => x.it), mode: 'far' };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1245,7 +1274,7 @@ function SearchScreen({ctx}) {
     ? allItems
     : allItems.filter(i => i.sheet === cat);
 
-  const {results: filtered, mode: searchMode} = fuzzySearch(bycat, q, 'All');
+  const {results: filtered, mode: searchMode} = fuzzySearch(bycat, q);
 
   function handleInput(e) { setQ(e.target.value); }
 
@@ -1337,14 +1366,14 @@ function SearchScreen({ctx}) {
       </div>
 
       <div className="scroll" style={{background:'#fff',borderTop:`1px solid ${T.line}`}}>
-        {hasPriceList && q&&searchMode==='near'&&filtered.length>0&&(
+        {hasPriceList && q && searchMode==='near' && filtered.length>0 && (
           <div style={{padding:'8px 18px',background:T.warnSoft,borderBottom:`1px solid #e6cc95`}}>
-            <span style={{fontSize:12,color:T.warn,fontWeight:600}}>Nearest matches for "{q}"</span>
+            <span style={{fontSize:12,color:T.warn,fontWeight:600}}>Partial matches for "{q}"</span>
           </div>
         )}
-        {hasPriceList && q&&searchMode==='far'&&filtered.length>0&&(
+        {hasPriceList && q && searchMode==='far' && filtered.length>0 && (
           <div style={{padding:'8px 18px',background:T.badSoft,borderBottom:`1px solid #e2b8b0`}}>
-            <span style={{fontSize:12,color:T.bad,fontWeight:600}}>No exact match — showing closest results</span>
+            <span style={{fontSize:12,color:T.bad,fontWeight:600}}>No close match — showing loosest results for "{q}"</span>
           </div>
         )}
 
