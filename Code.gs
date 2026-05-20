@@ -157,18 +157,25 @@ function handleLogin(p) {
   var password = (p.password || '').trim();
   if (!username || !password) return { ok: false, error: 'Username and password required.' };
 
-  var sh = _getSheet('Staff');
-  if (!sh) return { ok: false, error: 'Staff sheet not found in the master spreadsheet. Please create it with columns: username, password, name, code, role.' };
+  // Find the Staff sheet — check master spreadsheet first, then price list spreadsheet.
+  // This handles the common case where all data lives in one spreadsheet (PRICE_SHEET_ID).
+  var sh = _findStaffSheet();
+  if (!sh) {
+    return {
+      ok: false,
+      error: 'Staff sheet not found in either spreadsheet.\n\n' +
+             'Fix: open your Google Spreadsheet → make sure one tab is named exactly "Staff" ' +
+             '(capital S, no spaces). Then run setMasterSheet() in Apps Script with your spreadsheet ID.'
+    };
+  }
 
   var rows = sh.getDataRange().getValues();
-
-  // Only data rows (skip header)
   var dataRows = rows.slice(1).filter(function(r) {
     return String(r[COL_USR.USERNAME] || '').trim() !== '';
   });
 
   if (dataRows.length === 0) {
-    return { ok: false, error: 'No staff found in the Staff sheet. Add rows with username, password, name, code, role.' };
+    return { ok: false, error: 'Staff sheet exists but has no data rows. Add staff members with columns: username, password, name, code, role.' };
   }
 
   for (var i = 0; i < dataRows.length; i++) {
@@ -186,7 +193,30 @@ function handleLogin(p) {
       };
     }
   }
-  return { ok: false, error: 'Invalid username or password. Check the Staff sheet in your master spreadsheet.' };
+  return { ok: false, error: 'Invalid username or password.' };
+}
+
+// Finds the Staff sheet — tries master spreadsheet first, then PRICE_SHEET_ID.
+function _findStaffSheet() {
+  // Try master spreadsheet
+  try {
+    var masterSh = _getSheet('Staff');
+    if (masterSh) return masterSh;
+  } catch(e) {}
+
+  // Try price list spreadsheet (common when all data is in one file)
+  try {
+    var priceSS = SpreadsheetApp.openById(PRICE_SHEET_ID);
+    var priceSh = priceSS.getSheetByName('Staff');
+    if (priceSh) {
+      // Auto-save this spreadsheet as the master so future calls work correctly
+      PropertiesService.getScriptProperties().setProperty('MASTER_SHEET_ID', PRICE_SHEET_ID);
+      Logger.log('Staff sheet found in PRICE_SHEET_ID spreadsheet — auto-set as master.');
+      return priceSh;
+    }
+  } catch(e) {}
+
+  return null;
 }
 
 // ── STOCK SYNC ───────────────────────────────────────────────────────────────
