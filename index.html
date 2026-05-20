@@ -214,101 +214,54 @@ async function loadPriceListItems() {
     try { const p = JSON.parse(cached); if (p.length > 0) return p; } catch {}
   }
 
-  // ── PRIMARY: Apps Script backend ────────────────────────────
-  // The Apps Script runs server-side with Google account access,
-  // so it works regardless of sheet sharing settings, with no CORS issues.
-  // Requires the priceList action to be added to your Code.gs (see Code.gs).
-  if (getApiUrl()) {
-    try {
-      const res = await apiGet('priceList', {}, 30000); // 30 s — sheets can be large
-      if (res && res.ok && Array.isArray(res.items) && res.items.length > 0) {
-        localStorage.setItem(CACHE_KEY, JSON.stringify(res.items));
-        localStorage.setItem(CACHE_TS,  String(Date.now()));
-        return res.items;
-      }
-      if (res && !res.ok) {
-        throw new Error(res.error || 'Apps Script returned ok:false for priceList');
-      }
-      // ok:true but 0 items — fall through to gviz
-    } catch (e) {
-      // If the action doesn't exist yet (returns a parse error or network error),
-      // fall through to the gviz fallback rather than blocking the user.
-      console.warn('Apps Script priceList failed, trying gviz fallback:', e.message);
+  const apiUrl = getApiUrl();
+  if (!apiUrl) {
+    throw new Error('No Apps Script URL saved. Go to Settings → paste your Apps Script URL → Save URL.');
+  }
+
+  // Call Apps Script — only path that works for private sheets
+  let res;
+  try {
+    res = await apiGet('priceList', {}, 35000);
+  } catch (e) {
+    const msg = e.message || '';
+    if (msg.includes('timed out')) {
+      throw new Error('Request timed out (35s). The price list sheet may be very large or Apps Script is slow. Try again.');
     }
+    throw new Error('Network error calling Apps Script: ' + msg);
   }
 
-  // ── FALLBACK: direct gviz CSV fetch ─────────────────────────
-  // Only works when the Google Sheet is set to "Anyone with the link can view".
-  // If the sheet is private you'll get a CORS error or an HTML login redirect.
-  const base = `https://docs.google.com/spreadsheets/d/${PRICE_SHEET_ID}/gviz/tq?tqx=out:csv`;
-
-  function _fetchSheet(url) {
-    const ctrl  = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 25000);
-    return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
+  // Apps Script returned an error
+  if (!res || !res.ok) {
+    const err = (res && res.error) || 'Unknown error from Apps Script';
+    // Old deployment without priceList action
+    if (err.includes('Unknown action')) {
+      throw new Error('Your Apps Script deployment is outdated — it does not have the priceList handler.\n\nFix: Apps Script → Deploy → Manage deployments → Edit → New version → Deploy.');
+    }
+    // Sheet not found
+    if (err.includes('not found') || err.includes('openById')) {
+      throw new Error('Apps Script error: ' + err + '\n\nCheck that PRICE_SHEET_ID in Code.gs matches your actual price list spreadsheet ID.');
+    }
+    throw new Error('Apps Script error: ' + err);
   }
 
-  function _isHtml(text) {
-    return text.trimStart().startsWith('<!');
-  }
-
-  const [r1, r2] = await Promise.allSettled([
-    _fetchSheet(`${base}&sheet=Price_list`),
-    _fetchSheet(`${base}&sheet=Price_List_Mattress`),
-  ]);
-
-  const all = [];
-
-  if (r1.status === 'fulfilled' && r1.value.ok) {
-    try {
-      const text = await r1.value.text();
-      if (_isHtml(text)) {
-        console.warn('Price_list: got HTML (sheet may be private or login redirect)');
-      } else {
-        _parseLines(text).slice(1).forEach(v => {
-          const item = _rowToFurniture(v);
-          if (item) all.push(item);
-        });
-      }
-    } catch(e) { console.warn('Price_list parse failed:', e); }
-  } else if (r1.status === 'rejected') {
-    console.warn('Price_list fetch failed:', r1.reason?.message);
-  }
-
-  if (r2.status === 'fulfilled' && r2.value.ok) {
-    try {
-      const text = await r2.value.text();
-      if (_isHtml(text)) {
-        console.warn('Price_List_Mattress: got HTML (sheet may be private or login redirect)');
-      } else {
-        _parseLines(text).slice(1).forEach(v => {
-          const item = _rowToMattress(v);
-          if (item) all.push(item);
-        });
-      }
-    } catch(e) { console.warn('Price_List_Mattress parse failed:', e); }
-  } else if (r2.status === 'rejected') {
-    console.warn('Price_List_Mattress fetch failed:', r2.reason?.message);
-  }
-
-  if (all.length === 0) {
-    // Build a clear error so the caller can show it to the user
-    const why1 = r1.status === 'rejected'
-      ? r1.reason?.name === 'AbortError' ? 'timed out' : r1.reason?.message
-      : (!r1.value?.ok ? 'HTTP ' + r1.value?.status : 'got HTML — sheet may be private');
-    const why2 = r2.status === 'rejected'
-      ? r2.reason?.name === 'AbortError' ? 'timed out' : r2.reason?.message
-      : (!r2.value?.ok ? 'HTTP ' + r2.value?.status : 'got HTML — sheet may be private');
+  // Got ok:true but 0 items — give actionable diagnosis
+  if (!Array.isArray(res.items) || res.items.length === 0) {
+    const counts = res.counts || {};
     throw new Error(
-      'Price list could not be loaded.\n' +
-      'Add the priceList action to your Apps Script (see Code.gs).\n' +
-      `Sheet1: ${why1 || 'no data'} · Sheet2: ${why2 || 'no data'}`
+      'Apps Script connected but returned 0 items.\n' +
+      'Furniture sheet found: ' + (counts.furniture !== undefined ? counts.furniture + ' rows' : 'unknown') + '\n' +
+      'Mattress sheet found: '  + (counts.mattress  !== undefined ? counts.mattress  + ' rows' : 'unknown') + '\n\n' +
+      'Check:\n' +
+      '1. Sheet tabs are named exactly "Price_list" and "Price_List_Mattress" (case-sensitive)\n' +
+      '2. Row 1 is the header row, data starts from row 2\n' +
+      '3. PRICE_SHEET_ID in Code.gs matches your price list spreadsheet URL'
     );
   }
 
-  localStorage.setItem(CACHE_KEY, JSON.stringify(all));
+  localStorage.setItem(CACHE_KEY, JSON.stringify(res.items));
   localStorage.setItem(CACHE_TS,  String(Date.now()));
-  return all;
+  return res.items;
 }
 
 // Search — strict tiered matching. Best tier wins exclusively; no mixing tiers.
@@ -840,6 +793,7 @@ function App() {
   const [orders,        setOrders]       = useState([]);
   const [syncedAt,      setSyncedAt]     = useState(null);
   const [priceSyncedAt, setPriceSyncedAt]= useState(() => localStorage.getItem('4s_price_items_v6_ts') ? new Date(Number(localStorage.getItem('4s_price_items_v6_ts'))).toISOString() : null);
+  const [priceSyncError, setPriceSyncError] = useState(null);
   const [order,         setOrder]        = useState(BLANK_ORDER());
   const [selOrder,      setSelOrder]     = useState(null);
   const [toast,         setToast]        = useState(null);
@@ -920,19 +874,17 @@ function App() {
   async function syncPriceList() {
     localStorage.removeItem('4s_price_items_v6');
     localStorage.removeItem('4s_price_items_v6_ts');
+    setPriceSyncError(null);
     setLoading(true);
     try {
       const pi = await loadPriceListItems();
-      if (pi.length > 0) {
-        setPriceItems(pi);
-        const ts = new Date().toISOString();
-        setPriceSyncedAt(ts);
-        showToast(pi.length + ' price list items synced ✓');
-      } else {
-        showToast('Price list returned 0 items — check sheet access', 'warn');
-      }
+      setPriceItems(pi);
+      setPriceSyncedAt(new Date().toISOString());
+      localStorage.setItem('4s_price_items_v6_ts', String(Date.now()));
+      showToast(pi.length + ' items loaded ✓', 'ok');
     } catch(e) {
-      showToast('Price list sync failed: ' + e.message, 'bad');
+      setPriceSyncError(e.message);
+      showToast('Sync failed — see error below', 'bad');
     } finally {
       setLoading(false);
     }
@@ -1009,7 +961,7 @@ function App() {
     nav('login');
   }
 
-  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, doLogin, doSaveOrder, doUpdateWON, doSignOut, syncStock, syncPriceList, loadOrders };
+  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, doLogin, doSaveOrder, doUpdateWON, doSignOut, syncStock, syncPriceList, loadOrders };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -1251,6 +1203,7 @@ function SearchScreen({ctx}) {
   const [addMode]     = useState(!!order.items);
 
   const hasPriceList = priceItems && priceItems.length > 0;
+  const {priceSyncError} = ctx;
 
   // Only use price list items — never fall back to stock items for ordering
   const allItems = (() => {
@@ -1321,14 +1274,22 @@ function SearchScreen({ctx}) {
 
         {/* Price list not loaded — prominent sync banner */}
         {!hasPriceList && (
-          <div style={{margin:'0 18px 10px',padding:'14px 16px',background:T.warnSoft,border:`1.5px solid ${T.warn}`,borderRadius:8}}>
-            <div style={{fontSize:13,fontWeight:700,color:T.warn,marginBottom:6}}>Price list not synced yet</div>
-            <div style={{fontSize:11,color:T.ink3,marginBottom:10,lineHeight:1.5}}>
-              You need to load the price list before you can search and add items to an order.<br/>
-              Make sure your Apps Script URL is saved in Settings first.
-            </div>
+          <div style={{margin:'0 18px 10px',padding:'14px 16px',background:priceSyncError?T.badSoft:T.warnSoft,border:`1.5px solid ${priceSyncError?T.bad:T.warn}`,borderRadius:8}}>
+            {priceSyncError ? (
+              <>
+                <div style={{fontSize:13,fontWeight:700,color:T.bad,marginBottom:6}}>Sync failed — here's why:</div>
+                <div style={{fontSize:11,color:T.ink2,marginBottom:10,lineHeight:1.7,whiteSpace:'pre-wrap',fontFamily:T.mono,background:T.badSoft,borderRadius:4,padding:'8px 10px',border:`1px solid ${T.bad}`}}>{priceSyncError}</div>
+              </>
+            ) : (
+              <>
+                <div style={{fontSize:13,fontWeight:700,color:T.warn,marginBottom:6}}>Price list not loaded yet</div>
+                <div style={{fontSize:11,color:T.ink3,marginBottom:10,lineHeight:1.5}}>
+                  Make sure your Apps Script URL is saved in <b>Me → Settings</b> first, then tap below.
+                </div>
+              </>
+            )}
             <Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncPriceList} disabled={loading}>
-              {loading ? 'Loading…' : 'Load price list now'}
+              {loading ? 'Loading…' : priceSyncError ? 'Retry sync' : 'Load price list now'}
             </Btn>
           </div>
         )}
@@ -1787,10 +1748,22 @@ function WONUpdateScreen({ctx,orderOverride,onClose}) {
 
 // ─── Settings ────────────────────────────────────────────────
 function SettingsScreen({ctx}) {
-  const {user,syncedAt,priceSyncedAt,priceItems,nav,syncStock,syncPriceList,doSignOut,showToast,loading} = ctx;
-  const [apiUrl,setApiUrl]       = useState(localStorage.getItem('4s_api_url')||'');
+  const {user,syncedAt,priceSyncedAt,priceSyncError,priceItems,nav,syncStock,syncPriceList,doSignOut,showToast,loading} = ctx;
+  const [apiUrl,setApiUrl]         = useState(localStorage.getItem('4s_api_url')||'');
   const [pingResult,setPingResult] = useState(null);
-  const [pinging,setPinging]     = useState(false);
+  const [pinging,setPinging]       = useState(false);
+  const [debugResult,setDebugResult] = useState(null);
+  const [debugging,setDebugging]   = useState(false);
+
+  async function runDebug() {
+    setDebugging(true); setDebugResult(null);
+    try {
+      const res = await apiGet('debugPriceList', {}, 20000);
+      setDebugResult(res);
+    } catch(e) {
+      setDebugResult({ ok:false, error: e.message });
+    } finally { setDebugging(false); }
+  }
 
   function saveUrl() {
     const trimmed = apiUrl.trim();
@@ -1868,37 +1841,77 @@ function SettingsScreen({ctx}) {
         {/* ── Price list sync card ── */}
         <div style={{padding:'0 18px 14px'}}>
           <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>PRICE LIST SYNC</div>
-          <div style={{background:'#fff',border:`2px solid ${priceSyncedAt?T.greenLine:T.warn}`,borderRadius:8,padding:16}}>
+          <div style={{background:'#fff',border:`2px solid ${priceSyncError?T.bad:priceSyncedAt?T.greenLine:T.warn}`,borderRadius:8,padding:16}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12}}>
               <div>
                 <div style={{fontSize:15,fontWeight:700,letterSpacing:-0.3}}>Home Storage, Furniture &amp; Mattress</div>
                 <div style={{fontSize:11,color:T.ink3,marginTop:4,lineHeight:1.5}}>
                   {priceSyncedAt
                     ? <>Last synced: <b>{new Date(priceSyncedAt).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</b></>
-                    : <span style={{color:T.warn,fontWeight:600}}>Not synced yet — tap button below</span>}
+                    : <span style={{color:priceSyncError?T.bad:T.warn,fontWeight:600}}>{priceSyncError?'Last sync failed':'Not synced yet'}</span>}
                 </div>
               </div>
-              <Pill tone={priceSyncedAt?'ok':'warn'} mono>{priceSyncedAt?'FRESH':'STALE'}</Pill>
+              <Pill tone={priceSyncedAt?'ok':priceSyncError?'bad':'warn'} mono>{priceSyncedAt?'FRESH':priceSyncError?'ERROR':'STALE'}</Pill>
             </div>
+
+            {/* Persistent error display */}
+            {priceSyncError && (
+              <div style={{marginTop:10,padding:'10px 12px',background:T.badSoft,border:`1px solid ${T.bad}`,borderRadius:6}}>
+                <div style={{fontSize:11,fontWeight:700,color:T.bad,marginBottom:4}}>Error details:</div>
+                <div style={{fontSize:11,color:T.ink2,lineHeight:1.7,whiteSpace:'pre-wrap',fontFamily:T.mono}}>{priceSyncError}</div>
+              </div>
+            )}
+
             <div style={{marginTop:10,padding:'10px 12px',background:T.paper,border:`1px solid ${T.line}`,borderRadius:6,fontFamily:T.mono,fontSize:11}}>
               <div style={{display:'flex',justifyContent:'space-between',color:T.ink2}}>
-                <span>Sheet 1 · Home Storage &amp; Furniture</span>
-                <span style={{fontWeight:700,color:T.ink}}>Price_list</span>
+                <span>Sheet 1 · Furniture</span><span style={{fontWeight:700,color:T.ink}}>Price_list</span>
               </div>
               <div style={{display:'flex',justifyContent:'space-between',color:T.ink2,marginTop:4}}>
-                <span>Sheet 2 · Mattress</span>
-                <span style={{fontWeight:700,color:T.ink}}>Price_List_Mattress</span>
+                <span>Sheet 2 · Mattress</span><span style={{fontWeight:700,color:T.ink}}>Price_List_Mattress</span>
               </div>
               <div style={{display:'flex',justifyContent:'space-between',color:T.ink2,marginTop:4,borderTop:`1px solid ${T.line}`,paddingTop:6}}>
                 <span>SKUs loaded</span>
                 <span style={{fontWeight:700,color:(priceItems||[]).length>0?T.ok:T.warn}}>{(priceItems||[]).length}</span>
               </div>
             </div>
-            <div style={{marginTop:12}}>
-              <Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncPriceList}>
-                {(priceItems||[]).length===0 ? '⬇ Load price list now' : 'Sync price list now'}
+            <div style={{marginTop:12,display:'flex',gap:8}}>
+              <Btn full icon={Icon.refresh(T.green,14)} onClick={runDebug} disabled={debugging}>
+                {debugging?'Checking…':'Debug'}
+              </Btn>
+              <Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncPriceList} disabled={loading}>
+                {loading?'Loading…':(priceItems||[]).length===0?'Load price list':'Sync now'}
               </Btn>
             </div>
+
+            {/* Debug result */}
+            {debugResult && (
+              <div style={{marginTop:10,padding:'10px 12px',background:T.paper,border:`1px solid ${debugResult.ok?T.greenLine:T.bad}`,borderRadius:6}}>
+                {debugResult.ok ? (
+                  <>
+                    <div style={{fontSize:11,fontWeight:700,color:T.green,marginBottom:6}}>Spreadsheet: {debugResult.spreadsheetName}</div>
+                    <div style={{fontSize:10,fontFamily:T.mono,color:T.ink3,marginBottom:4}}>All tabs: {(debugResult.allSheets||[]).join(', ')}</div>
+                    <div style={{fontSize:10,fontFamily:T.mono,color:debugResult.priceListSheet?.found?T.ok:T.bad}}>
+                      Price_list: {debugResult.priceListSheet?.found ? debugResult.priceListSheet.rows+' data rows' : 'NOT FOUND ✗'}
+                    </div>
+                    {debugResult.priceListSheet?.found && (
+                      <div style={{fontSize:10,fontFamily:T.mono,color:T.ink4,marginTop:2}}>
+                        Header: [{(debugResult.priceListSheet.header||[]).join(' | ')}]
+                      </div>
+                    )}
+                    <div style={{fontSize:10,fontFamily:T.mono,color:debugResult.mattressSheet?.found?T.ok:T.bad,marginTop:4}}>
+                      Price_List_Mattress: {debugResult.mattressSheet?.found ? debugResult.mattressSheet.rows+' data rows' : 'NOT FOUND ✗'}
+                    </div>
+                    {debugResult.mattressSheet?.found && (
+                      <div style={{fontSize:10,fontFamily:T.mono,color:T.ink4,marginTop:2}}>
+                        Header: [{(debugResult.mattressSheet.header||[]).join(' | ')}]
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div style={{fontSize:11,color:T.bad,fontFamily:T.mono}}>{debugResult.error}</div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

@@ -99,11 +99,12 @@ function doGet(e) {
   var result;
   try {
     var action = p.action || '';
-    if      (action === 'login')     result = handleLogin(p);
-    else if (action === 'stock')     result = handleStock();
-    else if (action === 'priceList') result = handlePriceList();
-    else if (action === 'orders')    result = handleOrders(p);
-    else if (action === 'ping')      result = handlePing();
+    if      (action === 'login')          result = handleLogin(p);
+    else if (action === 'stock')          result = handleStock();
+    else if (action === 'priceList')      result = handlePriceList();
+    else if (action === 'orders')         result = handleOrders(p);
+    else if (action === 'ping')           result = handlePing();
+    else if (action === 'debugPriceList') result = handleDebugPriceList();
     else result = { ok: false, error: 'Unknown action: ' + action };
   } catch (err) {
     result = { ok: false, error: err.message };
@@ -562,6 +563,46 @@ function ensureSheets() {
 
 function _boldHeader(sheet) {
   sheet.getRange(1, 1, 1, sheet.getLastColumn()).setFontWeight('bold');
+}
+
+// ── DEBUG PRICE LIST ─────────────────────────────────────────────────────────
+// Returns the sheet names + first 3 data rows from both price list sheets.
+// Tap "Debug price list" in Settings to call this and see exactly what
+// the Apps Script finds in the spreadsheet — helps diagnose 0-item issues.
+function handleDebugPriceList() {
+  try {
+    var ss = SpreadsheetApp.openById(PRICE_SHEET_ID);
+    var allSheetNames = ss.getSheets().map(function(s){ return s.getName(); });
+    var result = {
+      ok: true,
+      spreadsheetName: ss.getName(),
+      allSheets: allSheetNames,
+      priceListSheet:    { found: false, rows: 0, sample: [] },
+      mattressSheet:     { found: false, rows: 0, sample: [] },
+    };
+
+    var sh1 = ss.getSheetByName('Price_list');
+    if (sh1) {
+      var d1 = sh1.getDataRange().getValues();
+      result.priceListSheet.found = true;
+      result.priceListSheet.rows  = d1.length - 1; // subtract header
+      result.priceListSheet.header = d1[0] ? d1[0].slice(0,7) : [];
+      result.priceListSheet.sample = d1.slice(1, 4).map(function(r){ return r.slice(0,7); });
+    }
+
+    var sh2 = ss.getSheetByName('Price_List_Mattress');
+    if (sh2) {
+      var d2 = sh2.getDataRange().getValues();
+      result.mattressSheet.found = true;
+      result.mattressSheet.rows  = d2.length - 1;
+      result.mattressSheet.header = d2[0] ? d2[0].slice(0,9) : [];
+      result.mattressSheet.sample = d2.slice(1, 4).map(function(r){ return r.slice(0,9); });
+    }
+
+    return result;
+  } catch(e) {
+    return { ok: false, error: e.message };
+  }
 }
 
 // ── setMasterSheet ────────────────────────────────────────────────────────────
