@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '8';
+  var V = '9';
   if (localStorage.getItem('4s_code_v') !== V) {
     localStorage.setItem('4s_code_v', V);
     // Clear ALL local storage (stale caches) then unregister SW and hard reload

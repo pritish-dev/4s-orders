@@ -235,7 +235,12 @@ function _loginWithCreds(sh, username, password) {
 
     var matched = false;
     if (storedHash) {
-      matched = (_md5(password) === storedHash.toLowerCase());
+      // Bcrypt hashes ($2b$/$2a$) cannot be verified in Apps Script — fall through to plaintext
+      var isBcrypt = storedHash.slice(0, 4) === '$2b$' || storedHash.slice(0, 4) === '$2a$';
+      if (!isBcrypt) {
+        // MD5 hex check (32 chars)
+        matched = (_md5(password) === storedHash.toLowerCase());
+      }
     }
     if (!matched && storedPass) {
       matched = (storedPass === password);
