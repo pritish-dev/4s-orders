@@ -31,13 +31,23 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '6';
+  var V = '8';
   if (localStorage.getItem('4s_code_v') !== V) {
     localStorage.setItem('4s_code_v', V);
+    // Clear ALL local storage (stale caches) then unregister SW and hard reload
+    try { localStorage.clear(); } catch(e) {}
+    localStorage.setItem('4s_code_v', V); // re-set after clear
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistrations().then(function(regs){
         return Promise.all(regs.map(function(r){ return r.unregister(); }));
-      }).then(function(){ location.reload(true); });
+      }).then(function(){
+        // Also clear all SW caches
+        if (window.caches) {
+          caches.keys().then(function(keys){
+            return Promise.all(keys.map(function(k){ return caches.delete(k); }));
+          }).then(function(){ location.reload(true); });
+        } else { location.reload(true); }
+      });
     } else {
       location.reload(true);
     }
@@ -151,7 +161,7 @@ async function apiPost(body) {
 // Fallback path : direct gviz CSV fetch
 //   — only works when the sheet is set to "Anyone can view"
 // ═══════════════════════════════════════════════════════════
-const PRICE_SHEET_ID = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
+const OPS_SHEET_ID = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 
 // Parse a single CSV row, handling quoted fields
 function _parseCSVRow(line) {
@@ -203,8 +213,8 @@ function _rowToMattress(v) {
 }
 
 async function loadPriceListItems() {
-  const CACHE_KEY = '4s_price_items_v6';
-  const CACHE_TS  = '4s_price_items_v6_ts';
+  const CACHE_KEY = '4s_price_items_v7';
+  const CACHE_TS  = '4s_price_items_v7_ts';
   const AGE_MS    = 6 * 60 * 60 * 1000; // 6 hours
 
   // Serve from cache if fresh
@@ -240,7 +250,7 @@ async function loadPriceListItems() {
     }
     // Sheet not found
     if (err.includes('not found') || err.includes('openById')) {
-      throw new Error('Apps Script error: ' + err + '\n\nCheck that PRICE_SHEET_ID in Code.gs matches your actual price list spreadsheet ID.');
+      throw new Error('Apps Script error: ' + err + '\n\nCheck that OPS_SHEET_ID in Code.gs matches your OPS spreadsheet ID (' + OPS_SHEET_ID + ').');
     }
     throw new Error('Apps Script error: ' + err);
   }
@@ -248,14 +258,15 @@ async function loadPriceListItems() {
   // Got ok:true but 0 items — give actionable diagnosis
   if (!Array.isArray(res.items) || res.items.length === 0) {
     const counts = res.counts || {};
+    const tabCount = res.totalTabs || 0;
     throw new Error(
-      'Apps Script connected but returned 0 items.\n' +
-      'Furniture sheet found: ' + (counts.furniture !== undefined ? counts.furniture + ' rows' : 'unknown') + '\n' +
-      'Mattress sheet found: '  + (counts.mattress  !== undefined ? counts.mattress  + ' rows' : 'unknown') + '\n\n' +
-      'Check:\n' +
-      '1. Sheet tabs are named exactly "Price_list" and "Price_List_Mattress" (case-sensitive)\n' +
-      '2. Row 1 is the header row, data starts from row 2\n' +
-      '3. PRICE_SHEET_ID in Code.gs matches your price list spreadsheet URL'
+      'Apps Script connected but returned 0 price list items.\n' +
+      'Price tabs found: ' + tabCount + '\n' +
+      (Object.keys(counts).length ? 'Tab counts: ' + JSON.stringify(counts) + '\n' : '') +
+      '\nCheck:\n' +
+      '1. Run importPriceListsFromDrive() in Apps Script to populate price list tabs\n' +
+      '2. OPS sheet ID in Code.gs: ' + OPS_SHEET_ID + '\n' +
+      '3. After import, redeploy: Deploy → Manage deployments → New version'
     );
   }
 
@@ -266,43 +277,51 @@ async function loadPriceListItems() {
 
 // Search — strict tiered matching. Best tier wins exclusively; no mixing tiers.
 // Tiers (descending priority):
-//   S4 (100) — full query is a substring of name or code  → show all S4, nothing else
-//   S3  (90) — every word in query found in name or code  → show all S3, nothing else
-//   S2  (50) — majority of words found (>50%)             → show top S2, nothing else
-//   S1  (25) — any single long word (≥4 chars) found      → show top 20, labelled "near"
-//   S0  (20) — item code starts with query                → show top 10, labelled "near"
+//   S4 (100) — full typed query is a direct substring of name or code  → show all S4 only
+//   S3  (90) — every meaningful word (≥2 chars) found in name or code  → show all S3 only
+//   S2  (50) — majority of words (≥3 chars) found (>50%)               → show all S2 only
+//   S1  (25) — any single long word (≥4 chars) found                   → show top 20
+//   S0  (20) — item code starts with the query prefix (≥4 chars)       → show top 20
+//
+// Single-char tokens ("M" in "osiris M") are stripped before multi-word scoring
+// so they don't dilute results. The full raw query still runs S4 to catch codes.
 function fuzzySearch(allItems, query) {
   if (!query.trim()) return { results: allItems, mode: 'all' };
-  const q     = query.toLowerCase().trim();
-  const words = q.split(/\s+/).filter(w => w.length > 0);
+  const q = query.toLowerCase().trim();
+
+  // Meaningful words only (≥2 chars) used for multi-word scoring
+  const words = q.split(/\s+/).filter(w => w.length >= 2);
 
   function score(it) {
     const nm = (it.searchName || it.name || '').toLowerCase();
     const cd = (it.code || '').toLowerCase();
 
-    // S4: entire query is a direct substring match
+    // S4: entire typed query is a substring of name or code
     if (nm.includes(q) || cd.includes(q)) return 100;
 
-    // S3: every word in the query is found somewhere in name/code
+    // No meaningful words after stripping single chars
+    if (words.length === 0) return 0;
+
+    // S3: every meaningful word (≥2 chars) found somewhere in name or code
     if (words.length > 1 && words.every(w => nm.includes(w) || cd.includes(w))) return 90;
 
-    // S2: majority of words found (>50%), only count words ≥3 chars
+    // S2: majority (>50%) of words with ≥3 chars found — avoids false positives
     const longWords = words.filter(w => w.length >= 3);
     if (longWords.length > 0) {
       const hits = longWords.filter(w => nm.includes(w) || cd.includes(w));
       if (hits.length > 0 && hits.length / longWords.length > 0.5) return 50;
     }
 
-    // S1: at least one long word (≥4 chars) found
+    // S1: at least one word with ≥4 chars found
     if (words.some(w => w.length >= 4 && (nm.includes(w) || cd.includes(w)))) return 25;
 
-    // S0: item code starts with the query (min 4 chars)
+    // S0: item code starts with the query prefix (min 4 chars typed)
     if (q.length >= 4 && cd.startsWith(q.slice(0, Math.min(q.length, 8)))) return 20;
 
     return 0;
   }
 
-  // Score everything, drop zeros, sort best first
+  // Score everything, drop zeros, sort best-first
   const scored = allItems
     .map(it => ({ it, s: score(it) }))
     .filter(x => x.s > 0)
@@ -312,19 +331,13 @@ function fuzzySearch(allItems, query) {
 
   const best = scored[0].s;
 
-  // S4 or S3 present → show ONLY those items (exact match, no noise)
-  if (best >= 90) {
-    const top = scored.filter(x => x.s >= 90);
-    return { results: top.map(x => x.it), mode: 'exact' };
-  }
+  // S4/S3 → exact match: show ONLY those items, no noise from lower tiers
+  if (best >= 90) return { results: scored.filter(x => x.s >= 90).map(x => x.it), mode: 'exact' };
 
-  // S2 present → show only majority-word matches
-  if (best >= 50) {
-    const top = scored.filter(x => x.s >= 50);
-    return { results: top.map(x => x.it), mode: 'near' };
-  }
+  // S2 → majority-word match
+  if (best >= 50) return { results: scored.filter(x => x.s >= 50).map(x => x.it), mode: 'near' };
 
-  // S1/S0 → loose match, cap at 20 results
+  // S1/S0 → loose single-word match, cap at 20
   return { results: scored.slice(0, 20).map(x => x.it), mode: 'far' };
 }
 
@@ -792,7 +805,7 @@ function App() {
   const [priceItems,    setPriceItems]   = useState([]);
   const [orders,        setOrders]       = useState([]);
   const [syncedAt,      setSyncedAt]     = useState(null);
-  const [priceSyncedAt, setPriceSyncedAt]= useState(() => localStorage.getItem('4s_price_items_v6_ts') ? new Date(Number(localStorage.getItem('4s_price_items_v6_ts'))).toISOString() : null);
+  const [priceSyncedAt, setPriceSyncedAt]= useState(() => localStorage.getItem('4s_price_items_v7_ts') ? new Date(Number(localStorage.getItem('4s_price_items_v7_ts'))).toISOString() : null);
   const [priceSyncError, setPriceSyncError] = useState(null);
   const [order,         setOrder]        = useState(BLANK_ORDER());
   const [selOrder,      setSelOrder]     = useState(null);
@@ -830,14 +843,14 @@ function App() {
     if (!user) return;
     const cached = localStorage.getItem('4s_items');
     if (cached) try { setItems(JSON.parse(cached)); } catch {}
-    const cachedPL = localStorage.getItem('4s_price_items_v6');
+    const cachedPL = localStorage.getItem('4s_price_items_v7');
     if (cachedPL) try { setPriceItems(JSON.parse(cachedPL)); } catch {}
     syncStock();
     loadPriceListItems()
       .then(pi => {
         if (pi.length > 0) {
           setPriceItems(pi);
-          const ts = localStorage.getItem('4s_price_items_v6_ts');
+          const ts = localStorage.getItem('4s_price_items_v7_ts');
           if (ts) setPriceSyncedAt(new Date(Number(ts)).toISOString());
         }
       })
@@ -872,15 +885,15 @@ function App() {
   }
 
   async function syncPriceList() {
-    localStorage.removeItem('4s_price_items_v6');
-    localStorage.removeItem('4s_price_items_v6_ts');
+    localStorage.removeItem('4s_price_items_v7');
+    localStorage.removeItem('4s_price_items_v7_ts');
     setPriceSyncError(null);
     setLoading(true);
     try {
       const pi = await loadPriceListItems();
       setPriceItems(pi);
       setPriceSyncedAt(new Date().toISOString());
-      localStorage.setItem('4s_price_items_v6_ts', String(Date.now()));
+      localStorage.setItem('4s_price_items_v7_ts', String(Date.now()));
       showToast(pi.length + ' items loaded ✓', 'ok');
     } catch(e) {
       setPriceSyncError(e.message);
@@ -1327,14 +1340,22 @@ function SearchScreen({ctx}) {
       </div>
 
       <div className="scroll" style={{background:'#fff',borderTop:`1px solid ${T.line}`}}>
+        {/* Search result banners — shown for every mode so user knows what happened */}
+        {hasPriceList && q && searchMode==='exact' && filtered.length>0 && (
+          <div style={{padding:'7px 18px',background:'#eaf6ef',borderBottom:`1px solid #b6dfc5`,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <span style={{fontSize:12,color:T.ok,fontWeight:600}}>✓ {filtered.length} exact {filtered.length===1?'match':'matches'} for "{q}"</span>
+          </div>
+        )}
         {hasPriceList && q && searchMode==='near' && filtered.length>0 && (
-          <div style={{padding:'8px 18px',background:T.warnSoft,borderBottom:`1px solid #e6cc95`}}>
-            <span style={{fontSize:12,color:T.warn,fontWeight:600}}>Partial matches for "{q}"</span>
+          <div style={{padding:'7px 18px',background:T.warnSoft,borderBottom:`1px solid #e6cc95`,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <span style={{fontSize:12,color:T.warn,fontWeight:600}}>~ {filtered.length} partial {filtered.length===1?'match':'matches'} for "{q}"</span>
+            <span style={{fontSize:10,color:T.ink4}}>not all words found</span>
           </div>
         )}
         {hasPriceList && q && searchMode==='far' && filtered.length>0 && (
-          <div style={{padding:'8px 18px',background:T.badSoft,borderBottom:`1px solid #e2b8b0`}}>
-            <span style={{fontSize:12,color:T.bad,fontWeight:600}}>No close match — showing loosest results for "{q}"</span>
+          <div style={{padding:'7px 18px',background:T.badSoft,borderBottom:`1px solid #e2b8b0`,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <span style={{fontSize:12,color:T.bad,fontWeight:600}}>⚠ Loose match — "{q}" not found exactly</span>
+            <span style={{fontSize:10,color:T.ink4}}>showing closest</span>
           </div>
         )}
 
@@ -1352,7 +1373,11 @@ function SearchScreen({ctx}) {
                     <Pill tone="neutral" size="sm">{(it.cat||'').toUpperCase()}</Pill>
                     {oos&&(it.stock||[]).length>0&&<Pill tone="bad" size="sm">OUT OF STOCK</Pill>}
                   </div>
-                  <div style={{fontSize:13,fontWeight:600,color:T.ink,lineHeight:1.3,marginBottom:5}}>{it.name}</div>
+                  {/* Show item series name if different from display name */}
+                  <div style={{fontSize:13,fontWeight:600,color:T.ink,lineHeight:1.3,marginBottom:2}}>{it.name}</div>
+                  {it.item && it.item !== it.name && (
+                    <div style={{fontSize:10,color:T.ink4,marginBottom:4,fontStyle:'italic'}}>{it.item}</div>
+                  )}
                   <div style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap'}}>
                     {(it.stock||[]).length>0
                       ? it.stock.map(s=><StockChip key={s.b} branch={s.b} count={s.q} low={s.q>0&&s.q<2}/>)
@@ -1378,7 +1403,13 @@ function SearchScreen({ctx}) {
         {hasPriceList&&filtered.length===0&&q&&(
           <div style={{padding:40,textAlign:'center'}}>
             <div style={{fontSize:15,fontWeight:700,color:T.bad,marginBottom:8}}>No match found</div>
-            <div style={{fontSize:13,color:T.ink4,lineHeight:1.6}}>"{q}" not in {cat!=='all'?cat+' ':''}price list.</div>
+            <div style={{fontSize:13,color:T.ink4,lineHeight:1.6,marginBottom:16}}>"{q}" is not in the {cat!=='all'?cat+' ':''}price list.</div>
+            <div style={{fontSize:12,color:T.ink4,lineHeight:1.7}}>
+              <b>Tips:</b><br/>
+              • Try fewer words: <i>osiris</i> instead of <i>osiris media unit blue</i><br/>
+              • Use the product series name or item code<br/>
+              • Switch category tab above (All / Furniture / Mattress)
+            </div>
           </div>
         )}
         {hasPriceList&&filtered.length===0&&!q&&(
