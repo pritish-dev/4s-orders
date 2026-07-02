@@ -1,44 +1,42 @@
 // ============================================================
 //  4S Interiors — Google Apps Script backend  (Code.gs)
+//  OPS Sheet ID : 12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs
 // ============================================================
 //
-//  SETUP STEPS (first time):
-//   1. Paste this file into script.google.com → your 4S Orders project
-//   2. Enable "Drive API v2":
-//        Apps Script editor → left sidebar "Services" (+) → Drive API → Add
-//   3. Run → ensureSheets          (creates Orders_Master, Staff, etc.)
-//   4. Upload both XLSX price list files to your Google Drive (any folder):
-//        • "CPL - HF HS - April 2026.xlsx"
-//        • "Mattress CPL Price List WEF 14 04 2026.xlsx"
-//   5. Run → importPriceListsFromDrive  (imports XLSX data into OPS sheet)
-//   6. Deploy → New deployment → Web App
-//        Execute as : Me  |  Who has access : Anyone
-//   7. Copy the deployment URL → paste in the app Settings screen
+//  DEPLOY STEPS (every time you update this file):
+//   1. Paste this entire file into your Apps Script project (code.gs)
+//   2. Run → ensureSheets   (only needed once; sets up Orders_Master, etc.)
+//   3. Deploy → Manage deployments → click pencil (Edit) on the existing deployment
+//      → Version: "New version" → Deploy
+//      *** The same URL is reused — no change needed in the app ***
 //
-//  UPDATING (new data / new version):
-//   1. Edit this file in Apps Script editor
-//   2. For price list refresh: re-upload XLSX → run importPriceListsFromDrive
-//   3. Deploy → Manage deployments → edit existing → New version → Deploy
-//        (URL stays the same — no change needed in the app)
+//  LOGIN SHEET IN OPS (APP_ORDERING_CREDS tab):
+//   Columns (row 1 = header, data from row 2):
+//     A: Sales Person Name   B: username   C: Password
+//     D: password_hash       E: Active
+//   • Active must be TRUE / Yes / 1 for the user to be allowed to log in
+//   • password_hash is optional; if set, it must be the MD5 hex of the password
+//
+//  PRICE LIST TABS IN OPS:
+//   All tabs in the OPS sheet are scanned automatically EXCEPT:
+//     Stock, APP_ORDERING_CREDS, Staff, Orders_Master, Change_Log, Sheet1-3
+//   Two formats are auto-detected per tab:
+//     1. Normalized CSV  → header row: CATEGORY|ITEM_GROUP|ITEM_CODE|DESCRIPTION|CPL|EXTRA_INFO
+//     2. Raw Godrej XLSX → header row contains "LN Code" or "LN CODE"
 //
 // ============================================================
 
-// ── IDs ──────────────────────────────────────────────────────────────────────
-// OPS Spreadsheet: holds price list tabs + "Stock" tab
+// ─── IDs ─────────────────────────────────────────────────────────────────────
 var OPS_SHEET_ID = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 
-// OPS sheet tabs to skip when scanning for price list data
-var PRICE_SKIP = ['Stock', 'Staff', 'Orders_Master', 'Change_Log', 'Sheet1', 'Sheet2', 'Sheet3'];
+// Tabs in OPS sheet that are NOT price-list data
+var PRICE_SKIP = [
+  'Stock', 'APP_ORDERING_CREDS', 'Staff',
+  'Orders_Master', 'Change_Log',
+  'Sheet1', 'Sheet2', 'Sheet3', 'Sheet4', 'Sheet5',
+];
 
-// ── Column indexes (0-based) ──────────────────────────────────────────────────
-// Stock tab: A=Code  B=Name  C=Category  D=CPL  E=MRP  F=KB_Qty  G=B2CB_Qty  H=PTA_Qty  I=CTC_Qty
-var COL_ST = { CODE:0, NAME:1, CAT:2, CPL:3, MRP:4, KB:5, B2CB:6, PTA:7, CTC:8 };
-
-// Orders_Master columns: A=Timestamp  B=InternalNo  C=OrderNo  D=WON  E=Status
-//   F=Customer  G=Phone  H=Alt  I=Email  J=Billing  K=Delivery  L=Lift  M=CustCode
-//   N=PORef  O=Source  P=Discount  Q=PlannedDly  R=InstallNote  S=PaymentMode
-//   T=Earnest  U=ReceiptNo  V=FollowUp  W=SalesExec  X=OrderType  Y=Items_JSON
-//   Z=Subtotal  AA=CGST  AB=SGST  AC=TotalWithTax  AD=Date
+// ─── Column indexes (0-based) ─────────────────────────────────────────────────
 var COL_ORD = {
   TS:0, INTERNAL_NO:1, ORDER_NO:2, WON:3, STATUS:4,
   CUSTOMER:5, PHONE:6, ALT:7, EMAIL:8,
@@ -48,59 +46,59 @@ var COL_ORD = {
   FOLLOW_UP:21, SALES_EXEC:22, ORDER_TYPE:23, ITEMS_JSON:24,
   SUBTOTAL:25, CGST:26, SGST:27, TOTAL_WITH_TAX:28, DATE:29
 };
-
-// Staff: A=username  B=password  C=name  D=code  E=role
 var COL_USR = { USERNAME:0, PASSWORD:1, NAME:2, CODE:3, ROLE:4 };
-
-// Change_Log: A=Timestamp  B=User  C=OrderNo  D=Action  E=Detail
 var COL_LOG = { TS:0, USER:1, ORDER_NO:2, ACTION:3, DETAIL:4 };
 
-// ── Master spreadsheet helper ─────────────────────────────────────────────────
-// Auto-creates the master spreadsheet on first use.
+// ─── OPS sheet opener (never throws — returns null on failure) ────────────────
+function _openOPS() {
+  try { return SpreadsheetApp.openById(OPS_SHEET_ID); } catch(e) { return null; }
+}
+
+// ─── Master spreadsheet helpers ───────────────────────────────────────────────
 function _getMasterSS() {
   var props = PropertiesService.getScriptProperties();
   var id    = props.getProperty('MASTER_SHEET_ID');
   if (id) {
-    try { return SpreadsheetApp.openById(id); } catch(e) {
-      Logger.log('Could not open saved master sheet (' + e.message + ') — recreating.');
-    }
+    try { return SpreadsheetApp.openById(id); } catch(e) {}
   }
+  // Auto-setup: creates Orders_Master, Staff, Change_Log tabs in a new spreadsheet
   ensureSheets();
   id = props.getProperty('MASTER_SHEET_ID');
-  if (!id) throw new Error('Auto-setup failed. Run ensureSheets() manually from Apps Script editor.');
+  if (!id) throw new Error('Master sheet not configured. Run ensureSheets() from the Apps Script editor.');
   return SpreadsheetApp.openById(id);
 }
 
 function _getSheet(name) { return _getMasterSS().getSheetByName(name); }
 
+// ─── Response helpers ─────────────────────────────────────────────────────────
 function _jsonOut(callback, obj) {
   return ContentService
     .createTextOutput(callback + '(' + JSON.stringify(obj) + ')')
     .setMimeType(ContentService.MimeType.JAVASCRIPT);
 }
-
 function _jsonPost(obj) {
   return ContentService
     .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-// ── Entry points ──────────────────────────────────────────────────────────────
+// ─── Entry points ─────────────────────────────────────────────────────────────
 function doGet(e) {
   var p        = (e && e.parameter) ? e.parameter : {};
   var callback = p.callback || 'cb';
   var result;
   try {
-    var action = p.action || '';
-    if      (action === 'login')          result = handleLogin(p);
-    else if (action === 'stock')          result = handleStock();
-    else if (action === 'priceList')      result = handlePriceList();
-    else if (action === 'orders')         result = handleOrders(p);
-    else if (action === 'ping')           result = handlePing();
-    else if (action === 'debugPriceList') result = handleDebugPriceList();
-    else result = { ok: false, error: 'Unknown action: ' + action };
-  } catch (err) {
-    result = { ok: false, error: err.message };
+    switch (p.action || '') {
+      case 'ping':           result = handlePing();             break;
+      case 'login':          result = handleLogin(p);           break;
+      case 'stock':          result = handleStock();            break;
+      case 'priceList':      result = handlePriceList();        break;
+      case 'orders':         result = handleOrders(p);          break;
+      case 'debugPriceList': result = handleDebugPriceList();   break;
+      default:               result = { ok: false, error: 'Unknown action: ' + (p.action || '(none)') };
+    }
+  } catch(err) {
+    result = { ok: false, error: err.message, stack: err.stack ? err.stack.slice(0,400) : '' };
   }
   return _jsonOut(callback, result);
 }
@@ -108,213 +106,304 @@ function doGet(e) {
 function doPost(e) {
   var body;
   try { body = JSON.parse(e.postData.contents); }
-  catch (ex) { return _jsonPost({ ok: false, error: 'Bad JSON body' }); }
+  catch(ex) { return _jsonPost({ ok: false, error: 'Bad JSON body' }); }
   var result;
   try {
-    var action = body.action || '';
-    if      (action === 'saveOrder')  result = handleSaveOrder(body.order);
-    else if (action === 'updateWON')  result = handleUpdateWON(body);
-    else result = { ok: false, error: 'Unknown action: ' + action };
-  } catch (err) {
+    switch (body.action || '') {
+      case 'saveOrder':  result = handleSaveOrder(body.order); break;
+      case 'updateWON':  result = handleUpdateWON(body);       break;
+      default:           result = { ok: false, error: 'Unknown action: ' + body.action };
+    }
+  } catch(err) {
     result = { ok: false, error: err.message };
   }
   return _jsonPost(result);
 }
 
-// ── PING / CONNECTION TEST ────────────────────────────────────────────────────
+// ─── PING ─────────────────────────────────────────────────────────────────────
+// Tests connectivity. Does NOT touch master sheet — safe to call before ensureSheets.
 function handlePing() {
-  var props = PropertiesService.getScriptProperties();
-  var id    = props.getProperty('MASTER_SHEET_ID');
-  if (!id) { ensureSheets(); id = props.getProperty('MASTER_SHEET_ID'); }
-  var ss = SpreadsheetApp.openById(id);
+  var opsInfo    = { ok: false };
+  var masterInfo = { note: 'Not configured yet — run ensureSheets() once' };
 
-  var opsSheets = [];
+  var opsSS = _openOPS();
+  if (opsSS) {
+    opsInfo = {
+      ok:     true,
+      name:   opsSS.getName(),
+      url:    opsSS.getUrl(),
+      sheets: opsSS.getSheets().map(function(s){ return s.getName(); }),
+    };
+  } else {
+    opsInfo = { ok: false, error: 'Cannot open OPS sheet (ID: ' + OPS_SHEET_ID + '). Check the sheet is shared with the script owner.' };
+  }
+
   try {
-    var opsSS = SpreadsheetApp.openById(OPS_SHEET_ID);
-    opsSheets = opsSS.getSheets().map(function(s){ return s.getName(); });
-  } catch(e) {}
+    var props    = PropertiesService.getScriptProperties();
+    var masterId = props.getProperty('MASTER_SHEET_ID');
+    if (masterId) {
+      var masterSS = SpreadsheetApp.openById(masterId);
+      masterInfo = { ok: true, name: masterSS.getName(), url: masterSS.getUrl() };
+    }
+  } catch(e) {
+    masterInfo = { ok: false, error: e.message };
+  }
 
-  return {
-    ok:           true,
-    message:      'Connected ✓',
-    spreadsheetUrl: ss.getUrl(),
-    spreadsheetId:  id,
-    sheets:         ss.getSheets().map(function(s){ return s.getName(); }),
-    opsSheetId:     OPS_SHEET_ID,
-    opsSheets:      opsSheets,
-  };
+  return { ok: true, message: 'Connected', opsSheet: opsInfo, masterSheet: masterInfo };
 }
 
-// ── LOGIN ─────────────────────────────────────────────────────────────────────
+// ─── LOGIN ─────────────────────────────────────────────────────────────────────
+// Priority order:
+//   1. OPS sheet → "APP_ORDERING_CREDS" tab  (primary)
+//   2. OPS sheet → "Staff" tab               (fallback)
+//   3. Master spreadsheet → "Staff" tab      (legacy fallback)
+//
+// APP_ORDERING_CREDS column headers (row 1):
+//   "Sales Person Name" | "username" | "Password" | "password_hash" | "Active"
 function handleLogin(p) {
   var username = (p.username || '').toLowerCase().trim();
   var password = (p.password || '').trim();
-  if (!username || !password) return { ok: false, error: 'Username and password required.' };
+  if (!username || !password) return { ok: false, error: 'Username and password are required.' };
 
-  var sh = _findStaffSheet();
-  if (!sh) {
-    return {
-      ok: false,
-      error: 'Staff sheet not found.\n\n' +
-             'Fix: Ensure a tab named exactly "Staff" (capital S) exists in the master ' +
-             'or OPS spreadsheet with columns: username, password, name, code, role.'
-    };
+  // 1. Try APP_ORDERING_CREDS in OPS sheet
+  var opsSS = _openOPS();
+  if (opsSS) {
+    var credsSh = opsSS.getSheetByName('APP_ORDERING_CREDS');
+    if (credsSh) {
+      var result = _loginWithCreds(credsSh, username, password);
+      if (result !== null) return result;   // found the username (matched or rejected)
+    }
+
+    // 2. Try Staff tab in OPS sheet
+    var staffSh = opsSS.getSheetByName('Staff');
+    if (staffSh) {
+      var r2 = _loginWithStaff(staffSh, username, password);
+      if (r2 !== null) return r2;
+    }
   }
 
-  var rows     = sh.getDataRange().getValues();
-  var dataRows = rows.slice(1).filter(function(r) {
-    return String(r[COL_USR.USERNAME] || '').trim() !== '';
-  });
+  // 3. Try Staff in master spreadsheet (legacy)
+  try {
+    var masterStaff = _getSheet('Staff');
+    if (masterStaff) {
+      var r3 = _loginWithStaff(masterStaff, username, password);
+      if (r3 !== null) return r3;
+    }
+  } catch(e) {}
 
-  if (dataRows.length === 0) {
-    return { ok: false, error: 'Staff sheet exists but has no data rows.' };
-  }
+  return { ok: false, error: 'Username not found. Check your credentials or contact your manager.' };
+}
 
-  for (var i = 0; i < dataRows.length; i++) {
-    var r = dataRows[i];
-    if (String(r[COL_USR.USERNAME]).toLowerCase().trim() === username &&
-        String(r[COL_USR.PASSWORD]).trim() === password) {
+// Login against APP_ORDERING_CREDS sheet.
+// Returns { ok, user } if username matched (even if wrong password),
+// or null if username not present in this sheet (try next sheet).
+function _loginWithCreds(sh, username, password) {
+  var rows = sh.getDataRange().getValues();
+  if (rows.length < 2) return null;
+
+  // Map headers (case-insensitive)
+  var hdr = rows[0].map(function(c){ return String(c || '').toLowerCase().trim(); });
+  var cName  = _hdrIdx(hdr, ['sales person name', 'salesperson name', 'name', 'sales person']);
+  var cUser  = _hdrIdx(hdr, ['username', 'user name', 'user']);
+  var cPass  = _hdrIdx(hdr, ['password']);
+  var cHash  = _hdrIdx(hdr, ['password_hash', 'passwordhash', 'hash']);
+  var cActive = _hdrIdx(hdr, ['active', 'status', 'enabled']);
+
+  // Positional defaults if headers not recognised
+  if (cName   < 0) cName   = 0;
+  if (cUser   < 0) cUser   = 1;
+  if (cPass   < 0) cPass   = 2;
+  if (cHash   < 0) cHash   = 3;
+  if (cActive < 0) cActive = 4;
+
+  for (var i = 1; i < rows.length; i++) {
+    var r           = rows[i];
+    var rowUser     = String(r[cUser]   || '').toLowerCase().trim();
+    var activeRaw   = cActive < r.length ? String(r[cActive] || '').toLowerCase().trim() : 'true';
+
+    if (!rowUser || rowUser !== username) continue;
+
+    // Found the username row — check active flag
+    if (activeRaw && activeRaw !== 'true' && activeRaw !== 'yes' && activeRaw !== '1') {
+      return { ok: false, error: 'Your account is inactive. Please contact your manager.' };
+    }
+
+    // Check password
+    var storedPass = cPass  < r.length ? String(r[cPass]  || '').trim() : '';
+    var storedHash = cHash  < r.length ? String(r[cHash]  || '').trim() : '';
+    var nameVal    = cName  < r.length ? String(r[cName]  || '').trim() : '';
+
+    var matched = false;
+    if (storedHash) {
+      matched = (_md5(password) === storedHash.toLowerCase());
+    }
+    if (!matched && storedPass) {
+      matched = (storedPass === password);
+    }
+
+    if (matched) {
       return {
         ok:   true,
         user: {
-          name:   String(r[COL_USR.NAME] || ''),
-          code:   String(r[COL_USR.CODE] || ''),
-          role:   String(r[COL_USR.ROLE] || 'sales'),
+          name:   nameVal || username,
+          code:   rowUser,
+          role:   'sales',
           branch: 'Patia',
         },
       };
     }
+    return { ok: false, error: 'Incorrect password. Please try again.' };
   }
-  return { ok: false, error: 'Invalid username or password.' };
+
+  return null; // username not in this sheet
 }
 
-// Tries: 1) master sheet "Staff", 2) OPS sheet "Staff"
-function _findStaffSheet() {
-  try { var sh = _getSheet('Staff'); if (sh) return sh; } catch(e) {}
-  try {
-    var opsSS = SpreadsheetApp.openById(OPS_SHEET_ID);
-    var sh2   = opsSS.getSheetByName('Staff');
-    if (sh2) {
-      // Auto-save OPS sheet as master for future calls
-      PropertiesService.getScriptProperties().setProperty('MASTER_SHEET_ID', OPS_SHEET_ID);
-      Logger.log('Staff found in OPS sheet — auto-set as master.');
-      return sh2;
+// Login against legacy Staff sheet (username | password | name | code | role).
+// Returns result object or null (to try next sheet).
+function _loginWithStaff(sh, username, password) {
+  var rows = sh.getDataRange().getValues().slice(1)
+                .filter(function(r){ return String(r[COL_USR.USERNAME]||'').trim(); });
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (String(r[COL_USR.USERNAME]).toLowerCase().trim() !== username) continue;
+    if (String(r[COL_USR.PASSWORD]).trim() !== password) {
+      return { ok: false, error: 'Incorrect password.' };
     }
-  } catch(e) {}
+    return {
+      ok: true,
+      user: {
+        name:   String(r[COL_USR.NAME] || ''),
+        code:   String(r[COL_USR.CODE] || ''),
+        role:   String(r[COL_USR.ROLE] || 'sales'),
+        branch: 'Patia',
+      },
+    };
+  }
   return null;
 }
 
-// ── STOCK ─────────────────────────────────────────────────────────────────────
-// Reads from OPS sheet → "Stock" tab.
-// Falls back to master sheet → "Stock_Master".
-//
-// Expected columns (either tab):
+// MD5 hex digest using Apps Script Utilities
+function _md5(input) {
+  var raw = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.MD5, input, Utilities.Charset.UTF_8
+  );
+  return raw.map(function(b){ return ('0' + (b + 256).toString(16)).slice(-2); }).join('');
+}
+
+// ─── STOCK ─────────────────────────────────────────────────────────────────────
+// Reads OPS sheet → "Stock" tab.
+// Expected columns (header row 1):
 //   Code | Name | Category | CPL | MRP | KB_Qty | B2CB_Qty | PTA_Qty | CTC_Qty
-// Column names are auto-detected from the header row; positional fallback if not found.
+// Column positions are detected from the header; positional fallback if headers differ.
 function handleStock() {
   var sh = null;
+  var opsSS = _openOPS();
+  if (opsSS) sh = opsSS.getSheetByName('Stock');
 
-  // Try OPS sheet first
-  try {
-    var opsSS = SpreadsheetApp.openById(OPS_SHEET_ID);
-    sh = opsSS.getSheetByName('Stock');
-  } catch(e) {}
-
-  // Fall back to master sheet
-  if (!sh) sh = _getSheet('Stock_Master');
-  if (!sh) return { ok: false, error: 'Stock sheet not found. Add a "Stock" tab to the OPS spreadsheet.' };
-
-  var rows     = sh.getDataRange().getValues();
-  var syncedAt = new Date().toISOString();
-
-  // Column detection from header
-  var colCode = COL_ST.CODE, colName = COL_ST.NAME, colCat  = COL_ST.CAT;
-  var colCPL  = COL_ST.CPL,  colMRP  = COL_ST.MRP;
-  var colBr   = [COL_ST.KB, COL_ST.B2CB, COL_ST.PTA, COL_ST.CTC];
-
-  if (rows.length > 0) {
-    var hdr = rows[0].map(function(c){ return String(c||'').toUpperCase().trim(); });
-    for (var hj = 0; hj < hdr.length; hj++) {
-      var h = hdr[hj];
-      if (h === 'CODE' || h === 'ITEM CODE' || h === 'LN CODE')         colCode  = hj;
-      else if (h === 'NAME' || h === 'ITEM NAME' || h === 'DESCRIPTION') colName  = hj;
-      else if (h === 'CATEGORY' || h === 'CAT')                          colCat   = hj;
-      else if (h === 'CPL' || h === 'BASIC PRICE' || h === 'D')          colCPL   = hj;
-      else if (h === 'MRP' || h === 'PRICE' || h === 'E')                colMRP   = hj;
-      else if (h === 'KB_QTY' || h === 'KB')   colBr[0] = hj;
-      else if (h === 'B2CB_QTY' || h === 'B2CB') colBr[1] = hj;
-      else if (h === 'PTA_QTY' || h === 'PTA')   colBr[2] = hj;
-      else if (h === 'CTC_QTY' || h === 'CTC')   colBr[3] = hj;
-    }
-    // Optional: check col J (index 9) for last-sync timestamp
-    if (rows[0][9]) {
-      var d = new Date(rows[0][9]);
-      if (!isNaN(d.getTime())) syncedAt = d.toISOString();
-    }
+  // Fallback: master sheet Stock_Master
+  if (!sh) {
+    try { sh = _getSheet('Stock_Master'); } catch(e) {}
+  }
+  if (!sh) {
+    return { ok: false, error: 'Stock sheet not found. Add a "Stock" tab to the OPS spreadsheet (' + OPS_SHEET_ID + ').' };
   }
 
-  var BRANCHES = ['KB', 'B2CB', 'PTA', 'CTC'];
-  var items = [];
+  var rows = sh.getDataRange().getValues();
+  if (rows.length < 2) return { ok: true, items: [], syncedAt: new Date().toISOString() };
 
+  // Auto-detect columns from header row
+  var hdr = rows[0].map(function(c){ return String(c||'').toUpperCase().trim(); });
+  var cCode = _hdrIdx(hdr, ['CODE', 'ITEM CODE', 'LN CODE', 'ITEM_CODE']);
+  var cName = _hdrIdx(hdr, ['NAME', 'ITEM NAME', 'DESCRIPTION', 'LN DESCRIPTION']);
+  var cCat  = _hdrIdx(hdr, ['CATEGORY', 'CAT', 'TYPE']);
+  var cCPL  = _hdrIdx(hdr, ['CPL', 'BASIC PRICE', 'CONSUMER BASIC']);
+  var cMRP  = _hdrIdx(hdr, ['MRP', 'PRICE', 'SELLING PRICE']);
+  var cKB   = _hdrIdx(hdr, ['KB_QTY', 'KB', 'KB QTY']);
+  var cB2CB = _hdrIdx(hdr, ['B2CB_QTY', 'B2CB', 'B2CB QTY']);
+  var cPTA  = _hdrIdx(hdr, ['PTA_QTY', 'PTA', 'PTA QTY']);
+  var cCTC  = _hdrIdx(hdr, ['CTC_QTY', 'CTC', 'CTC QTY']);
+
+  // Positional defaults
+  if (cCode < 0) cCode = 0;
+  if (cName < 0) cName = 1;
+  if (cCat  < 0) cCat  = 2;
+  if (cCPL  < 0) cCPL  = 3;
+  if (cMRP  < 0) cMRP  = 4;
+  if (cKB   < 0) cKB   = 5;
+  if (cB2CB < 0) cB2CB = 6;
+  if (cPTA  < 0) cPTA  = 7;
+  if (cCTC  < 0) cCTC  = 8;
+
+  var BRANCHES = ['KB', 'B2CB', 'PTA', 'CTC'];
+  var bCols    = [cKB, cB2CB, cPTA, cCTC];
+  var syncedAt = new Date().toISOString();
+  // Optional sync-timestamp in J1 (col 9)
+  if (rows[0][9]) { var d = new Date(rows[0][9]); if (!isNaN(d)) syncedAt = d.toISOString(); }
+
+  var items = [];
   for (var i = 1; i < rows.length; i++) {
     var r    = rows[i];
-    var code = String(r[colCode] || '').toUpperCase().trim();
-    var name = String(r[colName] || '').trim();
+    var code = String(r[cCode] || '').toUpperCase().trim();
+    var name = String(r[cName] || '').trim();
     if (!code && !name) continue;
 
-    var cpl   = parseFloat(String(r[colCPL] || 0).replace(/[^\d.]/g, '')) || 0;
-    var mrp   = parseFloat(String(r[colMRP] || 0).replace(/[^\d.]/g, '')) || cpl;
-    var cat   = String(r[colCat] || '').trim();
-    var stock = [];
-
-    for (var b = 0; b < BRANCHES.length; b++) {
-      var qty = parseInt(String(r[colBr[b]] || 0).replace(/[^\d]/g, ''), 10) || 0;
-      stock.push({ b: BRANCHES[b], q: qty });
-    }
+    var cpl  = _numVal(r[cCPL]);
+    var mrp  = _numVal(r[cMRP]) || cpl;
+    var cat  = String(r[cCat]  || '').trim();
+    var stock = BRANCHES.map(function(b, bi){
+      return { b: b, q: parseInt(String(r[bCols[bi]] || 0).replace(/[^\d]/g,''), 10) || 0 };
+    });
 
     items.push({ code: code, name: name, cat: cat, mrp: mrp, cpl: cpl, stock: stock });
   }
-
   return { ok: true, items: items, syncedAt: syncedAt };
 }
 
-// ── PRICE LIST ────────────────────────────────────────────────────────────────
-// Reads ALL non-system tabs from the OPS spreadsheet and returns a unified item list.
-//
-// Supported tab formats (auto-detected):
-//   1. Normalized  — header: CATEGORY | ITEM_GROUP | ITEM_CODE | DESCRIPTION | CPL | EXTRA_INFO
-//   2. Raw XLSX (furniture) — header: [blank] | HSN CODE | LN Code | LN Description | Unit Consumer Basic
-//   3. Raw XLSX (mattress)  — header: [blank] | HSN | Reference | Model | LN Code | LN Description | ... | CPL
-//
-// This allows the OPS sheet to be populated either by running importPriceListsFromDrive()
-// or by manually importing XLSX / CSV files into individual tabs.
+// ─── PRICE LIST ───────────────────────────────────────────────────────────────
+// Reads every tab in the OPS sheet that isn't in PRICE_SKIP.
+// Auto-detects tab format:
+//   • Normalized CSV  (header has ITEM_CODE + DESCRIPTION)
+//   • Raw Godrej XLSX furniture (header has LN Code but not MODEL)
+//   • Raw Godrej XLSX mattress  (header has LN Code AND MODEL)
 function handlePriceList() {
-  var ss  = SpreadsheetApp.openById(OPS_SHEET_ID);
-  var all = [];
-  var counts = {};
+  var opsSS = _openOPS();
+  if (!opsSS) return { ok: false, error: 'Cannot open OPS spreadsheet (ID: ' + OPS_SHEET_ID + '). Ensure the script owner has access.' };
 
-  var sheets = ss.getSheets();
+  var all    = [];
+  var counts = {};
+  var errors = [];
+
+  var sheets = opsSS.getSheets();
   for (var i = 0; i < sheets.length; i++) {
     var sh      = sheets[i];
     var tabName = sh.getName();
-    if (PRICE_SKIP.indexOf(tabName) !== -1) continue;
+    if (_inSkipList(tabName)) continue;
 
-    var tabItems = _parsePriceTab(sh, tabName);
-    if (tabItems.length > 0) {
-      all    = all.concat(tabItems);
-      counts[tabName] = tabItems.length;
+    try {
+      var tabItems = _parsePriceTab(sh, tabName);
+      if (tabItems.length > 0) {
+        all    = all.concat(tabItems);
+        counts[tabName] = tabItems.length;
+      }
+    } catch(e) {
+      errors.push(tabName + ': ' + e.message);
     }
   }
 
-  return {
-    ok:        true,
-    items:     all,
-    counts:    counts,
-    totalTabs: Object.keys(counts).length,
-  };
+  var result = { ok: true, items: all, counts: counts, totalTabs: Object.keys(counts).length };
+  if (errors.length) result.tabErrors = errors;
+  return result;
 }
 
-// Detect the tab format and parse accordingly
+function _inSkipList(name) {
+  var n = name.trim();
+  for (var i = 0; i < PRICE_SKIP.length; i++) {
+    if (PRICE_SKIP[i].toLowerCase() === n.toLowerCase()) return true;
+  }
+  return false;
+}
+
+// ─── Tab format detector + dispatcher ────────────────────────────────────────
 function _parsePriceTab(sh, tabName) {
   var rows = sh.getDataRange().getValues();
   if (rows.length < 2) return [];
@@ -323,53 +412,51 @@ function _parsePriceTab(sh, tabName) {
   var format    = '';
 
   for (var i = 0; i < Math.min(10, rows.length); i++) {
-    var cells  = rows[i].map(function(c) { return String(c || '').toUpperCase().trim(); });
+    var cells  = rows[i].map(function(c){ return String(c||'').toUpperCase().trim(); });
     var joined = '|' + cells.join('|') + '|';
 
-    // Normalized format: has ITEM_CODE + DESCRIPTION in header
-    if (joined.indexOf('|ITEM_CODE|') !== -1 || joined.indexOf('|ITEM CODE|') !== -1) {
-      if (joined.indexOf('DESCRIPTION') !== -1) {
-        headerRow = i; format = 'normalized'; break;
-      }
+    // Normalized format: has ITEM_CODE (or ITEM CODE) + DESCRIPTION
+    if ((joined.indexOf('|ITEM_CODE|') !== -1 || joined.indexOf('|ITEM CODE|') !== -1)
+        && joined.indexOf('DESCRIPTION') !== -1) {
+      headerRow = i; format = 'normalized'; break;
     }
 
-    // Raw XLSX format: has LN CODE somewhere in the row
-    if (joined.indexOf('|LN CODE|') !== -1 || joined.indexOf('LN CODE') !== -1) {
+    // Raw Godrej: has LN CODE somewhere
+    if (joined.indexOf('LN CODE') !== -1) {
       headerRow = i;
-      // Mattress format additionally has MODEL column
-      format = (joined.indexOf('|MODEL|') !== -1) ? 'raw-mattress' : 'raw-furniture';
+      format    = (joined.indexOf('|MODEL|') !== -1) ? 'raw-mattress' : 'raw-furniture';
       break;
     }
   }
 
-  if (headerRow === -1) return [];
-  if (format === 'normalized')    return _parseNormalizedTab(rows, headerRow, tabName);
-  if (format === 'raw-furniture') return _parseRawFurnitureTab(rows, headerRow, tabName);
-  if (format === 'raw-mattress')  return _parseRawMattressTab(rows, headerRow, tabName);
+  if (headerRow < 0) return [];   // unrecognised tab — silently skip
+  if (format === 'normalized')    return _parseNormTab(rows, headerRow, tabName);
+  if (format === 'raw-furniture') return _parseFurnitureTab(rows, headerRow, tabName);
+  if (format === 'raw-mattress')  return _parseMattressTab(rows, headerRow, tabName);
   return [];
 }
 
-// ── Parser: normalized tab ────────────────────────────────────────────────────
+// ─── Normalized tab parser ────────────────────────────────────────────────────
 // Header: CATEGORY | ITEM_GROUP | ITEM_CODE | DESCRIPTION | CPL | EXTRA_INFO
-function _parseNormalizedTab(rows, headerRow, tabName) {
+function _parseNormTab(rows, headerRow, tabName) {
   var hdr    = rows[headerRow].map(function(c){ return String(c||'').toUpperCase().trim(); });
-  var cCat   = hdr.indexOf('CATEGORY');   if (cCat   < 0) cCat   = 0;
-  var cGroup = hdr.indexOf('ITEM_GROUP'); if (cGroup < 0) cGroup = 1;
-  var cCode  = hdr.indexOf('ITEM_CODE');  if (cCode  < 0) cCode  = 2;
-  var cDesc  = hdr.indexOf('DESCRIPTION'); if (cDesc < 0) cDesc  = 3;
-  var cCPL   = hdr.indexOf('CPL');        if (cCPL   < 0) cCPL   = 4;
-  var cExtra = hdr.indexOf('EXTRA_INFO'); if (cExtra < 0) cExtra = 5;
+  var cCat   = _hdrIdx(hdr, ['CATEGORY']);           if (cCat   < 0) cCat   = 0;
+  var cGroup = _hdrIdx(hdr, ['ITEM_GROUP', 'ITEM GROUP']); if (cGroup < 0) cGroup = 1;
+  var cCode  = _hdrIdx(hdr, ['ITEM_CODE',  'ITEM CODE']);  if (cCode  < 0) cCode  = 2;
+  var cDesc  = _hdrIdx(hdr, ['DESCRIPTION']);        if (cDesc  < 0) cDesc  = 3;
+  var cCPL   = _hdrIdx(hdr, ['CPL', 'PRICE']);       if (cCPL   < 0) cCPL   = 4;
+  var cExtra = _hdrIdx(hdr, ['EXTRA_INFO', 'EXTRA']); if (cExtra < 0) cExtra = 5;
 
   var items = [];
   for (var r = headerRow + 1; r < rows.length; r++) {
-    var row  = rows[r];
-    var code = String(row[cCode]  || '').trim();
-    var desc = String(row[cDesc]  || '').trim();
+    var row   = rows[r];
+    var code  = String(row[cCode]  || '').trim();
+    var desc  = String(row[cDesc]  || '').trim();
     if (!code && !desc) continue;
 
     var cat   = String(row[cCat]   || tabName).trim() || tabName;
     var group = String(row[cGroup] || '').trim();
-    var cpl   = parseFloat(String(row[cCPL] || 0).replace(/[^\d.]/g, '')) || 0;
+    var cpl   = _numVal(row[cCPL]);
     var extra = cExtra < row.length ? String(row[cExtra] || '').trim() : '';
 
     items.push(_makeItem(tabName, cat, group, code, desc, cpl, extra));
@@ -377,68 +464,65 @@ function _parseNormalizedTab(rows, headerRow, tabName) {
   return items;
 }
 
-// ── Parser: raw XLSX furniture tab ───────────────────────────────────────────
-// Header row (row 5 in XLSX): [blank] | HSN CODE | LN Code | LN Description | Unit Consumer Basic [| extra...]
-// Sub-category markers come in two forms:
-//   • Home Storage style  : col before code = sub-cat text,  code column = empty
-//   • Living Room style   : code column = sub-cat text, description column = empty, price = 0
-function _parseRawFurnitureTab(rows, headerRow, tabName) {
+// ─── Raw Godrej furniture tab parser ─────────────────────────────────────────
+// Header row: [blank] | HSN CODE | LN Code | LN Description | Unit Consumer Basic [| extras]
+// Sub-category markers appear in two forms:
+//   • Home Storage style : col before LN Code has text, LN Code column is empty
+//   • Living Room style  : LN Code column has the sub-cat name, Description + Price are empty
+function _parseFurnitureTab(rows, headerRow, tabName) {
   var hdr   = rows[headerRow].map(function(c){ return String(c||'').toUpperCase().trim(); });
-  var cCode = _findCol(hdr, ['LN CODE', 'ITEM CODE']);
-  var cDesc = _findCol(hdr, ['LN DESCRIPTION', 'ITEM DESCRIPTION', 'DESCRIPTION']);
-  var cCPL  = _findCol(hdr, ['UNIT CONSUMER BASIC', 'CPL', 'PRICE', 'CONSUMER BASIC']);
+  var cCode = _hdrIdx(hdr, ['LN CODE', 'ITEM CODE', 'LN_CODE']);
+  var cDesc = _hdrIdx(hdr, ['LN DESCRIPTION', 'ITEM DESCRIPTION', 'DESCRIPTION', 'LN_DESCRIPTION']);
+  var cCPL  = _hdrIdx(hdr, ['UNIT CONSUMER BASIC', 'CONSUMER BASIC', 'CPL', 'PRICE']);
   if (cCode < 0 || cDesc < 0) return [];
 
   var items        = [];
   var currentGroup = '';
 
   for (var r = headerRow + 1; r < rows.length; r++) {
-    var row   = rows[r];
-    var code  = String(row[cCode] || '').trim();
-    var desc  = String(row[cDesc] || '').trim();
-    var price = cCPL >= 0 ? row[cCPL] : 0;
-    var priceFlt = parseFloat(String(price || 0).replace(/[^\d.]/g, '')) || 0;
+    var row    = rows[r];
+    var code   = String(row[cCode] || '').trim();
+    var desc   = String(row[cDesc] || '').trim();
+    var price  = cCPL >= 0 ? row[cCPL] : 0;
+    var priceFl = _numVal(price);
 
-    // Completely empty row — also check the column before code (sub-cat in HS style)
+    // Completely blank row — check column before code for HS-style sub-cat marker
     if (!code && !desc) {
       if (cCode > 0) {
-        var preCode = String(row[cCode - 1] || '').trim();
-        if (preCode && isNaN(parseFloat(preCode))) currentGroup = preCode;
+        var pre = String(row[cCode - 1] || '').trim();
+        if (pre && isNaN(parseFloat(pre))) currentGroup = pre;
       }
       continue;
     }
 
-    // Sub-category marker (Living Room style): code has text, desc empty, price 0
-    if (code && !desc && priceFlt === 0) {
-      currentGroup = code;
-      continue;
-    }
+    // LR-style sub-cat: code has text, description is empty, price is 0
+    if (code && !desc && priceFl === 0) { currentGroup = code; continue; }
 
     // Data row
     if (code && desc) {
-      // Collect any extra columns (upholstery, material, etc.)
       var extraParts = [];
-      for (var ec = cCPL + 1; ec < Math.min(cCPL + 3, row.length); ec++) {
+      var eMax = Math.min(cCPL + 3, row.length);
+      for (var ec = cCPL + 1; ec < eMax; ec++) {
         var ev = String(row[ec] || '').trim();
         if (ev) extraParts.push(ev);
       }
-      items.push(_makeItem(tabName, tabName, currentGroup, code, desc, priceFlt, extraParts.join(' | ')));
+      items.push(_makeItem(tabName, tabName, currentGroup, code, desc, priceFl, extraParts.join(' | ')));
     }
   }
   return items;
 }
 
-// ── Parser: raw XLSX mattress tab ────────────────────────────────────────────
-// Header: [blank] | HSN | Reference | Model | LN Code | LN Description | Thickness(in) | Thickness(cm) | CPL | ...
-function _parseRawMattressTab(rows, headerRow, tabName) {
+// ─── Raw Godrej mattress tab parser ──────────────────────────────────────────
+// Header: [blank] | HSN | Reference | Model | LN Code | LN Description | Thickness(in) | Thickness(cm) | CPL
+function _parseMattressTab(rows, headerRow, tabName) {
   var hdr    = rows[headerRow].map(function(c){ return String(c||'').toUpperCase().trim(); });
-  var cCode  = _findCol(hdr, ['LN CODE']);
-  var cDesc  = _findCol(hdr, ['LN DESCRIPTION', 'DESCRIPTION']);
-  var cModel = _findCol(hdr, ['MODEL']);
-  var cRef   = _findCol(hdr, ['REFERENCE']);
-  var cTin   = _findCol(hdr, ['REFERENCE (THICKNESS IN INCH)', 'THICKNESS IN INCH', 'THICKNESS(IN)']);
-  var cTcm   = _findCol(hdr, ['THICKNESS IN CM', 'THICKNESS(CM)']);
-  var cCPL   = _findCol(hdr, ['UNIT CONSUMER BASIC', 'CPL', 'PRICE']);
+  var cCode  = _hdrIdx(hdr, ['LN CODE']);
+  var cDesc  = _hdrIdx(hdr, ['LN DESCRIPTION', 'DESCRIPTION']);
+  var cModel = _hdrIdx(hdr, ['MODEL']);
+  var cRef   = _hdrIdx(hdr, ['REFERENCE']);
+  var cTin   = _hdrIdx(hdr, ['REFERENCE (THICKNESS IN INCH)', 'THICKNESS IN INCH']);
+  var cTcm   = _hdrIdx(hdr, ['THICKNESS IN CM']);
+  var cCPL   = _hdrIdx(hdr, ['UNIT CONSUMER BASIC', 'CONSUMER BASIC', 'CPL', 'PRICE']);
   if (cCode < 0 || cDesc < 0) return [];
 
   var items        = [];
@@ -453,10 +537,10 @@ function _parseRawMattressTab(rows, headerRow, tabName) {
     if (model) currentModel = model;
     if (!code || !desc) continue;
 
-    var cpl   = cCPL  >= 0 ? (parseFloat(String(row[cCPL]  || 0).replace(/[^\d.]/g, '')) || 0) : 0;
-    var ref   = cRef  >= 0 ? String(row[cRef]  || '').trim() : '';
-    var tin   = cTin  >= 0 ? String(row[cTin]  || '').trim() : '';
-    var tcm   = cTcm  >= 0 ? String(row[cTcm]  || '').trim() : '';
+    var cpl   = cCPL  >= 0 ? _numVal(row[cCPL])                      : 0;
+    var ref   = cRef  >= 0 ? String(row[cRef]  || '').trim()          : '';
+    var tin   = cTin  >= 0 ? String(row[cTin]  || '').trim()          : '';
+    var tcm   = cTcm  >= 0 ? String(row[cTcm]  || '').trim()          : '';
     var extra = tin   ? (tin + '"' + (tcm ? ' / ' + tcm + 'cm' : '')) : ref;
 
     items.push(_makeItem('Mattress', 'Mattress', currentModel, code, desc, cpl, extra));
@@ -464,176 +548,42 @@ function _parseRawMattressTab(rows, headerRow, tabName) {
   return items;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function _findCol(headers, candidates) {
+// ─── Shared helpers ───────────────────────────────────────────────────────────
+function _hdrIdx(headers, candidates) {
   for (var i = 0; i < candidates.length; i++) {
-    var idx = headers.indexOf(candidates[i]);
-    if (idx >= 0) return idx;
+    var key = candidates[i].toUpperCase();
+    for (var j = 0; j < headers.length; j++) {
+      if (headers[j].toUpperCase() === key) return j;
+    }
   }
   return -1;
 }
 
+function _numVal(v) {
+  return parseFloat(String(v || 0).replace(/[^\d.]/g, '')) || 0;
+}
+
 function _makeItem(tabName, cat, group, code, desc, cpl, extra) {
   var name       = desc || group || cat;
-  // searchName includes all fields so fuzzy search works across category, group, description, code, size
   var searchName = [tabName, cat, group, desc, code, extra].filter(Boolean).join(' ');
   return {
     code:       code.toUpperCase(),
     name:       name,
     searchName: searchName,
     cat:        cat,
-    item:       group || '',
+    item:       group  || '',
     mrp:        cpl,
     cpl:        cpl,
-    extra:      extra || '',
+    extra:      extra  || '',
     stock:      [],
     sheet:      tabName,
   };
 }
 
-// ── IMPORT PRICE LISTS FROM DRIVE ────────────────────────────────────────────
-// Run this from the Apps Script editor after uploading the XLSX files to Drive.
-//
-// PREREQUISITES:
-//   1. Upload these two files to your Google Drive (any folder):
-//        • "CPL - HF HS - April 2026.xlsx"
-//        • "Mattress CPL Price List WEF 14 04 2026.xlsx"
-//   2. Enable Advanced Drive Service in this project:
-//        Left sidebar → Services (+) → Drive API → Version 2 → Add
-//   3. Click Run → importPriceListsFromDrive
-//
-// WHAT IT DOES:
-//   • Converts each XLSX to a temporary Google Sheet via Drive API
-//   • Reads and normalizes all price tabs (18 furniture + 1 mattress)
-//   • Writes normalized data to the OPS spreadsheet (OPS_SHEET_ID)
-//   • Cleans up temporary files
-//   • Expected format output in OPS sheet tabs:
-//       CATEGORY | ITEM_GROUP | ITEM_CODE | DESCRIPTION | CPL | EXTRA_INFO
-function importPriceListsFromDrive() {
-  var opsSS = SpreadsheetApp.openById(OPS_SHEET_ID);
-  Logger.log('Importing price lists to OPS sheet: ' + opsSS.getName());
-  Logger.log('OPS sheet URL: ' + opsSS.getUrl());
-  Logger.log('');
-
-  var results = [];
-  results.push(_importXLSXToOPS(opsSS, 'CPL - HF HS - April 2026.xlsx',              'furniture'));
-  results.push(_importXLSXToOPS(opsSS, 'Mattress CPL Price List WEF 14 04 2026.xlsx', 'mattress'));
-
-  Logger.log('');
-  Logger.log('=== Import Summary ===');
-  for (var i = 0; i < results.length; i++) Logger.log(results[i]);
-  Logger.log('');
-  Logger.log('OPS sheet URL: ' + opsSS.getUrl());
-  Logger.log('Next step: Deploy → Manage deployments → New version → Deploy');
-}
-
-function _importXLSXToOPS(opsSS, fileName, fileType) {
-  // Locate file in Drive
-  var files = DriveApp.getFilesByName(fileName);
-  if (!files.hasNext()) {
-    var notFound = '✗ File not found in Drive: "' + fileName + '". Upload it first.';
-    Logger.log(notFound);
-    return notFound;
-  }
-
-  var file = files.next();
-  Logger.log('Converting: ' + fileName + ' (' + fileType + ')');
-
-  // Convert XLSX → temporary Google Sheet (requires Drive API v2)
-  var tempFile;
-  try {
-    tempFile = Drive.Files.insert(
-      { title: '_4s_import_tmp_' + fileType, mimeType: MimeType.GOOGLE_SHEETS },
-      file.getBlob(),
-      { convert: true }
-    );
-  } catch(e) {
-    var apiErr = '✗ Drive API error: ' + e.message +
-                 '\n  → Make sure "Drive API v2" is added under Services in Apps Script.';
-    Logger.log(apiErr);
-    return apiErr;
-  }
-
-  var tempSS     = SpreadsheetApp.openById(tempFile.id);
-  var sheets     = tempSS.getSheets();
-  var tabsDone   = 0;
-  var itemsDone  = 0;
-
-  for (var i = 0; i < sheets.length; i++) {
-    var sh      = sheets[i];
-    var tabName = sh.getName();
-    var rows    = sh.getDataRange().getValues();
-    var items;
-
-    if (fileType === 'furniture') {
-      items = _extractItemsFromRawSheet(rows, tabName, 'raw-furniture');
-    } else {
-      items   = _extractItemsFromRawSheet(rows, tabName, 'raw-mattress');
-      tabName = 'Mattress';
-    }
-
-    if (items.length > 0) {
-      _writeNormalizedTab(opsSS, tabName, items);
-      Logger.log('  ✓ ' + tabName + ': ' + items.length + ' items');
-      tabsDone++;
-      itemsDone += items.length;
-    }
-  }
-
-  // Delete temporary file
-  try { DriveApp.getFileById(tempFile.id).setTrashed(true); } catch(e) {}
-
-  var summary = '✓ ' + fileName + ' → ' + tabsDone + ' tabs, ' + itemsDone + ' total items';
-  Logger.log(summary);
-  return summary;
-}
-
-// Find header row and parse the temp sheet using the appropriate raw format parser
-function _extractItemsFromRawSheet(rows, tabName, format) {
-  var headerRow = -1;
-  for (var i = 0; i < Math.min(10, rows.length); i++) {
-    var cells  = rows[i].map(function(c){ return String(c||'').toUpperCase().trim(); });
-    if (cells.indexOf('LN CODE') !== -1) { headerRow = i; break; }
-  }
-  if (headerRow === -1) return [];
-  if (format === 'raw-furniture') return _parseRawFurnitureTab(rows, headerRow, tabName);
-  if (format === 'raw-mattress')  return _parseRawMattressTab(rows, headerRow, tabName);
-  return [];
-}
-
-// Write normalized data to an OPS sheet tab
-// Output columns: CATEGORY | ITEM_GROUP | ITEM_CODE | DESCRIPTION | CPL | EXTRA_INFO
-function _writeNormalizedTab(ss, tabName, items) {
-  var sh = ss.getSheetByName(tabName);
-  if (!sh) {
-    sh = ss.insertSheet(tabName);
-  } else {
-    sh.clearContents();
-  }
-
-  var batchRows = [['CATEGORY', 'ITEM_GROUP', 'ITEM_CODE', 'DESCRIPTION', 'CPL', 'EXTRA_INFO']];
-  for (var i = 0; i < items.length; i++) {
-    var it = items[i];
-    batchRows.push([
-      it.cat   || '',
-      it.item  || '',
-      it.code  || '',
-      it.name  || '',
-      it.cpl   || 0,
-      it.extra || '',
-    ]);
-  }
-
-  sh.getRange(1, 1, batchRows.length, 6).setValues(batchRows);
-  sh.getRange(1, 1, 1, 6).setFontWeight('bold');
-}
-
-// ── ORDERS LIST ───────────────────────────────────────────────────────────────
-// Returns orders (newest first, last 60 days).
-// If exec is provided, filters to that salesperson's orders.
+// ─── ORDERS ───────────────────────────────────────────────────────────────────
 function handleOrders(p) {
   var sh = _getSheet('Orders_Master');
-  if (!sh) return { ok: false, error: 'Orders_Master sheet not found.' };
+  if (!sh) return { ok: false, error: 'Orders_Master sheet not found. Run ensureSheets().' };
 
   var rows   = sh.getDataRange().getValues();
   var exec   = (p.exec || '').trim().toLowerCase();
@@ -645,7 +595,7 @@ function handleOrders(p) {
     var r  = rows[i];
     var ts = r[COL_ORD.TS];
     if (!ts) continue;
-    var rowDate = (ts instanceof Date) ? ts : new Date(ts);
+    var rowDate = ts instanceof Date ? ts : new Date(ts);
     if (rowDate < cutoff) break;
 
     var salesExec = String(r[COL_ORD.SALES_EXEC] || '');
@@ -666,65 +616,43 @@ function handleOrders(p) {
   return { ok: true, orders: orders };
 }
 
-// ── SAVE ORDER ────────────────────────────────────────────────────────────────
+// ─── SAVE ORDER ───────────────────────────────────────────────────────────────
 function handleSaveOrder(o) {
   if (!o) throw new Error('No order data provided.');
   var sh = _getSheet('Orders_Master');
-  if (!sh) throw new Error('Orders_Master sheet not found.');
+  if (!sh) throw new Error('Orders_Master sheet not found. Run ensureSheets().');
 
   var lastRow    = sh.getLastRow();
   var internalNo = lastRow;
-
-  var receiptNo = String(o.receiptNo || '').trim();
-  var orderNo   = receiptNo ? (internalNo + '/' + receiptNo) : String(internalNo);
+  var receiptNo  = String(o.receiptNo || '').trim();
+  var orderNo    = receiptNo ? (internalNo + '/' + receiptNo) : String(internalNo);
 
   var now      = new Date();
-  var dateStr  = now.toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'2-digit' }).replace(/\//g, '.');
-  var subtotal = Number(o.items ? o.items.reduce(function(s,i){ return s + (i.total||0); }, 0) : 0);
+  var dateStr  = now.toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'2-digit' }).replace(/\//g,'.');
+  var subtotal = o.items ? o.items.reduce(function(s,i){ return s + (i.total||0); }, 0) : 0;
   var cgst     = Math.round(subtotal * 0.09);
   var sgst     = Math.round(subtotal * 0.09);
   var total    = subtotal + cgst + sgst;
 
   sh.appendRow([
-    now,
-    internalNo,
-    orderNo,
-    String(o.won         || ''),
-    'pending-won',
-    String(o.customer    || ''),
-    String(o.phone       || ''),
-    String(o.alt         || ''),
-    String(o.email       || ''),
-    String(o.billing     || ''),
-    String(o.delivery    || ''),
-    String(o.liftAvailable || ''),
-    String(o.customerCode  || ''),
-    String(o.poRef         || ''),
-    String(o.source        || ''),
-    String(o.discountCode  || ''),
-    String(o.plannedDly    || ''),
-    String(o.installNote   || ''),
-    String(o.paymentMode   || ''),
-    Number(o.earnest       || 0),
-    receiptNo,
-    String(o.followUp    || ''),
-    String(o.salesExec   || ''),
-    String(o.orderType   || 'B2C'),
+    now, internalNo, orderNo,
+    String(o.won          || ''), 'pending-won',
+    String(o.customer     || ''), String(o.phone       || ''), String(o.alt          || ''), String(o.email        || ''),
+    String(o.billing      || ''), String(o.delivery    || ''), String(o.liftAvailable|| ''), String(o.customerCode || ''),
+    String(o.poRef        || ''), String(o.source      || ''), String(o.discountCode || ''), String(o.plannedDly   || ''),
+    String(o.installNote  || ''), String(o.paymentMode || ''), Number(o.earnest      || 0),  receiptNo,
+    String(o.followUp     || ''), String(o.salesExec   || ''), String(o.orderType    || 'B2C'),
     JSON.stringify(o.items || []),
-    subtotal,
-    cgst,
-    sgst,
-    total,
-    dateStr,
+    subtotal, cgst, sgst, total, dateStr,
   ]);
 
-  _appendLog(String(o.salesExec || ''), orderNo, 'CREATE',
-    'Customer: ' + (o.customer || '') + ' | Items: ' + (o.items ? o.items.length : 0));
+  _appendLog(String(o.salesExec||''), orderNo, 'CREATE',
+    'Customer: ' + (o.customer||'') + ' | Items: ' + (o.items ? o.items.length : 0));
 
   return { ok: true, orderNo: orderNo, internalNo: internalNo };
 }
 
-// ── UPDATE WON ────────────────────────────────────────────────────────────────
+// ─── UPDATE WON ───────────────────────────────────────────────────────────────
 function handleUpdateWON(body) {
   var orderNo    = String(body.orderNo    || '');
   var internalNo = Number(body.internalNo || 0);
@@ -733,15 +661,14 @@ function handleUpdateWON(body) {
   if (!won) return { ok: false, error: 'WON number is required.' };
 
   var sh = _getSheet('Orders_Master');
-  if (!sh) return { ok: false, error: 'Orders_Master sheet not found.' };
+  if (!sh) return { ok: false, error: 'Orders_Master not found.' };
 
   var rows = sh.getDataRange().getValues();
   for (var i = 1; i < rows.length; i++) {
     if (Number(rows[i][COL_ORD.INTERNAL_NO]) === internalNo ||
         String(rows[i][COL_ORD.ORDER_NO])    === orderNo) {
-      var sheetRow = i + 1;
-      sh.getRange(sheetRow, COL_ORD.WON    + 1).setValue(won);
-      sh.getRange(sheetRow, COL_ORD.STATUS + 1).setValue('billed');
+      sh.getRange(i + 1, COL_ORD.WON    + 1).setValue(won);
+      sh.getRange(i + 1, COL_ORD.STATUS + 1).setValue('billed');
       _appendLog(updatedBy, orderNo, 'UPDATE_WON', 'WON: ' + won);
       return { ok: true };
     }
@@ -749,164 +676,214 @@ function handleUpdateWON(body) {
   return { ok: false, error: 'Order not found: ' + orderNo };
 }
 
-// ── CHANGE LOG ────────────────────────────────────────────────────────────────
+// ─── CHANGE LOG ───────────────────────────────────────────────────────────────
 function _appendLog(user, orderNo, action, detail) {
   try {
     var sh = _getSheet('Change_Log');
     if (sh) sh.appendRow([new Date(), user, orderNo, action, detail]);
-  } catch(e) {
-    Logger.log('Change_Log write failed: ' + e.message);
-  }
+  } catch(e) { Logger.log('Change_Log error: ' + e.message); }
 }
 
-// ── DEBUG PRICE LIST ──────────────────────────────────────────────────────────
-// Returns diagnostic info about the OPS sheet and its price list tabs.
+// ─── DEBUG PRICE LIST ─────────────────────────────────────────────────────────
+// Call via ?action=debugPriceList to see exactly what the script finds in OPS sheet.
 function handleDebugPriceList() {
-  try {
-    var ss         = SpreadsheetApp.openById(OPS_SHEET_ID);
-    var allSheets  = ss.getSheets().map(function(s){ return s.getName(); });
-    var priceTabs  = allSheets.filter(function(n){ return PRICE_SKIP.indexOf(n) === -1; });
+  var opsSS = _openOPS();
+  if (!opsSS) return { ok: false, error: 'Cannot open OPS sheet: ' + OPS_SHEET_ID };
 
-    var tabInfo = {};
-    for (var i = 0; i < priceTabs.length; i++) {
-      var sh   = ss.getSheetByName(priceTabs[i]);
-      var rows = sh.getDataRange().getValues();
-      tabInfo[priceTabs[i]] = {
-        totalRows: rows.length,
-        header:    rows[0] ? rows[0].slice(0, 8).map(function(c){ return String(c||''); }) : [],
-        sample:    rows.slice(1, 4).map(function(r){ return r.slice(0,6).map(function(c){ return String(c||''); }); }),
-      };
-    }
+  var allTabs   = opsSS.getSheets().map(function(s){ return s.getName(); });
+  var priceTabs = allTabs.filter(function(n){ return !_inSkipList(n); });
+  var tabInfo   = {};
 
-    return {
-      ok:             true,
-      opsSpreadsheet: ss.getName(),
-      opsUrl:         ss.getUrl(),
-      allTabs:        allSheets,
-      priceTabs:      priceTabs,
-      tabInfo:        tabInfo,
+  priceTabs.forEach(function(tabName) {
+    var sh   = opsSS.getSheetByName(tabName);
+    var rows = sh.getDataRange().getValues();
+    tabInfo[tabName] = {
+      totalRows: rows.length,
+      header:    rows[0] ? rows[0].slice(0,8).map(String) : [],
+      sample:    rows.slice(1,4).map(function(r){ return r.slice(0,6).map(String); }),
     };
-  } catch(e) {
-    return { ok: false, error: e.message };
-  }
+  });
+
+  return {
+    ok:          true,
+    opsName:     opsSS.getName(),
+    opsUrl:      opsSS.getUrl(),
+    allTabs:     allTabs,
+    priceTabs:   priceTabs,
+    skippedTabs: PRICE_SKIP,
+    tabInfo:     tabInfo,
+  };
 }
 
-// ── ensureSheets ──────────────────────────────────────────────────────────────
-// Run ONCE from the Apps Script editor.
-// Creates the master spreadsheet (Orders, Staff, Change_Log) if it doesn't exist.
-// The OPS sheet (price lists + Stock) is managed separately.
+// ─── ensureSheets ─────────────────────────────────────────────────────────────
+// Run ONCE from Apps Script editor to create the master spreadsheet.
+// The OPS sheet (price lists + stock + APP_ORDERING_CREDS) is managed separately.
 function ensureSheets() {
-  var props      = PropertiesService.getScriptProperties();
-  var existingId = props.getProperty('MASTER_SHEET_ID');
+  var props = PropertiesService.getScriptProperties();
+  var id    = props.getProperty('MASTER_SHEET_ID');
   var ss;
 
-  if (existingId) {
-    try { ss = SpreadsheetApp.openById(existingId); Logger.log('Using existing master: ' + ss.getUrl()); }
+  if (id) {
+    try { ss = SpreadsheetApp.openById(id); Logger.log('Using existing master: ' + ss.getUrl()); }
     catch(e) { ss = null; }
   }
-
   if (!ss) {
     ss = SpreadsheetApp.create('4S Interiors — Orders Master');
     props.setProperty('MASTER_SHEET_ID', ss.getId());
-    Logger.log('Created new master: ' + ss.getUrl());
+    Logger.log('Created master: ' + ss.getUrl());
   }
 
-  // Staff tab
+  // Staff
   if (!ss.getSheetByName('Staff')) {
     var staff = ss.insertSheet('Staff');
-    staff.appendRow(['username', 'password', 'name', 'code', 'role']);
-    staff.appendRow(['soubhagya.patia', 'staff123',   'Soubhagya', 'SO-04', 'sales']);
-    staff.appendRow(['archita.patia',   'staff123',   'Archita',   'AR-02', 'sales']);
-    staff.appendRow(['nazrin.patia',    'staff123',   'Nazrin',    'NZ-05', 'sales']);
-    staff.appendRow(['krupa.patia',     'staff123',   'Krupa',     'KR-06', 'sales']);
-    staff.appendRow(['swasti.patia',    'staff123',   'Swasti',    'SW-03', 'sales']);
-    staff.appendRow(['saroj.patia',     'staff123',   'Saroj',     'SR-07', 'sales']);
-    staff.appendRow(['manager',         'manager123', 'Shaktiman', 'MG-01', 'manager']);
-    staff.appendRow(['pritish',         'pritish123', 'Pritish',   'PK-07', 'admin']);
-    _boldHeader(staff);
-    Logger.log('✓ Staff tab created');
+    staff.appendRow(['username','password','name','code','role']);
+    staff.appendRow(['manager','manager123','Shaktiman','MG-01','manager']);
+    staff.appendRow(['pritish','pritish123','Pritish','PK-07','admin']);
+    _boldRow1(staff);
+    Logger.log('Staff tab created (add users here or use APP_ORDERING_CREDS in OPS sheet)');
   }
 
-  // Stock_Master tab (fallback if OPS "Stock" tab isn't ready)
+  // Stock_Master (fallback if OPS Stock tab doesn't exist)
   if (!ss.getSheetByName('Stock_Master')) {
     var stock = ss.insertSheet('Stock_Master');
-    stock.appendRow(['Code', 'Name', 'Category', 'CPL', 'MRP', 'KB_Qty', 'B2CB_Qty', 'PTA_Qty', 'CTC_Qty', 'Updated_At']);
-    _boldHeader(stock);
-    Logger.log('✓ Stock_Master tab created — paste Godrej stock data here');
-    Logger.log('  Or add a "Stock" tab to the OPS sheet (' + OPS_SHEET_ID + ')');
+    stock.appendRow(['Code','Name','Category','CPL','MRP','KB_Qty','B2CB_Qty','PTA_Qty','CTC_Qty','Updated_At']);
+    _boldRow1(stock);
+    Logger.log('Stock_Master tab created — paste Godrej stock data here, or use "Stock" tab in OPS sheet');
   }
 
-  // Orders_Master tab
+  // Orders_Master
   if (!ss.getSheetByName('Orders_Master')) {
     var orders = ss.insertSheet('Orders_Master');
     orders.appendRow([
-      'Timestamp', 'InternalNo', 'OrderNo', 'WON', 'Status',
-      'Customer', 'Phone', 'Alt', 'Email',
-      'Billing', 'Delivery', 'LiftAvailable', 'CustomerCode',
-      'PORef', 'Source', 'DiscountCode', 'PlannedDly',
-      'InstallNote', 'PaymentMode', 'Earnest', 'ReceiptNo',
-      'FollowUp', 'SalesExec', 'OrderType', 'Items_JSON',
-      'Subtotal', 'CGST', 'SGST', 'TotalWithTax', 'Date'
+      'Timestamp','InternalNo','OrderNo','WON','Status',
+      'Customer','Phone','Alt','Email',
+      'Billing','Delivery','LiftAvailable','CustomerCode',
+      'PORef','Source','DiscountCode','PlannedDly',
+      'InstallNote','PaymentMode','Earnest','ReceiptNo',
+      'FollowUp','SalesExec','OrderType','Items_JSON',
+      'Subtotal','CGST','SGST','TotalWithTax','Date',
     ]);
-    _boldHeader(orders);
-    Logger.log('✓ Orders_Master tab created');
+    _boldRow1(orders);
+    Logger.log('Orders_Master tab created');
   }
 
-  // Change_Log tab
+  // Change_Log
   if (!ss.getSheetByName('Change_Log')) {
     var log = ss.insertSheet('Change_Log');
-    log.appendRow(['Timestamp', 'User', 'OrderNo', 'Action', 'Detail']);
-    _boldHeader(log);
-    Logger.log('✓ Change_Log tab created');
+    log.appendRow(['Timestamp','User','OrderNo','Action','Detail']);
+    _boldRow1(log);
+    Logger.log('Change_Log tab created');
   }
 
   // Remove default Sheet1
-  var sheet1 = ss.getSheetByName('Sheet1');
-  if (sheet1 && ss.getSheets().length > 1) ss.deleteSheet(sheet1);
+  var s1 = ss.getSheetByName('Sheet1');
+  if (s1 && ss.getSheets().length > 1) ss.deleteSheet(s1);
 
   Logger.log('');
-  Logger.log('================================================');
-  Logger.log('Master sheet setup complete!');
-  Logger.log('URL : ' + ss.getUrl());
-  Logger.log('ID  : ' + ss.getId());
+  Logger.log('============================================');
+  Logger.log('Master sheet ready: ' + ss.getUrl());
   Logger.log('');
-  Logger.log('OPS sheet (price lists + stock):');
-  Logger.log('ID  : ' + OPS_SHEET_ID);
+  Logger.log('OPS sheet (price lists + stock + login):');
+  Logger.log('  https://docs.google.com/spreadsheets/d/' + OPS_SHEET_ID);
+  Logger.log('  → Add tab "APP_ORDERING_CREDS" for login credentials');
+  Logger.log('  → Add tab "Stock" for stock data');
+  Logger.log('  → Price list tabs are already imported from CSVs');
   Logger.log('');
-  Logger.log('Next steps:');
-  Logger.log('  1. Upload XLSX price list files to Google Drive');
-  Logger.log('  2. Run importPriceListsFromDrive()');
-  Logger.log('  3. Deploy → New deployment → Web App');
-  Logger.log('     Execute as: Me | Anyone can access');
-  Logger.log('  4. Copy Web App URL → paste in app Settings');
-  Logger.log('================================================');
+  Logger.log('Next: Deploy → New deployment → Web App');
+  Logger.log('  Execute as: Me | Who has access: Anyone');
+  Logger.log('============================================');
 }
 
-function _boldHeader(sheet) {
+function _boldRow1(sheet) {
   sheet.getRange(1, 1, 1, sheet.getLastColumn()).setFontWeight('bold');
 }
 
-// ── setMasterSheet ────────────────────────────────────────────────────────────
+// ─── setMasterSheet ───────────────────────────────────────────────────────────
 // Run from Apps Script editor to point to an existing master spreadsheet.
-// HOW TO USE:
-//   1. Get the spreadsheet ID from its URL (between /d/ and /edit)
-//   2. Paste it below, replacing YOUR_SPREADSHEET_ID_HERE
-//   3. Run → setMasterSheet
 function setMasterSheet() {
-  var id = 'YOUR_SPREADSHEET_ID_HERE';
-
-  if (id === 'YOUR_SPREADSHEET_ID_HERE' || !id.trim()) {
-    Logger.log('ERROR: Paste your spreadsheet ID into setMasterSheet() first.');
+  var id = 'YOUR_SPREADSHEET_ID_HERE';   // ← paste your spreadsheet ID here
+  if (!id || id === 'YOUR_SPREADSHEET_ID_HERE') {
+    Logger.log('ERROR: Paste your spreadsheet ID first.');
     return;
   }
-
   try {
     var ss = SpreadsheetApp.openById(id.trim());
     PropertiesService.getScriptProperties().setProperty('MASTER_SHEET_ID', id.trim());
-    Logger.log('✓ Master sheet set to: ' + ss.getName());
-    Logger.log('  URL: ' + ss.getUrl());
-    Logger.log('  Tabs: ' + ss.getSheets().map(function(s){ return s.getName(); }).join(', '));
+    Logger.log('Master sheet set: ' + ss.getName() + ' | ' + ss.getUrl());
   } catch(e) {
-    Logger.log('ERROR: Could not open sheet "' + id + '": ' + e.message);
+    Logger.log('ERROR: ' + e.message);
   }
+}
+
+// ─── importPriceListsFromDrive ────────────────────────────────────────────────
+// Optional: Run this to import XLSX files from Drive into OPS sheet tabs.
+// Only needed if you did NOT manually import the CSVs.
+// BEFORE RUNNING:
+//   1. Upload both XLSX files to Google Drive
+//   2. Enable Drive API v2: Services (+) → Drive API → Add
+//   3. Run → importPriceListsFromDrive
+function importPriceListsFromDrive() {
+  var opsSS = _openOPS();
+  if (!opsSS) { Logger.log('ERROR: Cannot open OPS sheet'); return; }
+
+  _importXLSXToOPS(opsSS, 'CPL - HF HS - April 2026.xlsx',              'furniture');
+  _importXLSXToOPS(opsSS, 'Mattress CPL Price List WEF 14 04 2026.xlsx', 'mattress');
+
+  Logger.log('Import complete. OPS sheet: ' + opsSS.getUrl());
+}
+
+function _importXLSXToOPS(opsSS, fileName, fileType) {
+  var files = DriveApp.getFilesByName(fileName);
+  if (!files.hasNext()) { Logger.log('File not found: ' + fileName); return; }
+
+  var file = files.next();
+  Logger.log('Converting: ' + fileName);
+
+  var tempFile;
+  try {
+    tempFile = Drive.Files.insert(
+      { title: '_4s_tmp_' + fileType, mimeType: MimeType.GOOGLE_SHEETS },
+      file.getBlob(), { convert: true }
+    );
+  } catch(e) {
+    Logger.log('Drive API error: ' + e.message + '. Enable Drive API v2 in Services.');
+    return;
+  }
+
+  var tempSS = SpreadsheetApp.openById(tempFile.id);
+  tempSS.getSheets().forEach(function(sh) {
+    var tabName = sh.getName();
+    var rows    = sh.getDataRange().getValues();
+    var items   = _extractItemsFromRawSheet(rows, tabName, fileType === 'mattress' ? 'raw-mattress' : 'raw-furniture');
+    if (fileType === 'mattress') tabName = 'Mattress';
+    if (items.length > 0) {
+      _writeNormalizedTab(opsSS, tabName, items);
+      Logger.log('  ' + tabName + ': ' + items.length + ' items');
+    }
+  });
+
+  try { DriveApp.getFileById(tempFile.id).setTrashed(true); } catch(e) {}
+}
+
+function _extractItemsFromRawSheet(rows, tabName, format) {
+  var headerRow = -1;
+  for (var i = 0; i < Math.min(10, rows.length); i++) {
+    var cells = rows[i].map(function(c){ return String(c||'').toUpperCase().trim(); });
+    if (cells.indexOf('LN CODE') !== -1) { headerRow = i; break; }
+  }
+  if (headerRow < 0) return [];
+  if (format === 'raw-furniture') return _parseFurnitureTab(rows, headerRow, tabName);
+  if (format === 'raw-mattress')  return _parseMattressTab(rows, headerRow, tabName);
+  return [];
+}
+
+function _writeNormalizedTab(ss, tabName, items) {
+  var sh = ss.getSheetByName(tabName) || ss.insertSheet(tabName);
+  sh.clearContents();
+  var rows = [['CATEGORY','ITEM_GROUP','ITEM_CODE','DESCRIPTION','CPL','EXTRA_INFO']];
+  items.forEach(function(it){
+    rows.push([it.cat||'', it.item||'', it.code||'', it.name||'', it.cpl||0, it.extra||'']);
+  });
+  sh.getRange(1, 1, rows.length, 6).setValues(rows);
+  _boldRow1(sh);
 }

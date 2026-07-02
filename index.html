@@ -155,62 +155,11 @@ async function apiPost(body) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// PRICE LIST
-// Primary path  : Apps Script backend  (action=priceList)
-//   — server-side, no CORS, works with private sheets
-// Fallback path : direct gviz CSV fetch
-//   — only works when the sheet is set to "Anyone can view"
+// PRICE LIST — loaded via Apps Script (action=priceList)
+// All tabs in OPS sheet are scanned server-side; result is
+// cached locally for 6 hours.
 // ═══════════════════════════════════════════════════════════
 const OPS_SHEET_ID = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
-
-// Parse a single CSV row, handling quoted fields
-function _parseCSVRow(line) {
-  const out = []; let cur = '', inQ = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (c === '"') { inQ = !inQ; }
-    else if (c === ',' && !inQ) { out.push(cur.trim()); cur = ''; }
-    else cur += c;
-  }
-  out.push(cur.trim());
-  return out;
-}
-
-// Split raw CSV text into array-of-arrays, stripping outer quotes
-function _parseLines(text) {
-  return text.split(/\r?\n/).filter(l => l.trim()).map(
-    line => _parseCSVRow(line).map(s => s.replace(/^"|"$/g, '').trim())
-  );
-}
-
-// Build a normalised item from a Price_list row (furniture sheet)
-// cols: 0=Category/Series  1=SubCategory  2=Code  3=Description  4=CPL  5=GST  6=MRP
-function _rowToFurniture(v) {
-  const cat    = (v[0] || 'Furniture').trim();
-  const subcat = (v[1] || '').trim();
-  const code   = (v[2] || '').toUpperCase().trim();
-  const desc   = (v[3] || '').trim();
-  if (!code && !desc) return null;
-  const cpl        = parseFloat((v[4] || '').replace(/[^\d.]/g, '')) || 0;
-  const mrp        = parseFloat((v[6] || '').replace(/[^\d.]/g, '')) || cpl;
-  const name       = desc || subcat || cat;
-  const searchName = [cat, subcat, desc].filter(Boolean).join(' ');
-  return { code, name, searchName, cat, subcat, mrp, cpl, stock: [], sheet: 'furniture' };
-}
-
-// Build a normalised item from a Price_List_Mattress row
-// cols: 0=Category  2=Code  3=Description  6=CPL  8=MRP
-function _rowToMattress(v) {
-  const cat  = (v[0] || 'Mattress').trim();
-  const code = (v[2] || '').toUpperCase().trim();
-  const desc = (v[3] || '').trim();
-  if (!code && !desc) return null;
-  const cpl        = parseFloat((v[6] || '').replace(/[^\d.]/g, '')) || 0;
-  const mrp        = parseFloat((v[8] || '').replace(/[^\d.]/g, '')) || cpl;
-  const name       = desc || cat;
-  const searchName = [cat, desc].filter(Boolean).join(' ');
-  return { code, name, searchName, cat, mrp, cpl, stock: [], sheet: 'mattress' };
-}
 
 async function loadPriceListItems() {
   const CACHE_KEY = '4s_price_items_v7';
