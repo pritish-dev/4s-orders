@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '16';
+  var V = '17';
   if (localStorage.getItem('4s_code_v') !== V) {
     localStorage.setItem('4s_code_v', V);
     // Clear ALL local storage (stale caches) then unregister SW and hard reload
@@ -229,9 +229,9 @@ function fuzzySearch(allItems, query) {
   const words = q.split(/\s+/).filter(w => w.length >= 2);
 
   function score(it) {
-    // Search only on product-meaningful fields — exclude extra/tab-name to avoid
-    // false positives (e.g. "aspen" finish code matching a sofa-legs item)
-    const nm = ([it.searchName, it.item, it.name, it.cat]
+    // Build search string directly — never from searchName which may carry extra
+    // colour/finish codes from old server deploys, causing false-positive matches
+    const nm = ([it.cat, it.item, it.name]
       .filter(Boolean).join(' ')).toLowerCase();
     const cd = (it.code || '').toLowerCase();
 
