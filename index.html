@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '13';
+  var V = '14';
   if (localStorage.getItem('4s_code_v') !== V) {
     localStorage.setItem('4s_code_v', V);
     // Clear ALL local storage (stale caches) then unregister SW and hard reload
@@ -162,8 +162,8 @@ async function apiPost(body) {
 const OPS_SHEET_ID = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 
 async function loadPriceListItems() {
-  const CACHE_KEY = '4s_price_items_v7';
-  const CACHE_TS  = '4s_price_items_v7_ts';
+  const CACHE_KEY = '4s_price_items_v8';
+  const CACHE_TS  = '4s_price_items_v8_ts';
   const AGE_MS    = 6 * 60 * 60 * 1000; // 6 hours
 
   // Serve from cache if fresh
@@ -175,48 +175,30 @@ async function loadPriceListItems() {
 
   const apiUrl = getApiUrl();
   if (!apiUrl) {
-    throw new Error('No Apps Script URL saved. Go to Settings → paste your Apps Script URL → Save URL.');
+    throw new Error('NO_URL: No Apps Script URL saved. Go to Settings → paste your Apps Script URL → Save URL.');
   }
 
-  // Call Apps Script — only path that works for private sheets
   let res;
   try {
     res = await apiGet('priceList', {}, 35000);
   } catch (e) {
     const msg = e.message || '';
-    if (msg.includes('timed out')) {
-      throw new Error('Request timed out (35s). The price list sheet may be very large or Apps Script is slow. Try again.');
-    }
-    throw new Error('Network error calling Apps Script: ' + msg);
+    if (msg.includes('timed out')) throw new Error('Request timed out (35s). Try again.');
+    throw new Error('Network error: ' + msg);
   }
 
-  // Apps Script returned an error
   if (!res || !res.ok) {
-    const err = (res && res.error) || 'Unknown error from Apps Script';
-    // Old deployment without priceList action
-    if (err.includes('Unknown action')) {
-      throw new Error('Your Apps Script deployment is outdated — it does not have the priceList handler.\n\nFix: Apps Script → Deploy → Manage deployments → Edit → New version → Deploy.');
-    }
-    // Sheet not found
-    if (err.includes('not found') || err.includes('openById')) {
-      throw new Error('Apps Script error: ' + err + '\n\nCheck that OPS_SHEET_ID in Code.gs matches your OPS spreadsheet ID (' + OPS_SHEET_ID + ').');
-    }
-    throw new Error('Apps Script error: ' + err);
+    const err   = (res && res.error)     || 'Unknown error from Apps Script';
+    const code  = (res && res.errorCode) || '';
+    if (code === 'SETUP_NEEDED') throw new Error('SETUP_NEEDED: ' + err);
+    if (err.includes('Unknown action')) throw new Error('REDEPLOY_NEEDED: Apps Script is outdated. Go to Apps Script → Deploy → Manage deployments → Edit → New version → Deploy.');
+    throw new Error('API_ERROR: ' + err);
   }
 
-  // Got ok:true but 0 items — give actionable diagnosis
   if (!Array.isArray(res.items) || res.items.length === 0) {
-    const counts = res.counts || {};
-    const tabCount = res.totalTabs || 0;
-    throw new Error(
-      'Apps Script connected but returned 0 price list items.\n' +
-      'Price tabs found: ' + tabCount + '\n' +
-      (Object.keys(counts).length ? 'Tab counts: ' + JSON.stringify(counts) + '\n' : '') +
-      '\nCheck:\n' +
-      '1. Run importPriceListsFromDrive() in Apps Script to populate price list tabs\n' +
-      '2. OPS sheet ID in Code.gs: ' + OPS_SHEET_ID + '\n' +
-      '3. After import, redeploy: Deploy → Manage deployments → New version'
-    );
+    const errs = res.tabErrors ? '\n\nTab errors:\n' + res.tabErrors.join('\n') : '';
+    throw new Error('SETUP_NEEDED: Price_Lists sheet is configured but 0 items were parsed.' + errs +
+      '\n\nCheck that each tab listed in Price_Lists has a valid header row (ITEM_CODE + DESCRIPTION, or LN CODE).');
   }
 
   localStorage.setItem(CACHE_KEY, JSON.stringify(res.items));
@@ -756,7 +738,7 @@ function App() {
   const [priceItems,    setPriceItems]   = useState([]);
   const [orders,        setOrders]       = useState([]);
   const [syncedAt,      setSyncedAt]     = useState(null);
-  const [priceSyncedAt, setPriceSyncedAt]= useState(() => localStorage.getItem('4s_price_items_v7_ts') ? new Date(Number(localStorage.getItem('4s_price_items_v7_ts'))).toISOString() : null);
+  const [priceSyncedAt, setPriceSyncedAt]= useState(() => localStorage.getItem('4s_price_items_v8_ts') ? new Date(Number(localStorage.getItem('4s_price_items_v8_ts'))).toISOString() : null);
   const [priceSyncError, setPriceSyncError] = useState(null);
   const [order,         setOrder]        = useState(BLANK_ORDER());
   const [selOrder,      setSelOrder]     = useState(null);
@@ -794,14 +776,14 @@ function App() {
     if (!user) return;
     const cached = localStorage.getItem('4s_items');
     if (cached) try { setItems(JSON.parse(cached)); } catch {}
-    const cachedPL = localStorage.getItem('4s_price_items_v7');
+    const cachedPL = localStorage.getItem('4s_price_items_v8');
     if (cachedPL) try { setPriceItems(JSON.parse(cachedPL)); } catch {}
     syncStock();
     loadPriceListItems()
       .then(pi => {
         if (pi.length > 0) {
           setPriceItems(pi);
-          const ts = localStorage.getItem('4s_price_items_v7_ts');
+          const ts = localStorage.getItem('4s_price_items_v8_ts');
           if (ts) setPriceSyncedAt(new Date(Number(ts)).toISOString());
         }
       })
@@ -836,15 +818,15 @@ function App() {
   }
 
   async function syncPriceList() {
-    localStorage.removeItem('4s_price_items_v7');
-    localStorage.removeItem('4s_price_items_v7_ts');
+    localStorage.removeItem('4s_price_items_v8');
+    localStorage.removeItem('4s_price_items_v8_ts');
     setPriceSyncError(null);
     setLoading(true);
     try {
       const pi = await loadPriceListItems();
       setPriceItems(pi);
       setPriceSyncedAt(new Date().toISOString());
-      localStorage.setItem('4s_price_items_v7_ts', String(Date.now()));
+      localStorage.setItem('4s_price_items_v8_ts', String(Date.now()));
       showToast(pi.length + ' items loaded ✓', 'ok');
     } catch(e) {
       setPriceSyncError(e.message);
@@ -1249,26 +1231,64 @@ function SearchScreen({ctx}) {
         </div>
 
         {/* Price list not loaded — prominent sync banner */}
-        {!hasPriceList && (
-          <div style={{margin:'0 18px 10px',padding:'14px 16px',background:priceSyncError?T.badSoft:T.warnSoft,border:`1.5px solid ${priceSyncError?T.bad:T.warn}`,borderRadius:8}}>
-            {priceSyncError ? (
-              <>
-                <div style={{fontSize:13,fontWeight:700,color:T.bad,marginBottom:6}}>Sync failed — here's why:</div>
-                <div style={{fontSize:11,color:T.ink2,marginBottom:10,lineHeight:1.7,whiteSpace:'pre-wrap',fontFamily:T.mono,background:T.badSoft,borderRadius:4,padding:'8px 10px',border:`1px solid ${T.bad}`}}>{priceSyncError}</div>
-              </>
-            ) : (
-              <>
-                <div style={{fontSize:13,fontWeight:700,color:T.warn,marginBottom:6}}>Price list not loaded yet</div>
-                <div style={{fontSize:11,color:T.ink3,marginBottom:10,lineHeight:1.5}}>
-                  Make sure your Apps Script URL is saved in <b>Me → Settings</b> first, then tap below.
-                </div>
-              </>
-            )}
-            <Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncPriceList} disabled={loading}>
-              {loading ? 'Loading…' : priceSyncError ? 'Retry sync' : 'Load price list now'}
-            </Btn>
-          </div>
-        )}
+        {!hasPriceList && (() => {
+          const isSetup    = priceSyncError && priceSyncError.startsWith('SETUP_NEEDED');
+          const isRedeploy = priceSyncError && priceSyncError.startsWith('REDEPLOY_NEEDED');
+          const isNoUrl    = priceSyncError && priceSyncError.startsWith('NO_URL');
+          const bg   = priceSyncError ? T.badSoft  : T.warnSoft;
+          const bdr  = priceSyncError ? T.bad      : T.warn;
+          const titC = priceSyncError ? T.bad      : T.warn;
+          return (
+            <div style={{margin:'0 18px 10px',padding:'14px 16px',background:bg,border:`1.5px solid ${bdr}`,borderRadius:8}}>
+              {isSetup ? (
+                <>
+                  <div style={{fontSize:13,fontWeight:700,color:T.bad,marginBottom:8}}>⚙ One-time setup needed</div>
+                  <div style={{fontSize:12,color:T.ink2,lineHeight:1.8,marginBottom:10}}>
+                    In your OPS Google Sheet, create a tab named <b>Price_Lists</b> with these two columns:<br/>
+                    <span style={{fontFamily:T.mono,fontSize:11,background:'#fff',padding:'2px 6px',borderRadius:3,display:'inline-block',marginTop:4}}>
+                      Tab Name &nbsp;|&nbsp; Category
+                    </span><br/><br/>
+                    List each price list tab name and its category label, e.g.:<br/>
+                    <span style={{fontFamily:T.mono,fontSize:11,background:'#fff',padding:'6px 8px',borderRadius:3,display:'block',marginTop:4,lineHeight:2}}>
+                      HF &nbsp;&nbsp;&nbsp;&nbsp;| Home Furniture &amp; Storage<br/>
+                      HS &nbsp;&nbsp;&nbsp;&nbsp;| Home Furniture &amp; Storage<br/>
+                      Mattress | Mattress
+                    </span><br/>
+                    Then redeploy your Apps Script (Deploy → Manage → Edit → New version), and tap Sync below.
+                  </div>
+                </>
+              ) : isRedeploy ? (
+                <>
+                  <div style={{fontSize:13,fontWeight:700,color:T.bad,marginBottom:6}}>Apps Script needs redeployment</div>
+                  <div style={{fontSize:12,color:T.ink2,lineHeight:1.7,marginBottom:10}}>
+                    Open your Apps Script project → Deploy → Manage deployments → click the pencil icon → choose <b>New version</b> → Deploy.<br/>
+                    The URL stays the same.
+                  </div>
+                </>
+              ) : isNoUrl ? (
+                <>
+                  <div style={{fontSize:13,fontWeight:700,color:T.warn,marginBottom:6}}>Apps Script URL not saved</div>
+                  <div style={{fontSize:12,color:T.ink3,lineHeight:1.6,marginBottom:10}}>Go to <b>Me → Settings</b>, paste your Apps Script deployment URL, and tap Save URL.</div>
+                </>
+              ) : priceSyncError ? (
+                <>
+                  <div style={{fontSize:13,fontWeight:700,color:T.bad,marginBottom:6}}>Sync failed</div>
+                  <div style={{fontSize:11,color:T.ink2,marginBottom:10,lineHeight:1.6,whiteSpace:'pre-wrap',fontFamily:T.mono,background:'#fff',borderRadius:4,padding:'8px 10px',border:`1px solid ${bdr}`}}>{priceSyncError.replace(/^[A-Z_]+: /,'')}</div>
+                </>
+              ) : (
+                <>
+                  <div style={{fontSize:13,fontWeight:700,color:titC,marginBottom:6}}>Price list not loaded yet</div>
+                  <div style={{fontSize:12,color:T.ink3,marginBottom:10,lineHeight:1.5}}>
+                    Make sure your Apps Script URL is saved in <b>Me → Settings</b>, then tap below.
+                  </div>
+                </>
+              )}
+              <Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncPriceList} disabled={loading}>
+                {loading ? 'Loading…' : priceSyncError ? 'Retry sync' : 'Load price list now'}
+              </Btn>
+            </div>
+          );
+        })()}
 
         {/* Search input */}
         {hasPriceList && (

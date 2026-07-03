@@ -365,54 +365,49 @@ function handleStock() {
 }
 
 // ─── PRICE LIST ───────────────────────────────────────────────────────────────
-// Reads the Price_Lists config sheet to find which tabs to parse and their categories.
-// If Price_Lists sheet exists, ONLY those tabs are read.
-// Falls back to PRICE_SKIP auto-detection when Price_Lists sheet is absent.
+// Reads ONLY the tabs listed in the 'Price_Lists' config sheet.
+// If Price_Lists sheet is missing or empty, returns a SETUP_NEEDED error
+// instead of guessing — prevents stock/admin sheets from being read as prices.
 function handlePriceList() {
   var opsSS = _openOPS();
   if (!opsSS) return { ok: false, error: 'Cannot open OPS spreadsheet (ID: ' + OPS_SHEET_ID + '). Ensure the script owner has access.' };
 
   var priceCfg = _getPriceListConfig(opsSS);
-  var all      = [];
-  var counts   = {};
-  var errors   = [];
 
-  if (priceCfg.length > 0) {
-    // Config-driven: read only the tabs listed in Price_Lists sheet
-    for (var i = 0; i < priceCfg.length; i++) {
-      var cfg = priceCfg[i];
-      var sh  = opsSS.getSheetByName(cfg.tab);
-      if (!sh) { errors.push(cfg.tab + ': tab not found in OPS sheet'); continue; }
-      try {
-        var tabItems = _parsePriceTab(sh, cfg.tab, cfg.cat);
-        if (tabItems.length > 0) {
-          all = all.concat(tabItems);
-          counts[cfg.tab] = tabItems.length;
-        }
-      } catch(e) {
-        errors.push(cfg.tab + ': ' + e.message);
+  if (priceCfg.length === 0) {
+    return {
+      ok:        false,
+      errorCode: 'SETUP_NEEDED',
+      error:     'Price_Lists sheet not found (or is empty) in OPS spreadsheet.\n\n' +
+                 'Create a tab named exactly "Price_Lists" with two columns:\n' +
+                 '  Column A: Tab Name   (exact name of each price list tab)\n' +
+                 '  Column B: Category   (e.g. Home Furniture & Storage, Mattress)\n\n' +
+                 'Row 1 must be the header row. Data starts from row 2.',
+    };
+  }
+
+  var all    = [];
+  var counts = {};
+  var errors = [];
+
+  for (var i = 0; i < priceCfg.length; i++) {
+    var cfg = priceCfg[i];
+    var sh  = opsSS.getSheetByName(cfg.tab);
+    if (!sh) { errors.push(cfg.tab + ': tab not found in OPS sheet'); continue; }
+    try {
+      var tabItems = _parsePriceTab(sh, cfg.tab, cfg.cat);
+      if (tabItems.length > 0) {
+        all = all.concat(tabItems);
+        counts[cfg.tab] = tabItems.length;
+      } else {
+        errors.push(cfg.tab + ': 0 items parsed (check tab format — needs ITEM_CODE/LN CODE header)');
       }
-    }
-  } else {
-    // Fallback auto-detection: every tab not in PRICE_SKIP
-    var sheets = opsSS.getSheets();
-    for (var j = 0; j < sheets.length; j++) {
-      var sht     = sheets[j];
-      var tabName = sht.getName();
-      if (_inSkipList(tabName)) continue;
-      try {
-        var items = _parsePriceTab(sht, tabName, '');
-        if (items.length > 0) {
-          all = all.concat(items);
-          counts[tabName] = items.length;
-        }
-      } catch(e) {
-        errors.push(tabName + ': ' + e.message);
-      }
+    } catch(e) {
+      errors.push(cfg.tab + ': ' + e.message);
     }
   }
 
-  var result = { ok: true, items: all, counts: counts, totalTabs: Object.keys(counts).length, configUsed: priceCfg.length > 0 };
+  var result = { ok: true, items: all, counts: counts, totalTabs: Object.keys(counts).length };
   if (errors.length) result.tabErrors = errors;
   return result;
 }
