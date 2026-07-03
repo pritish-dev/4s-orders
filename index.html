@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '14';
+  var V = '15';
   if (localStorage.getItem('4s_code_v') !== V) {
     localStorage.setItem('4s_code_v', V);
     // Clear ALL local storage (stale caches) then unregister SW and hard reload
@@ -191,8 +191,13 @@ async function loadPriceListItems() {
     const err   = (res && res.error)     || 'Unknown error from Apps Script';
     const code  = (res && res.errorCode) || '';
     if (code === 'SETUP_NEEDED') throw new Error('SETUP_NEEDED: ' + err);
-    if (err.includes('Unknown action')) throw new Error('REDEPLOY_NEEDED: Apps Script is outdated. Go to Apps Script → Deploy → Manage deployments → Edit → New version → Deploy.');
+    if (err.includes('Unknown action')) throw new Error('REDEPLOY_NEEDED: Apps Script is outdated. Go to Apps Script → paste the latest Code.gs → Save → Deploy → Manage deployments → Edit → New version → Deploy.');
     throw new Error('API_ERROR: ' + err);
+  }
+
+  // Version gate: if scriptVersion is missing the new Code.gs is not deployed
+  if (!res.scriptVersion) {
+    throw new Error('REDEPLOY_NEEDED: Your Apps Script is running an old version that does not support Price_Lists config. Please:\n1. Open your Apps Script project\n2. Replace Code.gs with the latest version from the GitHub repo\n3. Save, then Deploy → Manage deployments → Edit → New version → Deploy');
   }
 
   if (!Array.isArray(res.items) || res.items.length === 0) {
@@ -1912,26 +1917,54 @@ function SettingsScreen({ctx}) {
               <div style={{marginTop:10,padding:'10px 12px',background:T.paper,border:`1px solid ${debugResult.ok?T.greenLine:T.bad}`,borderRadius:6}}>
                 {debugResult.ok ? (
                   <>
-                    <div style={{fontSize:11,fontWeight:700,color:T.green,marginBottom:6}}>OPS: {debugResult.opsName}</div>
-                    <div style={{fontSize:10,fontFamily:T.mono,color:T.ink3,marginBottom:6}}>
-                      All tabs ({(debugResult.allTabs||[]).length}): {(debugResult.allTabs||[]).join(', ')}
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+                      <div style={{fontSize:11,fontWeight:700,color:T.green}}>OPS: {debugResult.opsName}</div>
+                      <span style={{fontSize:9,fontFamily:T.mono,background:debugResult.scriptVersion==='v14'?T.okSoft:T.badSoft,color:debugResult.scriptVersion==='v14'?T.ok:T.bad,padding:'2px 6px',borderRadius:3,fontWeight:700}}>
+                        API {debugResult.scriptVersion||'OLD — REDEPLOY!'}
+                      </span>
                     </div>
-                    <div style={{fontSize:10,fontWeight:700,color:T.ink4,marginBottom:4}}>PRICE TABS ({(debugResult.priceTabs||[]).length}):</div>
-                    {(debugResult.priceTabs||[]).map(tab => {
-                      const info = (debugResult.tabInfo||{})[tab] || {};
+                    {debugResult.scriptVersion !== 'v14' && (
+                      <div style={{fontSize:11,color:T.bad,marginBottom:8,padding:'6px 8px',background:T.badSoft,borderRadius:4}}>
+                        ⚠ Old Code.gs detected. Copy the latest Code.gs from GitHub → save in Apps Script → Deploy → New version.
+                      </div>
+                    )}
+                    <div style={{fontSize:10,fontWeight:700,color:T.ink4,marginBottom:4}}>
+                      PRICE LIST TABS ({(debugResult.priceConfig||[]).length} configured):
+                    </div>
+                    {(debugResult.priceConfig||[]).map(cfg => {
+                      const info = (debugResult.tabInfo||{})[cfg.tab] || {};
+                      const hdr  = (info.header||[]).filter(Boolean);
+                      const samp = (info.sample||[]).filter(Boolean);
+                      const hasError = !!info.error;
                       return (
-                        <div key={tab} style={{marginBottom:6,padding:'6px 8px',background:'#fff',borderRadius:4,border:`1px solid ${T.line}`}}>
-                          <div style={{fontSize:10,fontWeight:700,color:T.ink}}>{tab} · {info.totalRows||0} rows</div>
-                          <div style={{fontSize:9,color:T.ink4,fontFamily:T.mono,marginTop:2}}>Header: {(info.header||[]).slice(0,6).join(' | ')}</div>
+                        <div key={cfg.tab} style={{marginBottom:6,padding:'8px 10px',background:'#fff',borderRadius:4,border:`1px solid ${hasError?T.bad:T.line}`}}>
+                          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                            <div style={{fontSize:10,fontWeight:700,color:hasError?T.bad:T.ink}}>{cfg.tab}</div>
+                            <div style={{fontSize:9,color:T.ink4,fontFamily:T.mono}}>{info.totalRows||0} rows</div>
+                          </div>
+                          <div style={{fontSize:9,color:T.ink3,marginTop:2}}>Category: <b>{cfg.cat}</b></div>
+                          {hasError
+                            ? <div style={{fontSize:9,color:T.bad,marginTop:2}}>{info.error}</div>
+                            : <>
+                                <div style={{fontSize:9,color:T.ink4,fontFamily:T.mono,marginTop:3}}>
+                                  Header: {hdr.length ? hdr.slice(0,8).join(' | ') : '(empty)'}
+                                </div>
+                                {samp.length > 0 && (
+                                  <div style={{fontSize:9,color:T.ink4,fontFamily:T.mono,marginTop:1,opacity:0.7}}>
+                                    Row 2: {samp.slice(0,6).join(' | ')}
+                                  </div>
+                                )}
+                              </>
+                          }
                         </div>
                       );
                     })}
-                    {(debugResult.priceTabs||[]).length === 0 && (
-                      <div style={{fontSize:11,color:T.bad}}>No price tabs found. Check that your OPS sheet has tabs with ITEM_CODE or LN Code headers.</div>
+                    {!(debugResult.priceConfig||[]).length && (
+                      <div style={{fontSize:11,color:T.bad}}>Price_Lists sheet is empty or missing.</div>
                     )}
                   </>
                 ) : (
-                  <div style={{fontSize:11,color:T.bad,fontFamily:T.mono}}>{debugResult.error}</div>
+                  <div style={{fontSize:11,color:T.bad,fontFamily:T.mono,whiteSpace:'pre-wrap'}}>{debugResult.error}</div>
                 )}
               </div>
             )}

@@ -26,8 +26,9 @@
 //
 // ============================================================
 
-// ─── IDs ─────────────────────────────────────────────────────────────────────
-var OPS_SHEET_ID = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
+// ─── IDs & version ───────────────────────────────────────────────────────────
+var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
+var SCRIPT_VERSION  = 'v14';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -407,7 +408,7 @@ function handlePriceList() {
     }
   }
 
-  var result = { ok: true, items: all, counts: counts, totalTabs: Object.keys(counts).length };
+  var result = { ok: true, scriptVersion: SCRIPT_VERSION, items: all, counts: counts, totalTabs: Object.keys(counts).length };
   if (errors.length) result.tabErrors = errors;
   return result;
 }
@@ -728,39 +729,39 @@ function _appendLog(user, orderNo, action, detail) {
   } catch(e) { Logger.log('Change_Log error: ' + e.message); }
 }
 
-// ─── DEBUG PRICE LIST ─────────────────────────────────────────────────────────
-// Call via ?action=debugPriceList to see exactly what the script finds in OPS sheet.
+// ─── DEBUG — fast: reads only header row + row count per listed tab ────────────
 function handleDebugPriceList() {
   var opsSS = _openOPS();
   if (!opsSS) return { ok: false, error: 'Cannot open OPS sheet: ' + OPS_SHEET_ID };
 
-  var priceCfg  = _getPriceListConfig(opsSS);
-  var allTabs   = opsSS.getSheets().map(function(s){ return s.getName(); });
-  var priceTabs = priceCfg.length > 0
-    ? priceCfg.map(function(c){ return c.tab; })
-    : allTabs.filter(function(n){ return !_inSkipList(n); });
-  var tabInfo   = {};
+  var priceCfg = _getPriceListConfig(opsSS);
+  var allTabs  = opsSS.getSheets().map(function(s){ return s.getName(); });
+  var tabInfo  = {};
 
-  priceTabs.forEach(function(tabName) {
-    var sh = opsSS.getSheetByName(tabName);
-    if (!sh) { tabInfo[tabName] = { error: 'Tab not found in OPS sheet' }; return; }
-    var rows = sh.getDataRange().getValues();
-    tabInfo[tabName] = {
-      totalRows: rows.length,
-      header:    rows[0] ? rows[0].slice(0,8).map(String) : [],
-      sample:    rows.slice(1,4).map(function(r){ return r.slice(0,6).map(String); }),
+  priceCfg.forEach(function(cfg) {
+    var sh = opsSS.getSheetByName(cfg.tab);
+    if (!sh) { tabInfo[cfg.tab] = { error: 'Tab not found', cat: cfg.cat }; return; }
+    // Read only first 2 rows to stay fast
+    var last = sh.getLastRow();
+    var lastC = sh.getLastColumn();
+    var headerRange = sh.getRange(1, 1, Math.min(2, last), Math.min(lastC, 10));
+    var hdrVals = headerRange.getValues();
+    var header  = hdrVals[0] ? hdrVals[0].map(String) : [];
+    var sample  = hdrVals[1] ? hdrVals[1].map(String) : [];
+    tabInfo[cfg.tab] = {
+      cat:       cfg.cat,
+      totalRows: last,
+      header:    header,
+      sample:    sample,
     };
   });
 
   return {
     ok:          true,
+    scriptVersion: SCRIPT_VERSION,
     opsName:     opsSS.getName(),
-    opsUrl:      opsSS.getUrl(),
     allTabs:     allTabs,
-    priceTabs:   priceTabs,
     priceConfig: priceCfg,
-    configUsed:  priceCfg.length > 0,
-    skippedTabs: PRICE_SKIP,
     tabInfo:     tabInfo,
   };
 }
