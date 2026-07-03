@@ -599,18 +599,26 @@ function _hdrIdx(headers, candidates) {
 
 function _numVal(v) {
   if (v === null || v === undefined || v === '') return 0;
-  if (typeof v === 'number') return isNaN(v) ? 0 : v;
-  // Strip currency symbols, spaces, commas (thousands separators) — keep digits and one decimal point
-  var s = String(v).replace(/[^\d.]/g, '');
-  // If multiple dots (e.g. European "1.000.00"), keep only the last one
+  if (typeof v === 'number') {
+    if (isNaN(v) || v > 9999999) return 0;  // cap at ₹99,99,999 — larger = product code
+    return v;
+  }
+  var sv = String(v);
+  // If the value has 3+ letters it's a product code, not a price (e.g. "56101502SD02842")
+  if ((sv.match(/[A-Za-z]/g) || []).length >= 2) return 0;
+  // Strip currency symbols, spaces, commas — keep digits and one decimal point
+  var s = sv.replace(/[^\d.]/g, '');
   var parts = s.split('.');
   if (parts.length > 2) s = parts.slice(0, -1).join('') + '.' + parts[parts.length - 1];
-  return parseFloat(s) || 0;
+  var result = parseFloat(s) || 0;
+  return result > 9999999 ? 0 : result;  // cap at ₹1 crore
 }
 
 function _makeItem(tabName, cat, group, code, desc, cpl, extra) {
   var name       = desc || group || cat;
-  var searchName = [tabName, cat, group, desc, code, extra].filter(Boolean).join(' ');
+  // searchName: only product-meaningful fields — excludes tab name and extra
+  // (extra holds colour/finish codes that cause false-positive search matches)
+  var searchName = [cat, group, desc, code].filter(Boolean).join(' ');
   return {
     code:       code.toUpperCase(),
     name:       name,
