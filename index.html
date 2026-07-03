@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '17';
+  var V = '18';
   if (localStorage.getItem('4s_code_v') !== V) {
     localStorage.setItem('4s_code_v', V);
     // Clear ALL local storage (stale caches) then unregister SW and hard reload
@@ -1904,12 +1904,12 @@ function SettingsScreen({ctx}) {
                 <div style={{color:T.warn}}>No items loaded — tap "Sync now" to fetch from OPS sheet</div>
               )}
             </div>
-            <div style={{marginTop:12,display:'flex',gap:8}}>
-              <Btn full icon={Icon.refresh(T.green,14)} onClick={runDebug} disabled={debugging}>
-                {debugging?'Checking…':'Debug'}
-              </Btn>
+            <div style={{marginTop:12,display:'flex',flexDirection:'column',gap:8}}>
               <Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncPriceList} disabled={loading}>
                 {loading?'Loading…':(priceItems||[]).length===0?'Load price list':'Sync now'}
+              </Btn>
+              <Btn full icon={Icon.refresh(T.green,14)} onClick={runDebug} disabled={debugging}>
+                {debugging?'Checking…':'Debug'}
               </Btn>
             </div>
 
