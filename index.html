@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '11';
+  var V = '12';
   if (localStorage.getItem('4s_code_v') !== V) {
     localStorage.setItem('4s_code_v', V);
     // Clear ALL local storage (stale caches) then unregister SW and hard reload
@@ -242,7 +242,9 @@ function fuzzySearch(allItems, query) {
   const words = q.split(/\s+/).filter(w => w.length >= 2);
 
   function score(it) {
-    const nm = (it.searchName || it.name || '').toLowerCase();
+    // Build search field from all text fields so search works even with stale cache
+    const nm = ([it.searchName, it.item, it.name, it.cat, it.sheet, it.extra]
+      .filter(Boolean).join(' ')).toLowerCase();
     const cd = (it.code || '').toLowerCase();
 
     // S4: entire typed query is a substring of name or code
@@ -1332,19 +1334,16 @@ function SearchScreen({ctx}) {
           const stockTotal = (it.stock||[]).reduce((s,x)=>s+x.q,0);
           const hasStock   = (it.stock||[]).length > 0;
           const oos        = hasStock && stockTotal === 0;
-          const cpl        = it.cpl || it.mrp || 0;
+          const cpl = Number(it.cpl) || Number(it.mrp) || 0;
           return (
             <div key={it.code||it.name} style={{padding:'12px 18px',borderBottom:`1px solid ${T.line}`}}>
               <div style={{display:'flex',gap:10}}>
                 <div style={{flex:1,minWidth:0}}>
-                  {/* Item group / product line — the "name" of the item */}
-                  {it.item && (
-                    <div style={{fontSize:12,fontWeight:700,color:T.ink,letterSpacing:0.1,marginBottom:2,textTransform:'uppercase'}}>{it.item}</div>
-                  )}
-                  {/* Full LN Description */}
-                  <div style={{fontSize:13,color:it.item?T.ink3:T.ink,lineHeight:1.35,marginBottom:5,fontWeight:it.item?400:600}}>{it.name}</div>
-                  {/* Code + sheet tab + OOS */}
-                  <div style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap',marginBottom:5}}>
+                  {/* LN Description — always the primary product name */}
+                  <div style={{fontSize:13,fontWeight:600,color:T.ink,lineHeight:1.35,marginBottom:4}}>{it.name}</div>
+                  {/* Tags row: ITEM_GROUP category + item code + sheet + OOS */}
+                  <div style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap',marginBottom:4}}>
+                    {it.item && <Pill tone="neutral" size="sm" style={{fontWeight:600}}>{it.item}</Pill>}
                     {it.code && <span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:600}}>{it.code}</span>}
                     <Pill tone="neutral" size="sm">{(it.sheet||it.cat||'').toUpperCase()}</Pill>
                     {oos && <Pill tone="bad" size="sm">OUT OF STOCK</Pill>}

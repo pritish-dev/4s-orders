@@ -445,12 +445,12 @@ function _parsePriceTab(sh, tabName) {
 // Header: CATEGORY | ITEM_GROUP | ITEM_CODE | DESCRIPTION | CPL | EXTRA_INFO
 function _parseNormTab(rows, headerRow, tabName) {
   var hdr    = rows[headerRow].map(function(c){ return String(c||'').toUpperCase().trim(); });
-  var cCat   = _hdrIdx(hdr, ['CATEGORY']);           if (cCat   < 0) cCat   = 0;
-  var cGroup = _hdrIdx(hdr, ['ITEM_GROUP', 'ITEM GROUP']); if (cGroup < 0) cGroup = 1;
-  var cCode  = _hdrIdx(hdr, ['ITEM_CODE',  'ITEM CODE']);  if (cCode  < 0) cCode  = 2;
-  var cDesc  = _hdrIdx(hdr, ['DESCRIPTION']);        if (cDesc  < 0) cDesc  = 3;
-  var cCPL   = _hdrIdx(hdr, ['CPL', 'PRICE']);       if (cCPL   < 0) cCPL   = 4;
-  var cExtra = _hdrIdx(hdr, ['EXTRA_INFO', 'EXTRA']); if (cExtra < 0) cExtra = 5;
+  var cCat   = _hdrIdx(hdr, ['CATEGORY', 'CAT']);    if (cCat   < 0) cCat   = 0;
+  var cGroup = _hdrIdx(hdr, ['ITEM_GROUP', 'ITEM GROUP', 'GROUP', 'SUB CATEGORY', 'SUBCATEGORY']); if (cGroup < 0) cGroup = 1;
+  var cCode  = _hdrIdx(hdr, ['ITEM_CODE', 'ITEM CODE', 'LN CODE', 'LN_CODE', 'CODE']); if (cCode  < 0) cCode  = 2;
+  var cDesc  = _hdrIdx(hdr, ['DESCRIPTION', 'LN DESCRIPTION', 'LN_DESCRIPTION', 'ITEM DESCRIPTION', 'PRODUCT NAME']); if (cDesc  < 0) cDesc  = 3;
+  var cCPL   = _hdrIdx(hdr, ['CPL', 'PRICE', 'UNIT CONSUMER BASIC', 'CONSUMER BASIC', 'CONSUMER PRICE', 'MRP', 'RATE']); if (cCPL   < 0) cCPL   = 4;
+  var cExtra = _hdrIdx(hdr, ['EXTRA_INFO', 'EXTRA', 'REMARKS', 'NOTES']); if (cExtra < 0) cExtra = 5;
 
   var items = [];
   for (var r = headerRow + 1; r < rows.length; r++) {
@@ -565,7 +565,14 @@ function _hdrIdx(headers, candidates) {
 }
 
 function _numVal(v) {
-  return parseFloat(String(v || 0).replace(/[^\d.]/g, '')) || 0;
+  if (v === null || v === undefined || v === '') return 0;
+  if (typeof v === 'number') return isNaN(v) ? 0 : v;
+  // Strip currency symbols, spaces, commas (thousands separators) — keep digits and one decimal point
+  var s = String(v).replace(/[^\d.]/g, '');
+  // If multiple dots (e.g. European "1.000.00"), keep only the last one
+  var parts = s.split('.');
+  if (parts.length > 2) s = parts.slice(0, -1).join('') + '.' + parts[parts.length - 1];
+  return parseFloat(s) || 0;
 }
 
 function _makeItem(tabName, cat, group, code, desc, cpl, extra) {
