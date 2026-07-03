@@ -28,12 +28,12 @@
 
 // ─── IDs & version ───────────────────────────────────────────────────────────
 var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
-var SCRIPT_VERSION  = 'v14';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v15';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
   'Stock', 'APP_ORDERING_CREDS', 'Staff',
-  'Orders_Master', 'Change_Log',
+  'Orders_Master', 'Change_Log', 'Price_Lists',
   'Sheet1', 'Sheet2', 'Sheet3', 'Sheet4', 'Sheet5',
 ];
 
@@ -375,16 +375,16 @@ function handlePriceList() {
 
   var priceCfg = _getPriceListConfig(opsSS);
 
+  // No Price_Lists config sheet → fall back to auto-scanning every tab that is
+  // not in PRICE_SKIP. Tabs without a recognised price header are skipped
+  // silently inside _parsePriceTab, so admin/stock tabs never pollute prices.
+  var usedFallback = false;
   if (priceCfg.length === 0) {
-    return {
-      ok:        false,
-      errorCode: 'SETUP_NEEDED',
-      error:     'Price_Lists sheet not found (or is empty) in OPS spreadsheet.\n\n' +
-                 'Create a tab named exactly "Price_Lists" with two columns:\n' +
-                 '  Column A: Tab Name   (exact name of each price list tab)\n' +
-                 '  Column B: Category   (e.g. Home Furniture & Storage, Mattress)\n\n' +
-                 'Row 1 must be the header row. Data starts from row 2.',
-    };
+    usedFallback = true;
+    priceCfg = opsSS.getSheets()
+      .map(function(s){ return s.getName(); })
+      .filter(function(n){ return !_inSkipList(n); })
+      .map(function(n){ return { tab: n, cat: n }; });
   }
 
   var all    = [];
@@ -408,7 +408,23 @@ function handlePriceList() {
     }
   }
 
-  var result = { ok: true, scriptVersion: SCRIPT_VERSION, items: all, counts: counts, totalTabs: Object.keys(counts).length };
+  if (all.length === 0) {
+    return {
+      ok:        false,
+      errorCode: 'SETUP_NEEDED',
+      scriptVersion: SCRIPT_VERSION,
+      error:     'No price items could be read from the OPS spreadsheet.\n\n' +
+                 (usedFallback
+                   ? 'No "Price_Lists" config tab was found, so all tabs were scanned automatically ' +
+                     'but none had a recognised price header (needs ITEM_CODE / ITEM CODE / LN CODE + DESCRIPTION).\n\n'
+                   : 'The tabs listed in "Price_Lists" were read but none had a recognised price header ' +
+                     '(needs ITEM_CODE / ITEM CODE / LN CODE + DESCRIPTION).\n\n') +
+                 'Check the price tab headers, or list the correct tab names in a "Price_Lists" tab (Column A: Tab Name, Column B: Category).',
+      tabErrors: errors,
+    };
+  }
+
+  var result = { ok: true, scriptVersion: SCRIPT_VERSION, mode: usedFallback ? 'auto-scan' : 'config', items: all, counts: counts, totalTabs: Object.keys(counts).length };
   if (errors.length) result.tabErrors = errors;
   return result;
 }
@@ -416,7 +432,13 @@ function handlePriceList() {
 // Reads Price_Lists sheet. Expected columns: Tab Name | Category
 // Returns [{tab, cat}] or [] if sheet absent / empty.
 function _getPriceListConfig(opsSS) {
-  var sh = opsSS.getSheetByName('Price_Lists');
+  // Accept a few common spellings of the config tab name
+  var sh = null;
+  var candidates = ['Price_Lists', 'Price Lists', 'PriceLists', 'Price_List', 'Price List', 'PriceList'];
+  for (var c = 0; c < candidates.length; c++) {
+    sh = opsSS.getSheetByName(candidates[c]);
+    if (sh) break;
+  }
   if (!sh) return [];
   var rows = sh.getDataRange().getValues();
   var result = [];
@@ -615,21 +637,19 @@ function _numVal(v) {
 }
 
 function _makeItem(tabName, cat, group, code, desc, cpl, extra) {
-  var name       = desc || group || cat;
-  // searchName: only product-meaningful fields — excludes tab name and extra
-  // (extra holds colour/finish codes that cause false-positive search matches)
-  var searchName = [cat, group, desc, code].filter(Boolean).join(' ');
+  var name = desc || group || cat;
+  // Keep the payload lean: the app builds its own search string from
+  // cat/item/name and treats a missing stock array as []. Dropping searchName
+  // and the empty stock array here noticeably shrinks the JSONP response.
   return {
-    code:       code.toUpperCase(),
-    name:       name,
-    searchName: searchName,
-    cat:        cat,
-    item:       group  || '',
-    mrp:        cpl,
-    cpl:        cpl,
-    extra:      extra  || '',
-    stock:      [],
-    sheet:      tabName,
+    code:  code.toUpperCase(),
+    name:  name,
+    cat:   cat,
+    item:  group || '',
+    mrp:   cpl,
+    cpl:   cpl,
+    extra: extra || '',
+    sheet: tabName,
   };
 }
 
@@ -746,6 +766,15 @@ function handleDebugPriceList() {
   var allTabs  = opsSS.getSheets().map(function(s){ return s.getName(); });
   var tabInfo  = {};
 
+  // Mirror handlePriceList: with no config sheet, auto-scan all non-skip tabs
+  var usedFallback = false;
+  if (priceCfg.length === 0) {
+    usedFallback = true;
+    priceCfg = allTabs
+      .filter(function(n){ return !_inSkipList(n); })
+      .map(function(n){ return { tab: n, cat: n }; });
+  }
+
   priceCfg.forEach(function(cfg) {
     var sh = opsSS.getSheetByName(cfg.tab);
     if (!sh) { tabInfo[cfg.tab] = { error: 'Tab not found', cat: cfg.cat }; return; }
@@ -767,6 +796,7 @@ function handleDebugPriceList() {
   return {
     ok:          true,
     scriptVersion: SCRIPT_VERSION,
+    mode:        usedFallback ? 'auto-scan' : 'config',
     opsName:     opsSS.getName(),
     allTabs:     allTabs,
     priceConfig: priceCfg,

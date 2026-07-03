@@ -162,8 +162,8 @@ async function apiPost(body) {
 const OPS_SHEET_ID = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 
 async function loadPriceListItems() {
-  const CACHE_KEY = '4s_price_items_v8';
-  const CACHE_TS  = '4s_price_items_v8_ts';
+  const CACHE_KEY = '4s_price_items_v9';
+  const CACHE_TS  = '4s_price_items_v9_ts';
   const AGE_MS    = 6 * 60 * 60 * 1000; // 6 hours
 
   // Serve from cache if fresh
@@ -180,10 +180,10 @@ async function loadPriceListItems() {
 
   let res;
   try {
-    res = await apiGet('priceList', {}, 35000);
+    res = await apiGet('priceList', {}, 60000);
   } catch (e) {
     const msg = e.message || '';
-    if (msg.includes('timed out')) throw new Error('Request timed out (35s). Try again.');
+    if (msg.includes('timed out')) throw new Error('Request timed out (60s). The price sheet may be large or the script slow to wake — tap Sync to retry.');
     throw new Error('Network error: ' + msg);
   }
 
@@ -744,7 +744,7 @@ function App() {
   const [priceItems,    setPriceItems]   = useState([]);
   const [orders,        setOrders]       = useState([]);
   const [syncedAt,      setSyncedAt]     = useState(null);
-  const [priceSyncedAt, setPriceSyncedAt]= useState(() => localStorage.getItem('4s_price_items_v8_ts') ? new Date(Number(localStorage.getItem('4s_price_items_v8_ts'))).toISOString() : null);
+  const [priceSyncedAt, setPriceSyncedAt]= useState(() => localStorage.getItem('4s_price_items_v9_ts') ? new Date(Number(localStorage.getItem('4s_price_items_v9_ts'))).toISOString() : null);
   const [priceSyncError, setPriceSyncError] = useState(null);
   const [order,         setOrder]        = useState(BLANK_ORDER());
   const [selOrder,      setSelOrder]     = useState(null);
@@ -782,14 +782,14 @@ function App() {
     if (!user) return;
     const cached = localStorage.getItem('4s_items');
     if (cached) try { setItems(JSON.parse(cached)); } catch {}
-    const cachedPL = localStorage.getItem('4s_price_items_v8');
+    const cachedPL = localStorage.getItem('4s_price_items_v9');
     if (cachedPL) try { setPriceItems(JSON.parse(cachedPL)); } catch {}
     syncStock();
     loadPriceListItems()
       .then(pi => {
         if (pi.length > 0) {
           setPriceItems(pi);
-          const ts = localStorage.getItem('4s_price_items_v8_ts');
+          const ts = localStorage.getItem('4s_price_items_v9_ts');
           if (ts) setPriceSyncedAt(new Date(Number(ts)).toISOString());
         }
       })
@@ -807,7 +807,7 @@ function App() {
   async function syncStock() {
     setLoading(true);
     try {
-      const res = await apiGet('stock', {}, 45000);
+      const res = await apiGet('stock', {}, 60000);
       if (res.ok) {
         setItems(res.items);
         setSyncedAt(res.syncedAt || new Date().toISOString());
@@ -824,15 +824,15 @@ function App() {
   }
 
   async function syncPriceList() {
-    localStorage.removeItem('4s_price_items_v8');
-    localStorage.removeItem('4s_price_items_v8_ts');
+    localStorage.removeItem('4s_price_items_v9');
+    localStorage.removeItem('4s_price_items_v9_ts');
     setPriceSyncError(null);
     setLoading(true);
     try {
       const pi = await loadPriceListItems();
       setPriceItems(pi);
       setPriceSyncedAt(new Date().toISOString());
-      localStorage.setItem('4s_price_items_v8_ts', String(Date.now()));
+      localStorage.setItem('4s_price_items_v9_ts', String(Date.now()));
       showToast(pi.length + ' items loaded ✓', 'ok');
     } catch(e) {
       setPriceSyncError(e.message);
@@ -1348,13 +1348,13 @@ function SearchScreen({ctx}) {
           </div>
         )}
 
-        {filtered.map(it=>{
+        {filtered.map((it,fi)=>{
           const stockTotal = (it.stock||[]).reduce((s,x)=>s+x.q,0);
           const hasStock   = (it.stock||[]).length > 0;
           const oos        = hasStock && stockTotal === 0;
           const cpl = Number(it.cpl) || Number(it.mrp) || 0;
           return (
-            <div key={it.code||it.name} style={{padding:'12px 18px',borderBottom:`1px solid ${T.line}`}}>
+            <div key={(it.code||it.name||'')+'|'+(it.sheet||'')+'|'+fi} style={{padding:'12px 18px',borderBottom:`1px solid ${T.line}`}}>
               <div style={{display:'flex',gap:10}}>
                 <div style={{flex:1,minWidth:0}}>
                   {/* LN Description — always the primary product name */}
@@ -1920,11 +1920,11 @@ function SettingsScreen({ctx}) {
                   <>
                     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
                       <div style={{fontSize:11,fontWeight:700,color:T.green}}>OPS: {debugResult.opsName}</div>
-                      <span style={{fontSize:9,fontFamily:T.mono,background:debugResult.scriptVersion==='v14'?T.okSoft:T.badSoft,color:debugResult.scriptVersion==='v14'?T.ok:T.bad,padding:'2px 6px',borderRadius:3,fontWeight:700}}>
+                      <span style={{fontSize:9,fontFamily:T.mono,background:debugResult.scriptVersion==='v15'?T.okSoft:T.badSoft,color:debugResult.scriptVersion==='v15'?T.ok:T.bad,padding:'2px 6px',borderRadius:3,fontWeight:700}}>
                         API {debugResult.scriptVersion||'OLD — REDEPLOY!'}
                       </span>
                     </div>
-                    {debugResult.scriptVersion !== 'v14' && (
+                    {debugResult.scriptVersion !== 'v15' && (
                       <div style={{fontSize:11,color:T.bad,marginBottom:8,padding:'6px 8px',background:T.badSoft,borderRadius:4}}>
                         ⚠ Old Code.gs detected. Copy the latest Code.gs from GitHub → save in Apps Script → Deploy → New version.
                       </div>
