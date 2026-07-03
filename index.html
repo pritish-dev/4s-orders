@@ -807,7 +807,7 @@ function App() {
   async function syncStock() {
     setLoading(true);
     try {
-      const res = await apiGet('stock');
+      const res = await apiGet('stock', {}, 45000);
       if (res.ok) {
         setItems(res.items);
         setSyncedAt(res.syncedAt || new Date().toISOString());
