@@ -365,38 +365,70 @@ function handleStock() {
 }
 
 // ─── PRICE LIST ───────────────────────────────────────────────────────────────
-// Reads every tab in the OPS sheet that isn't in PRICE_SKIP.
-// Auto-detects tab format:
-//   • Normalized CSV  (header has ITEM_CODE + DESCRIPTION)
-//   • Raw Godrej XLSX furniture (header has LN Code but not MODEL)
-//   • Raw Godrej XLSX mattress  (header has LN Code AND MODEL)
+// Reads the Price_Lists config sheet to find which tabs to parse and their categories.
+// If Price_Lists sheet exists, ONLY those tabs are read.
+// Falls back to PRICE_SKIP auto-detection when Price_Lists sheet is absent.
 function handlePriceList() {
   var opsSS = _openOPS();
   if (!opsSS) return { ok: false, error: 'Cannot open OPS spreadsheet (ID: ' + OPS_SHEET_ID + '). Ensure the script owner has access.' };
 
-  var all    = [];
-  var counts = {};
-  var errors = [];
+  var priceCfg = _getPriceListConfig(opsSS);
+  var all      = [];
+  var counts   = {};
+  var errors   = [];
 
-  var sheets = opsSS.getSheets();
-  for (var i = 0; i < sheets.length; i++) {
-    var sh      = sheets[i];
-    var tabName = sh.getName();
-    if (_inSkipList(tabName)) continue;
-
-    try {
-      var tabItems = _parsePriceTab(sh, tabName);
-      if (tabItems.length > 0) {
-        all    = all.concat(tabItems);
-        counts[tabName] = tabItems.length;
+  if (priceCfg.length > 0) {
+    // Config-driven: read only the tabs listed in Price_Lists sheet
+    for (var i = 0; i < priceCfg.length; i++) {
+      var cfg = priceCfg[i];
+      var sh  = opsSS.getSheetByName(cfg.tab);
+      if (!sh) { errors.push(cfg.tab + ': tab not found in OPS sheet'); continue; }
+      try {
+        var tabItems = _parsePriceTab(sh, cfg.tab, cfg.cat);
+        if (tabItems.length > 0) {
+          all = all.concat(tabItems);
+          counts[cfg.tab] = tabItems.length;
+        }
+      } catch(e) {
+        errors.push(cfg.tab + ': ' + e.message);
       }
-    } catch(e) {
-      errors.push(tabName + ': ' + e.message);
+    }
+  } else {
+    // Fallback auto-detection: every tab not in PRICE_SKIP
+    var sheets = opsSS.getSheets();
+    for (var j = 0; j < sheets.length; j++) {
+      var sht     = sheets[j];
+      var tabName = sht.getName();
+      if (_inSkipList(tabName)) continue;
+      try {
+        var items = _parsePriceTab(sht, tabName, '');
+        if (items.length > 0) {
+          all = all.concat(items);
+          counts[tabName] = items.length;
+        }
+      } catch(e) {
+        errors.push(tabName + ': ' + e.message);
+      }
     }
   }
 
-  var result = { ok: true, items: all, counts: counts, totalTabs: Object.keys(counts).length };
+  var result = { ok: true, items: all, counts: counts, totalTabs: Object.keys(counts).length, configUsed: priceCfg.length > 0 };
   if (errors.length) result.tabErrors = errors;
+  return result;
+}
+
+// Reads Price_Lists sheet. Expected columns: Tab Name | Category
+// Returns [{tab, cat}] or [] if sheet absent / empty.
+function _getPriceListConfig(opsSS) {
+  var sh = opsSS.getSheetByName('Price_Lists');
+  if (!sh) return [];
+  var rows = sh.getDataRange().getValues();
+  var result = [];
+  for (var i = 1; i < rows.length; i++) {   // skip header row
+    var tab = String(rows[i][0] || '').trim();
+    var cat = String(rows[i][1] || '').trim();
+    if (tab) result.push({ tab: tab, cat: cat || tab });
+  }
   return result;
 }
 
@@ -409,7 +441,9 @@ function _inSkipList(name) {
 }
 
 // ─── Tab format detector + dispatcher ────────────────────────────────────────
-function _parsePriceTab(sh, tabName) {
+// catOverride: if non-empty string, all items from this tab get that category
+//              (set from Price_Lists sheet column B)
+function _parsePriceTab(sh, tabName, catOverride) {
   var rows = sh.getDataRange().getValues();
   if (rows.length < 2) return [];
 
@@ -421,7 +455,8 @@ function _parsePriceTab(sh, tabName) {
     var joined = '|' + cells.join('|') + '|';
 
     // Normalized format: has ITEM_CODE (or ITEM CODE) + DESCRIPTION
-    if ((joined.indexOf('|ITEM_CODE|') !== -1 || joined.indexOf('|ITEM CODE|') !== -1)
+    if ((joined.indexOf('|ITEM_CODE|') !== -1 || joined.indexOf('|ITEM CODE|') !== -1
+         || joined.indexOf('|LN_CODE|') !== -1)
         && joined.indexOf('DESCRIPTION') !== -1) {
       headerRow = i; format = 'normalized'; break;
     }
@@ -435,15 +470,16 @@ function _parsePriceTab(sh, tabName) {
   }
 
   if (headerRow < 0) return [];   // unrecognised tab — silently skip
-  if (format === 'normalized')    return _parseNormTab(rows, headerRow, tabName);
-  if (format === 'raw-furniture') return _parseFurnitureTab(rows, headerRow, tabName);
-  if (format === 'raw-mattress')  return _parseMattressTab(rows, headerRow, tabName);
+  if (format === 'normalized')    return _parseNormTab(rows, headerRow, tabName, catOverride);
+  if (format === 'raw-furniture') return _parseFurnitureTab(rows, headerRow, tabName, catOverride);
+  if (format === 'raw-mattress')  return _parseMattressTab(rows, headerRow, tabName, catOverride);
   return [];
 }
 
 // ─── Normalized tab parser ────────────────────────────────────────────────────
 // Header: CATEGORY | ITEM_GROUP | ITEM_CODE | DESCRIPTION | CPL | EXTRA_INFO
-function _parseNormTab(rows, headerRow, tabName) {
+// catOverride: when set (from Price_Lists sheet), all items get that category
+function _parseNormTab(rows, headerRow, tabName, catOverride) {
   var hdr    = rows[headerRow].map(function(c){ return String(c||'').toUpperCase().trim(); });
   var cCat   = _hdrIdx(hdr, ['CATEGORY', 'CAT']);    if (cCat   < 0) cCat   = 0;
   var cGroup = _hdrIdx(hdr, ['ITEM_GROUP', 'ITEM GROUP', 'GROUP', 'SUB CATEGORY', 'SUBCATEGORY']); if (cGroup < 0) cGroup = 1;
@@ -459,7 +495,8 @@ function _parseNormTab(rows, headerRow, tabName) {
     var desc  = String(row[cDesc]  || '').trim();
     if (!code && !desc) continue;
 
-    var cat   = String(row[cCat]   || tabName).trim() || tabName;
+    // Use catOverride if provided, else read from CATEGORY column, else fall back to tabName
+    var cat   = catOverride || String(row[cCat] || tabName).trim() || tabName;
     var group = String(row[cGroup] || '').trim();
     var cpl   = _numVal(row[cCPL]);
     var extra = cExtra < row.length ? String(row[cExtra] || '').trim() : '';
@@ -474,7 +511,7 @@ function _parseNormTab(rows, headerRow, tabName) {
 // Sub-category markers appear in two forms:
 //   • Home Storage style : col before LN Code has text, LN Code column is empty
 //   • Living Room style  : LN Code column has the sub-cat name, Description + Price are empty
-function _parseFurnitureTab(rows, headerRow, tabName) {
+function _parseFurnitureTab(rows, headerRow, tabName, catOverride) {
   var hdr   = rows[headerRow].map(function(c){ return String(c||'').toUpperCase().trim(); });
   var cCode = _hdrIdx(hdr, ['LN CODE', 'ITEM CODE', 'LN_CODE']);
   var cDesc = _hdrIdx(hdr, ['LN DESCRIPTION', 'ITEM DESCRIPTION', 'DESCRIPTION', 'LN_DESCRIPTION']);
@@ -511,7 +548,7 @@ function _parseFurnitureTab(rows, headerRow, tabName) {
         var ev = String(row[ec] || '').trim();
         if (ev) extraParts.push(ev);
       }
-      items.push(_makeItem(tabName, tabName, currentGroup, code, desc, priceFl, extraParts.join(' | ')));
+      items.push(_makeItem(tabName, catOverride || tabName, currentGroup, code, desc, priceFl, extraParts.join(' | ')));
     }
   }
   return items;
@@ -519,7 +556,7 @@ function _parseFurnitureTab(rows, headerRow, tabName) {
 
 // ─── Raw Godrej mattress tab parser ──────────────────────────────────────────
 // Header: [blank] | HSN | Reference | Model | LN Code | LN Description | Thickness(in) | Thickness(cm) | CPL
-function _parseMattressTab(rows, headerRow, tabName) {
+function _parseMattressTab(rows, headerRow, tabName, catOverride) {
   var hdr    = rows[headerRow].map(function(c){ return String(c||'').toUpperCase().trim(); });
   var cCode  = _hdrIdx(hdr, ['LN CODE']);
   var cDesc  = _hdrIdx(hdr, ['LN DESCRIPTION', 'DESCRIPTION']);
@@ -548,7 +585,7 @@ function _parseMattressTab(rows, headerRow, tabName) {
     var tcm   = cTcm  >= 0 ? String(row[cTcm]  || '').trim()          : '';
     var extra = tin   ? (tin + '"' + (tcm ? ' / ' + tcm + 'cm' : '')) : ref;
 
-    items.push(_makeItem('Mattress', 'Mattress', currentModel, code, desc, cpl, extra));
+    items.push(_makeItem(tabName, catOverride || 'Mattress', currentModel, code, desc, cpl, extra));
   }
   return items;
 }
@@ -702,12 +739,16 @@ function handleDebugPriceList() {
   var opsSS = _openOPS();
   if (!opsSS) return { ok: false, error: 'Cannot open OPS sheet: ' + OPS_SHEET_ID };
 
+  var priceCfg  = _getPriceListConfig(opsSS);
   var allTabs   = opsSS.getSheets().map(function(s){ return s.getName(); });
-  var priceTabs = allTabs.filter(function(n){ return !_inSkipList(n); });
+  var priceTabs = priceCfg.length > 0
+    ? priceCfg.map(function(c){ return c.tab; })
+    : allTabs.filter(function(n){ return !_inSkipList(n); });
   var tabInfo   = {};
 
   priceTabs.forEach(function(tabName) {
-    var sh   = opsSS.getSheetByName(tabName);
+    var sh = opsSS.getSheetByName(tabName);
+    if (!sh) { tabInfo[tabName] = { error: 'Tab not found in OPS sheet' }; return; }
     var rows = sh.getDataRange().getValues();
     tabInfo[tabName] = {
       totalRows: rows.length,
@@ -722,6 +763,8 @@ function handleDebugPriceList() {
     opsUrl:      opsSS.getUrl(),
     allTabs:     allTabs,
     priceTabs:   priceTabs,
+    priceConfig: priceCfg,
+    configUsed:  priceCfg.length > 0,
     skippedTabs: PRICE_SKIP,
     tabInfo:     tabInfo,
   };

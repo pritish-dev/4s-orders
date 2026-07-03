@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '12';
+  var V = '13';
   if (localStorage.getItem('4s_code_v') !== V) {
     localStorage.setItem('4s_code_v', V);
     // Clear ALL local storage (stale caches) then unregister SW and hard reload
@@ -1188,28 +1188,20 @@ function SearchScreen({ctx}) {
     });
   })();
 
-  // Two broad categories: Mattress tabs vs everything else (Home Furniture & Storage)
-  const isMattressTab = s => s.toLowerCase().includes('mattress');
-  const hasFurniture  = allItems.some(i => !isMattressTab(i.sheet));
-  const hasMattress   = allItems.some(i =>  isMattressTab(i.sheet));
-  const furnitureCount = allItems.filter(i => !isMattressTab(i.sheet)).length;
-  const mattressCount  = allItems.filter(i =>  isMattressTab(i.sheet)).length;
+  // Categories come directly from it.cat (set by Price_Lists sheet column B)
+  const uniqueCats = [...new Set(allItems.map(i => i.cat).filter(Boolean))].sort();
 
   React.useEffect(() => {
-    const valid = ['all', '__furniture__', '__mattress__'];
+    const valid = ['all', ...uniqueCats];
     if (!valid.includes(cat)) setCat('all');
   }, [allItems.length]);
 
   const CATS = [
-    { key: 'all',           label: 'All' + (allItems.length > 0 ? ' · ' + allItems.length : '') },
-    ...(hasFurniture ? [{ key: '__furniture__', label: 'Home Furniture & Storage · ' + furnitureCount }] : []),
-    ...(hasMattress  ? [{ key: '__mattress__',  label: 'Mattress · ' + mattressCount }]                 : []),
+    { key: 'all', label: 'All' + (allItems.length > 0 ? ' · ' + allItems.length : '') },
+    ...uniqueCats.map(c => ({ key: c, label: c + ' · ' + allItems.filter(i => i.cat === c).length })),
   ];
 
-  const bycat =
-    cat === '__furniture__' ? allItems.filter(i => !isMattressTab(i.sheet)) :
-    cat === '__mattress__'  ? allItems.filter(i =>  isMattressTab(i.sheet)) :
-    allItems;
+  const bycat = cat === 'all' ? allItems : allItems.filter(i => i.cat === cat);
 
   const {results: filtered, mode: searchMode} = fuzzySearch(bycat, q);
 
