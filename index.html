@@ -1242,16 +1242,20 @@ function SearchScreen({ctx}) {
     const pct       = parseFloat(disc)/100||0;
     const basePrice = item.mrp||item.cpl||0;
     const unitPrice = basePrice>0 ? Math.round(basePrice*(1-pct)) : 0;
-    const exists    = (order.items||[]).findIndex(x=>x.code===item.code);
+    // "Change of Code" items: the order form / PDF must use the Alt Item code
+    // even though the price list still lists the old code.
+    const effCode   = item.altCode || item.code;
+    const exists    = (order.items||[]).findIndex(x=>x.code===effCode);
     let newItems;
     if (exists>=0) {
       newItems = order.items.map((x,idx)=>idx===exists?{...x,qty:x.qty+1,total:(x.qty+1)*(x.unitPrice||x.mrp||x.cpl||0)}:x);
     } else {
       newItems = [...(order.items||[]),{
-        code:item.code, name:item.name, cat:item.cat, item:item.item||'',
+        code:effCode, priceCode:item.code, name:item.name, cat:item.cat, item:item.item||'',
         qty:1, mrp:item.mrp||item.cpl||0, cpl:item.cpl||item.mrp||0,
         unitPrice, total:unitPrice, disc,
         ageing:false, sweetner:false,
+        discontinued:!!item.discontinued, discSince:item.discSince||'',
         branch:(item.stock||[])[0]?.b||'KB',
         inStock:(item.stock||[]).reduce((s,x)=>s+x.q,0),
       }];
@@ -1408,6 +1412,8 @@ function SearchScreen({ctx}) {
                     {it.code && <span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:600}}>{it.code}</span>}
                     <Pill tone="neutral" size="sm">{(it.sheet||it.cat||'').toUpperCase()}</Pill>
                     {oos && <Pill tone="bad" size="sm">OUT OF STOCK</Pill>}
+                    {it.discontinued && <Pill tone="bad" size="sm">DISCONTINUED{it.discSince?' since '+it.discSince:''}</Pill>}
+                    {it.altCode && <Pill tone="warn" size="sm">USE CODE {it.altCode}</Pill>}
                   </div>
                   {/* Extra info (e.g. mattress thickness) */}
                   {it.extra && <div style={{fontSize:10,color:T.ink4,marginBottom:4}}>{it.extra}</div>}
@@ -1525,6 +1531,7 @@ function OrderFormScreen({ctx}) {
                     <span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:600}}>{it.code}</span>
                     <StockChip branch={it.branch||'KB'} count={it.inStock||0}/>
                     {(it.inStock===0||it.inStock===undefined)&&<Pill tone="warn" size="sm">OOS</Pill>}
+                    {it.discontinued&&<Pill tone="bad" size="sm">DISCONTINUED{it.discSince?' since '+it.discSince:''}</Pill>}
                   </div>
                   <div style={{fontSize:13,fontWeight:600,lineHeight:1.3}}>{it.name}</div>
                   {mrpVal>0&&<div style={{fontSize:10,color:T.ink4,marginTop:2}}>MRP: ₹{mrpVal.toLocaleString('en-IN')} /unit</div>}
@@ -1973,11 +1980,11 @@ function SettingsScreen({ctx}) {
                   <>
                     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
                       <div style={{fontSize:11,fontWeight:700,color:T.green}}>OPS: {debugResult.opsName}</div>
-                      <span style={{fontSize:9,fontFamily:T.mono,background:debugResult.scriptVersion==='v16'?T.okSoft:T.badSoft,color:debugResult.scriptVersion==='v16'?T.ok:T.bad,padding:'2px 6px',borderRadius:3,fontWeight:700}}>
+                      <span style={{fontSize:9,fontFamily:T.mono,background:debugResult.scriptVersion==='v17'?T.okSoft:T.badSoft,color:debugResult.scriptVersion==='v17'?T.ok:T.bad,padding:'2px 6px',borderRadius:3,fontWeight:700}}>
                         API {debugResult.scriptVersion||'OLD — REDEPLOY!'}
                       </span>
                     </div>
-                    {debugResult.scriptVersion !== 'v16' && (
+                    {debugResult.scriptVersion !== 'v17' && (
                       <div style={{fontSize:11,color:T.bad,marginBottom:8,padding:'6px 8px',background:T.badSoft,borderRadius:4}}>
                         ⚠ Old Code.gs detected. Copy the latest Code.gs from GitHub → save in Apps Script → Deploy → New version.
                       </div>

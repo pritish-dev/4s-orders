@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v16';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v17';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -411,6 +411,27 @@ function handlePriceList() {
     }
   }
 
+  // Annotate items using the "Discontinued Products" tab (matched by item code):
+  //   REMARKS "Discontinued"  → item.discontinued + item.discSince (date)
+  //   REMARKS "change of Code" → item.altCode (used as the code in the order form)
+  try {
+    var discMap = _getDiscontinuedMap(opsSS);
+    if (discMap) {
+      for (var d = 0; d < all.length; d++) {
+        var info = discMap[all[d].code];
+        if (!info) continue;
+        if (info.remarks.indexOf('discontinu') !== -1) {
+          all[d].discontinued = true;
+          all[d].discSince    = info.date || '';
+        }
+        if (info.remarks.indexOf('change') !== -1 && info.altCode) {
+          all[d].altCode = info.altCode;
+          if (info.altName) all[d].altName = info.altName;
+        }
+      }
+    }
+  } catch (e) { /* discontinued annotation is non-fatal */ }
+
   if (all.length === 0) {
     return {
       ok:        false,
@@ -609,6 +630,56 @@ function _parseMattressTab(rows, headerRow, tabName, catOverride) {
     items.push(_makeItem(tabName, catOverride || 'Mattress', currentModel, code, desc, cpl, extra));
   }
   return items;
+}
+
+// ─── Discontinued Products lookup ─────────────────────────────────────────────
+// OPS tab "Discontinued Products" headers:
+//   Item Code | Item Description | PRODUCT FAMILY | DATE OF DISCONTINUATION |
+//   REMARKS | Alt item code | Alt Item code Description
+// Returns { <UPPER item code>: {remarks, remarksRaw, date, altCode, altName} } or null.
+function _getDiscontinuedMap(opsSS) {
+  var sh = opsSS.getSheetByName('Discontinued Products');
+  if (!sh) return null;
+  var rows = sh.getDataRange().getValues();
+  if (rows.length < 2) return {};
+
+  var hdr   = rows[0].map(function(c){ return String(c || '').toUpperCase().trim(); });
+  var cCode = _hdrIdx(hdr, ['ITEM CODE', 'ITEM_CODE', 'CODE']);
+  var cDate = _hdrIdx(hdr, ['DATE OF DISCONTINUATION', 'DISCONTINUATION DATE', 'DATE']);
+  var cRem  = _hdrIdx(hdr, ['REMARKS', 'REMARK', 'STATUS']);
+  var cAlt  = _hdrIdx(hdr, ['ALT ITEM CODE', 'ALT ITEM_CODE', 'ALTERNATE ITEM CODE', 'ALT CODE']);
+  var cAltD = _hdrIdx(hdr, ['ALT ITEM CODE DESCRIPTION', 'ALT ITEM CODE DESC', 'ALT DESCRIPTION']);
+
+  // Positional fallback matching the documented header order
+  if (cCode < 0) cCode = 0;
+  if (cDate < 0) cDate = 3;
+  if (cRem  < 0) cRem  = 4;
+  if (cAlt  < 0) cAlt  = 5;
+  if (cAltD < 0) cAltD = 6;
+
+  var map = {};
+  for (var i = 1; i < rows.length; i++) {
+    var r    = rows[i];
+    var code = String(r[cCode] || '').toUpperCase().trim();
+    if (!code) continue;
+    var remarksRaw = String(r[cRem] || '').trim();
+    map[code] = {
+      remarks:    remarksRaw.toLowerCase(),
+      remarksRaw: remarksRaw,
+      date:       _fmtDate(r[cDate]),
+      altCode:    String(r[cAlt]  || '').toUpperCase().trim(),
+      altName:    String(r[cAltD] || '').trim(),
+    };
+  }
+  return map;
+}
+
+function _fmtDate(v) {
+  if (v === null || v === undefined || v === '') return '';
+  if (Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v)) {
+    return Utilities.formatDate(v, Session.getScriptTimeZone(), 'dd MMM yyyy');
+  }
+  return String(v).trim();
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
