@@ -281,6 +281,27 @@ function fuzzySearch(allItems, query) {
 }
 
 // ═══════════════════════════════════════════════════════════
+// ORDER TOTALS — single source of truth used by the form, the
+// on-screen preview, the PDF and the save call so they never drift.
+//   • Each item.total is already net of that item's own discount.
+//   • orderDiscount is an extra order-wide discount, entered as a %.
+//   • GST = CGST 9% + SGST 9% on the taxable (after-discount) value.
+// ═══════════════════════════════════════════════════════════
+function orderTotals(o) {
+  const items         = o.items || [];
+  const itemsSubtotal = items.reduce((s, i) => s + (i.total || 0), 0);
+  const orderDiscPct  = Math.max(0, parseFloat(o.orderDiscount) || 0) / 100;
+  const orderDiscAmt  = Math.round(itemsSubtotal * orderDiscPct);
+  const taxable       = itemsSubtotal - orderDiscAmt;
+  const cgst          = Math.round(taxable * 0.09);
+  const sgst          = Math.round(taxable * 0.09);
+  const total         = taxable + cgst + sgst;
+  const earnest       = Number(o.earnest) || 0;
+  const balance       = total - earnest;
+  return { itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance };
+}
+
+// ═══════════════════════════════════════════════════════════
 // ICONS (SVG)
 // ═══════════════════════════════════════════════════════════
 const Icon = {
@@ -423,16 +444,22 @@ function generatePDF(order) {
   const { jsPDF } = window.jspdf;
   const doc  = new jsPDF({ unit:'mm', format:'a4' });
   const pw   = 210;
+  const ph   = 297;
   const ml   = 10;
   const mr   = 10;
   const cw   = pw - ml - mr;          // 190 mm usable width
 
-  const subtotal = order.items.reduce((s,i)=>s+(i.total||0),0);
-  const cgst     = Math.round(subtotal*0.09);
-  const sgst     = Math.round(subtotal*0.09);
-  const totalAmt = subtotal+cgst+sgst;
-  const earnest  = Number(order.earnest)||0;
-  const balance  = totalAmt-earnest;
+  // Single source of truth for money (items subtotal → order discount → GST)
+  const T2       = orderTotals(order);
+  const subtotal = T2.itemsSubtotal;
+  const cgst     = T2.cgst;
+  const sgst     = T2.sgst;
+  const totalAmt = T2.total;
+  const earnest  = T2.earnest;
+  const balance  = T2.balance;
+  const orderDiscPct = T2.orderDiscPct;
+  const orderDiscAmt = T2.orderDiscAmt;
+  const taxable      = T2.taxable;
 
   // Order number: <Sl No>/<Receipt No> in red
   const slNo     = order.slNo||order.internalNo||'—';
@@ -451,272 +478,289 @@ function generatePDF(order) {
   const rval= (x,y,t,sz=8,bold=false,clr=INK) => { doc.setFont('helvetica',bold?'bold':'normal'); doc.setFontSize(sz); doc.setTextColor(...clr); doc.text(String(t||''),x,y,{align:'right'}); };
   // fit1: clamps text to one line within width w
   const fit1= (t,w,sz=8) => { doc.setFontSize(sz); return (doc.splitTextToSize(String(t||''),w)[0])||''; };
+  // Use 'Rs.' instead of Rs symbol — jsPDF Helvetica is Latin-1 only,
+  // the Unicode rupee glyph (U+20B9) produces wrong metrics and overflows.
+  const inr = (n) => 'Rs.' + n.toLocaleString('en-IN');
 
-  let y = 6;
-
-  // ── 1. HEADER ─────────────────────────────────────────────
-  const hH   = 16;
-  const leftW = 105;
-  const rightW = cw - leftW;
-
-  // Left half: solid red background → white "Order Confirmation Form"
-  doc.setFillColor(...DRED);
-  doc.rect(ml, y, leftW, hH, 'F');
-  doc.setFont('times','bolditalic');
-  doc.setFontSize(15);
-  doc.setTextColor(255,255,255);
-  doc.text('Order Confirmation Form', ml + leftW/2, y + hH/2 + 2.5, {align:'center'});
-
-  // Right half: light grey background → "interio by Godrej" logo
-  doc.setFillColor(236,236,236);
-  doc.rect(ml+leftW, y, rightW, hH, 'F');
-  const lx = ml + leftW + 4;
-  // "interio" — Times bolditalic, dark red, large
-  doc.setFont('times','bolditalic');
-  doc.setFontSize(17);
-  doc.setTextColor(...DRED);
-  doc.text('interio', lx, y + 8.5);
-  // "by Godrej®" — helvetica normal, navy, small
-  doc.setFont('helvetica','normal');
-  doc.setFontSize(8);
-  doc.setTextColor(...NAVY);
-  doc.text('by Godrej', lx, y + 14.5);
-  doc.setFontSize(5);
-  doc.text('®', lx + 24, y + 12.5);
-
-  // Border around full header
-  lw0(); doc.rect(ml, y, cw, hH, 'S');
-  vln(ml+leftW, y, y+hH);
-  y += hH;
-
-  // ── 2. STORE + WON + ORDER ROW ────────────────────────────
-  const r1H = 17;
-  const c1w = 55, c2w = 68, c3w = cw - c1w - c2w;
-  brd(ml,y,cw,r1H);
-  vln(ml+c1w, y, y+r1H);
-  vln(ml+c1w+c2w, y, y+r1H);
-
-  // Store col
-  lbl(ml+1, y+3.5, 'Store Address :');
-  val(ml+1, y+8.5, fit1('4S Interiors', c1w-3, 7.5), 7.5, true);
-  val(ml+1, y+13,  fit1('Patia Sq., BBSR — Ph: 0674-2744906', c1w-3, 6), 6);
-
-  // WON col
-  lbl(ml+c1w+1, y+3.5, 'WON No.');
-  doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(...DRED);
-  doc.text(fit1(order.won||'Pending', c2w-3, 10), ml+c1w+1, y+10);
-  lbl(ml+c1w+1, y+14.5, 'Date :');
-  val(ml+c1w+11, y+14.5, fit1(oDate, c2w-14, 7.5), 7.5);
-
-  // Order No col — shows as Sl No / Receipt No in red
-  const ox = ml+c1w+c2w;
-  lbl(ox+1, y+3.5, 'Order No. (Sl / Receipt)');
-  doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...DRED);
-  doc.text(fit1(orderRef, c3w-3, 9), ox+1, y+11);
-  y += r1H;
-
-  // ── 3. BILLING / DELIVERY HEADER ──────────────────────────
-  const bhH = 6;
-  [[ml,cw/2,'Billing Address'],[ml+cw/2,cw/2,'Delivery Address']].forEach(([x,w,txt]) => {
-    doc.setFillColor(245,245,245); doc.rect(x,y,w,bhH,'F');
-    brd(x,y,w,bhH);
-    doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-    doc.text(txt, x+w/2, y+4.3, {align:'center'});
-  });
-  y += bhH;
-
-  // ── 4. CUSTOMER DETAILS ───────────────────────────────────
-  const cdH = 46;
-  const hw  = cw/2;
-  brd(ml,y,hw,cdH);
-  brd(ml+hw,y,hw,cdH);
-
-  // Billing side
-  hln(ml,y+6,ml+hw);
-  lbl(ml+1,y+3.5,'P.O. Ref. No. :');
-  val(ml+25,y+3.5, fit1(order.poRef||'',hw-27), 7.5);
-  hln(ml,y+17,ml+hw);
-  lbl(ml+1,y+10,'Customer Name :');
-  doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...INK);
-  doc.text(fit1(order.customer||'',hw-3,9), ml+1, y+16);
-  hln(ml,y+33,ml+hw);
-  doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-  doc.splitTextToSize(order.billing||'',hw-3).slice(0,3).forEach((ln,i)=>doc.text(ln,ml+1,y+21+i*4));
-  hln(ml,y+38,ml+hw);
-  lbl(ml+1,y+36,'Ph. :'); val(ml+9,y+36, fit1(order.phone||'',hw-11), 7.5);
-  hln(ml,y+43,ml+hw);
-  lbl(ml+1,y+41,'M. :');  val(ml+9,y+41, fit1(order.alt||'',hw-11), 7.5);
-
-  // Delivery side
-  const dx = ml+hw;
-  lbl(dx+1,y+3.5,'Delivery Address :');
-  doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-  doc.splitTextToSize(order.delivery||order.billing||'',hw-3).slice(0,4).forEach((ln,i)=>doc.text(ln,dx+1,y+8+i*4));
-  hln(dx,y+27,dx+hw);
-  lbl(dx+1,y+30.5,'E-Mail :'); val(dx+14,y+30.5, fit1(order.email||'',hw-16), 7.5);
-  hln(dx,y+33,dx+hw);
-  lbl(dx+1,y+36,'Ph. :');
-  hln(dx,y+39,dx+hw);
-  lbl(dx+1,y+42,'M. :');
-  y += cdH;
-
-  // ── 5. INSTRUCTION + DISCOUNT ─────────────────────────────
-  const siH=28, lw5=cw*0.55, rw5=cw*0.45, rx5=ml+lw5;
-  brd(ml,y,lw5,siH); brd(rx5,y,rw5,siH);
-  doc.setFillColor(248,248,248);
-  doc.rect(ml,y,lw5,7,'F'); doc.rect(rx5,y,rw5,7,'F');
-  hln(ml,y+7,ml+lw5); hln(rx5,y+7,rx5+rw5);
-  lbl(ml+2,y+5,'Specific Instruction',7);
-  lbl(rx5+2,y+5,'HFP / HFC / HFS / RFD',7);
-  doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-  doc.splitTextToSize(order.installNote||'',lw5-4).slice(0,4).forEach((ln,i)=>doc.text(ln,ml+2,y+11+i*4));
-  vln(rx5+rw5*0.5,y+7,y+siH);
-  const r5=(l,v,ry)=>{ hln(rx5,y+ry,rx5+rw5); lbl(rx5+2,y+ry-5.5,l); val(rx5+rw5*0.5+2,y+ry-1.5,fit1(v,rw5*0.48,8.5),8.5,true); };
-  r5('Discount Code',         order.discountCode||'', 14);
-  r5('Planned Dly Schedule',  order.plannedDly||'',   21);
-  r5('Reference no.',         order.poRef||'',         siH);
-  y += siH;
-
-  // ── 6. SALESMAN ROW ───────────────────────────────────────
-  const scH=7;
-  brd(ml,y,cw,scH); vln(ml+28,y,y+scH);
-  lbl(ml+2,y+5,'Salesman Code',7);
-  val(ml+30,y+5, fit1(order.salesExec||'',cw-32,7.5), 7.5);
-  y += scH;
-
-  // ── 7. ITEMS TABLE ────────────────────────────────────────
+  // Items table columns (adds a per-item Disc column)
   const tC = {
-    code:{ x:ml,         w:22 },
-    qty: { x:ml+22,      w:11 },
-    desc:{ x:ml+33,      w:cw-33-28-22 },
-    cpl: { x:ml+cw-50,   w:28 },
-    tot: { x:ml+cw-22,   w:22 },
+    code:{ x:ml,          w:22, t:'Item Code' },
+    qty: { x:ml+22,       w:10, t:'Qty' },
+    desc:{ x:ml+32,       w:cw-32-26-16-24, t:'Product Description' },
+    cpl: { x:ml+cw-66,    w:26, t:'Unit Price' },
+    disc:{ x:ml+cw-40,    w:16, t:'Disc' },
+    tot: { x:ml+cw-24,    w:24, t:'Total (Rs.)' },
   };
-  const thH=8;
-  doc.setFillColor(240,240,240); doc.rect(ml,y,cw,thH,'F');
-  brd(ml,y,cw,thH);
-  Object.values(tC).forEach(c=>vln(c.x+c.w,y,y+thH));
-  doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...INK);
-  [['Item Code',tC.code],['Qty',tC.qty],['Product Description',tC.desc],['Unit Price',tC.cpl],['Total (Rs.)',tC.tot]]
-    .forEach(([t,c])=>doc.text(t, c.x+c.w/2, y+5.5, {align:'center'}));
-  y += thH;
+  const thH = 8;    // items header height
+  const rH  = 11;   // items row height
 
-  const rH = 11;
-  order.items.forEach((it,idx)=>{
+  // Footer sits at a fixed position on EVERY page; items never cross into it.
+  const ftH     = 26;
+  const footerY = ph - ftH - 4;
+  const itemAreaBottom = footerY - 2;
+
+  // ── HEADER BAND (drawn at top of every page) ──────────────
+  function drawHeaderBand(y) {
+    const hH = 16, leftW = 105, rightW = cw - leftW;
+    doc.setFillColor(...DRED);
+    doc.rect(ml, y, leftW, hH, 'F');
+    doc.setFont('times','bolditalic'); doc.setFontSize(15); doc.setTextColor(255,255,255);
+    doc.text('Order Confirmation Form', ml + leftW/2, y + hH/2 + 2.5, {align:'center'});
+    doc.setFillColor(236,236,236);
+    doc.rect(ml+leftW, y, rightW, hH, 'F');
+    const lx = ml + leftW + 4;
+    doc.setFont('times','bolditalic'); doc.setFontSize(17); doc.setTextColor(...DRED);
+    doc.text('interio', lx, y + 8.5);
+    doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...NAVY);
+    doc.text('by Godrej', lx, y + 14.5);
+    doc.setFontSize(5); doc.text('®', lx + 24, y + 12.5);
+    lw0(); doc.rect(ml, y, cw, hH, 'S');
+    vln(ml+leftW, y, y+hH);
+    return y + hH;
+  }
+
+  // ── TOP BLOCK (page 1 only): store / customer / instructions ─
+  function drawTopBlock(y) {
+    // Store + WON + Order row
+    const r1H = 17, c1w = 55, c2w = 68, c3w = cw - c1w - c2w;
+    brd(ml,y,cw,r1H); vln(ml+c1w, y, y+r1H); vln(ml+c1w+c2w, y, y+r1H);
+    lbl(ml+1, y+3.5, 'Store Address :');
+    val(ml+1, y+8.5, fit1('4S Interiors', c1w-3, 7.5), 7.5, true);
+    val(ml+1, y+13,  fit1('Patia Sq., BBSR — Ph: 0674-2744906', c1w-3, 6), 6);
+    lbl(ml+c1w+1, y+3.5, 'WON No.');
+    doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(...DRED);
+    doc.text(fit1(order.won||'Pending', c2w-3, 10), ml+c1w+1, y+10);
+    lbl(ml+c1w+1, y+14.5, 'Date :');
+    val(ml+c1w+11, y+14.5, fit1(oDate, c2w-14, 7.5), 7.5);
+    const ox = ml+c1w+c2w;
+    lbl(ox+1, y+3.5, 'Order No. (Sl / Receipt)');
+    doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...DRED);
+    doc.text(fit1(orderRef, c3w-3, 9), ox+1, y+11);
+    y += r1H;
+
+    // Billing / Delivery header
+    const bhH = 6;
+    [[ml,cw/2,'Billing Address'],[ml+cw/2,cw/2,'Delivery Address']].forEach(([x,w,txt]) => {
+      doc.setFillColor(245,245,245); doc.rect(x,y,w,bhH,'F'); brd(x,y,w,bhH);
+      doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+      doc.text(txt, x+w/2, y+4.3, {align:'center'});
+    });
+    y += bhH;
+
+    // Customer details
+    const cdH = 46, hw = cw/2;
+    brd(ml,y,hw,cdH); brd(ml+hw,y,hw,cdH);
+    hln(ml,y+6,ml+hw);
+    lbl(ml+1,y+3.5,'P.O. Ref. No. :');
+    val(ml+25,y+3.5, fit1(order.poRef||'',hw-27), 7.5);
+    hln(ml,y+17,ml+hw);
+    lbl(ml+1,y+10,'Customer Name :');
+    doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...INK);
+    doc.text(fit1(order.customer||'',hw-3,9), ml+1, y+16);
+    hln(ml,y+33,ml+hw);
+    doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+    doc.splitTextToSize(order.billing||'',hw-3).slice(0,3).forEach((ln,i)=>doc.text(ln,ml+1,y+21+i*4));
+    hln(ml,y+38,ml+hw);
+    lbl(ml+1,y+36,'Ph. :'); val(ml+9,y+36, fit1(order.phone||'',hw-11), 7.5);
+    hln(ml,y+43,ml+hw);
+    lbl(ml+1,y+41,'M. :');  val(ml+9,y+41, fit1(order.alt||'',hw-11), 7.5);
+    const dx = ml+hw;
+    lbl(dx+1,y+3.5,'Delivery Address :');
+    doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+    doc.splitTextToSize(order.delivery||order.billing||'',hw-3).slice(0,4).forEach((ln,i)=>doc.text(ln,dx+1,y+8+i*4));
+    hln(dx,y+27,dx+hw);
+    lbl(dx+1,y+30.5,'E-Mail :'); val(dx+14,y+30.5, fit1(order.email||'',hw-16), 7.5);
+    hln(dx,y+33,dx+hw);
+    lbl(dx+1,y+36,'Ph. :');
+    hln(dx,y+39,dx+hw);
+    lbl(dx+1,y+42,'M. :');
+    y += cdH;
+
+    // Instruction + discount
+    const siH=28, lw5=cw*0.55, rw5=cw*0.45, rx5=ml+lw5;
+    brd(ml,y,lw5,siH); brd(rx5,y,rw5,siH);
+    doc.setFillColor(248,248,248); doc.rect(ml,y,lw5,7,'F'); doc.rect(rx5,y,rw5,7,'F');
+    hln(ml,y+7,ml+lw5); hln(rx5,y+7,rx5+rw5);
+    lbl(ml+2,y+5,'Specific Instruction',7);
+    lbl(rx5+2,y+5,'HFP / HFC / HFS / RFD',7);
+    doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+    doc.splitTextToSize(order.installNote||'',lw5-4).slice(0,4).forEach((ln,i)=>doc.text(ln,ml+2,y+11+i*4));
+    vln(rx5+rw5*0.5,y+7,y+siH);
+    const r5=(l,v,ry)=>{ hln(rx5,y+ry,rx5+rw5); lbl(rx5+2,y+ry-5.5,l); val(rx5+rw5*0.5+2,y+ry-1.5,fit1(v,rw5*0.48,8.5),8.5,true); };
+    r5('Discount Code',        order.discountCode||'', 14);
+    r5('Planned Dly Schedule', order.plannedDly||'',   21);
+    r5('Reference no.',        order.poRef||'',        siH);
+    y += siH;
+
+    // Salesman row
+    const scH=7;
+    brd(ml,y,cw,scH); vln(ml+28,y,y+scH);
+    lbl(ml+2,y+5,'Salesman Code',7);
+    val(ml+30,y+5, fit1(order.salesExec||'',cw-32,7.5), 7.5);
+    y += scH;
+    return y;
+  }
+
+  // ── CONTINUATION BANNER (top of pages 2+) ─────────────────
+  function drawContinuationBanner(y, pageNo) {
+    const bh = 7;
+    doc.setFillColor(248,248,248); doc.rect(ml,y,cw,bh,'F'); brd(ml,y,cw,bh);
+    doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+    doc.text('Order No. ' + orderRef + '  —  continued', ml+2, y+4.7);
+    doc.setFont('helvetica','normal'); doc.setTextColor(...GR);
+    doc.text('Page ' + pageNo, ml+cw-2, y+4.7, {align:'right'});
+    return y + bh;
+  }
+
+  // ── ITEMS TABLE HEADER ────────────────────────────────────
+  function drawItemsHeader(y) {
+    doc.setFillColor(240,240,240); doc.rect(ml,y,cw,thH,'F');
+    brd(ml,y,cw,thH);
+    Object.values(tC).forEach(c=>vln(c.x+c.w,y,y+thH));
+    doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...INK);
+    Object.values(tC).forEach(c=>doc.text(c.t, c.x+c.w/2, y+5.5, {align:'center'}));
+    return y + thH;
+  }
+
+  // ── ONE ITEM ROW ──────────────────────────────────────────
+  function drawItemRow(y, it, idx) {
     if(idx%2===1){ doc.setFillColor(252,252,252); doc.rect(ml,y,cw,rH,'F'); }
     brd(ml,y,cw,rH);
     Object.values(tC).forEach(c=>vln(c.x+c.w,y,y+rH));
-    // Item code — centred, clamped
     doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...INK);
     doc.text(fit1(it.code||'',tC.code.w-2,7), tC.code.x+tC.code.w/2, y+7, {align:'center'});
-    // Qty
     doc.text(String(it.qty), tC.qty.x+tC.qty.w/2, y+7, {align:'center'});
-    // Description — two lines max, clamped to column width
-    doc.setFont('helvetica','bold'); doc.setFontSize(7.5);
+    doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(...INK);
     const nm = doc.splitTextToSize(it.name||'', tC.desc.w-2);
     doc.text(nm[0]||'', tC.desc.x+1.5, y+4.5);
     if(nm[1]){ doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...GR); doc.text(nm[1], tC.desc.x+1.5, y+9); }
-    // Unit price — right-aligned, clamped
     doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...INK);
     const cplV = it.unitPrice>0?it.unitPrice:(it.mrp||it.cpl||0);
     rval(tC.cpl.x+tC.cpl.w-1.5, y+7, cplV>0?cplV.toLocaleString('en-IN'):'—');
-    // Total — bold, right-aligned
-    doc.setFont('helvetica','bold');
+    // Disc — per-item discount %
+    const dPct = parseFloat(it.disc)||0;
+    doc.setFontSize(7.5); doc.setTextColor(...(dPct>0?DRED:GR));
+    doc.text(dPct>0?dPct+'%':'—', tC.disc.x+tC.disc.w/2, y+7, {align:'center'});
+    doc.setFont('helvetica','bold'); doc.setTextColor(...INK);
     rval(tC.tot.x+tC.tot.w-1.5, y+7, (it.total||0).toLocaleString('en-IN'));
-    y += rH;
-  });
-  lw0(); doc.rect(ml, y-rH*order.items.length-thH, cw, rH*order.items.length+thH, 'S');
-
-  // ── 8. TOTALS SECTION ─────────────────────────────────────
-  const tsH=34, tsLW=cw*0.55, tsRW=cw*0.45, tsRX=ml+tsLW;
-  brd(ml,y,tsLW,tsH); brd(tsRX,y,tsRW,tsH);
-  lbl(ml+2,y+5,'(Invoice / billing details to be filled after order processing)',6.5);
-  const vSp = tsRX+tsRW*0.54;
-  vln(vSp,y,y+tsH);
-  // Use 'Rs.' instead of Rs symbol — jsPDF Helvetica is Latin-1 only,
-  // the Unicode rupee glyph (U+20B9) produces wrong text metrics and overflows.
-  const inr = (n) => 'Rs.' + n.toLocaleString('en-IN');
-  const fRows=[
-    ['TOTAL',        inr(subtotal), false],
-    ['CGST @ 9%',   inr(cgst),     false],
-    ['SGST @ 9%',   inr(sgst),     false],
-    ['Total Amt.',  inr(totalAmt), true ],
-    ['Earnest Amt.',inr(earnest),  false],
-    ['Balance Amt.',inr(balance),  true ],
-  ];
-  const rs = tsH/fRows.length;
-  const valColW = tsRX+tsRW-3-vSp;          // width available for values
-  const lblColW = vSp-tsRX-4;               // width available for labels
-  fRows.forEach(([l,v,bold],i)=>{
-    hln(tsRX,y+rs*(i+1),tsRX+tsRW);
-    const sz  = bold ? 8.5 : 7.5;
-    const clr = bold ? DRED : INK;
-    doc.setFont('helvetica',bold?'bold':'normal'); doc.setFontSize(sz); doc.setTextColor(...clr);
-    doc.text(fit1(l,lblColW,sz), tsRX+2, y+rs*i+rs*0.72);
-    doc.setTextColor(...INK);
-    doc.text(fit1(v,valColW,sz), tsRX+tsRW-2, y+rs*i+rs*0.72, {align:'right'});
-  });
-  y += tsH;
-
-  // ── 9. RECEIPT ROWS ───────────────────────────────────────
-  const rcH=9;
-  for(let r=0;r<2;r++){
-    brd(ml,y,cw/2,rcH); brd(ml+cw/2,y,cw/2,rcH);
-    lbl(ml+2,y+5.5,'Receipt No. & Dt :');
-    if(r===0&&order.receiptNo) val(ml+32,y+5.5, fit1(order.receiptNo,cw/2-34,7.5), 7.5);
-    lbl(ml+cw/2+2,y+5.5,'Amount Received :');
-    if(r===0&&order.earnest) val(ml+cw/2+32,y+5.5, fit1(inr(earnest),cw/2-34,7.5), 7.5);
-    y += rcH;
+    return y + rH;
   }
 
-  // ── 10. SIGNATURE ROW ─────────────────────────────────────
-  const sigH=18, sigW=cw/3;
-  for(let s=0;s<3;s++) brd(ml+s*sigW,y,sigW,sigH);
-  ['Sales Exe. Signature','Sales Exe. Name','Customer Signature'].forEach((t,i)=>{
-    lbl(ml+i*sigW+2, y+sigH-2.5, t);
-    if(i===1&&order.salesExec){
-      doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...INK);
-      doc.text(fit1(order.salesExec,sigW-4,9), ml+i*sigW+sigW/2, y+10, {align:'center'});
+  // ── TOTALS + RECEIPT + SIGNATURE (final page only) ────────
+  function drawTotalsBlock(y) {
+    const fRows = [['TOTAL', inr(subtotal), false]];
+    if (orderDiscAmt > 0) {
+      fRows.push(['Order Disc. @' + (orderDiscPct*100).toLocaleString('en-IN') + '%', '- ' + inr(orderDiscAmt), false]);
+      fRows.push(['Taxable Amt.', inr(taxable), false]);
     }
-  });
-  y += sigH;
+    fRows.push(['CGST @ 9%',   inr(cgst),     false]);
+    fRows.push(['SGST @ 9%',   inr(sgst),     false]);
+    fRows.push(['Total Amt.',  inr(totalAmt), true ]);
+    fRows.push(['Earnest Amt.',inr(earnest),  false]);
+    fRows.push(['Balance Amt.',inr(balance),  true ]);
 
-  // ── 11. FOOTER ────────────────────────────────────────────
-  const ftH = 26;
-  brd(ml,y,cw,ftH);
-  hln(ml,y+9,ml+cw);                       // top divider line
-  vln(ml+cw*0.6,y,y+9);                    // vertical split in top row
-  hln(ml,y+ftH-8,ml+cw);                   // grey-shade separator for H.O.
+    const tsH = 5.7*fRows.length, tsLW = cw*0.55, tsRW = cw*0.45, tsRX = ml+tsLW;
+    brd(ml,y,tsLW,tsH); brd(tsRX,y,tsRW,tsH);
+    lbl(ml+2,y+5,'(Invoice / billing details to be filled after order processing)',6.5);
+    if (order.gstNumber) {
+      lbl(ml+2, y+11, 'Customer GSTIN :', 7);
+      val(ml+2, y+15.5, fit1(order.gstNumber, tsLW-4, 8.5), 8.5, true);
+    }
+    const vSp = tsRX+tsRW*0.54;
+    vln(vSp,y,y+tsH);
+    const rs = tsH/fRows.length;
+    const valColW = tsRX+tsRW-3-vSp, lblColW = vSp-tsRX-4;
+    fRows.forEach(([l,v,bold],i)=>{
+      hln(tsRX,y+rs*(i+1),tsRX+tsRW);
+      const sz  = bold ? 8.5 : 7.5, clr = bold ? DRED : INK;
+      doc.setFont('helvetica',bold?'bold':'normal'); doc.setFontSize(sz); doc.setTextColor(...clr);
+      doc.text(fit1(l,lblColW,sz), tsRX+2, y+rs*i+rs*0.72);
+      doc.setTextColor(...INK);
+      doc.text(fit1(v,valColW,sz), tsRX+tsRW-2, y+rs*i+rs*0.72, {align:'right'});
+    });
+    y += tsH;
 
-  // Contact info — left of top row
-  doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...INK);
-  doc.text(fit1('Customer care no. : 18002671122  |  interiocare@godrej.com', cw*0.6-3, 6.5), ml+2, y+4);
-  doc.text(fit1('Website : www.godrejinterio.com', cw*0.6-3, 6.5), ml+2, y+8);
+    const rcH=9;
+    for(let r=0;r<2;r++){
+      brd(ml,y,cw/2,rcH); brd(ml+cw/2,y,cw/2,rcH);
+      lbl(ml+2,y+5.5,'Receipt No. & Dt :');
+      if(r===0&&order.receiptNo) val(ml+32,y+5.5, fit1(order.receiptNo,cw/2-34,7.5), 7.5);
+      lbl(ml+cw/2+2,y+5.5,'Amount Received :');
+      if(r===0&&earnest) val(ml+cw/2+32,y+5.5, fit1(inr(earnest),cw/2-34,7.5), 7.5);
+      y += rcH;
+    }
 
-  // For GODREJ & BOYCE — right of top row
-  doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...INK);
-  doc.text(fit1('For GODREJ & BOYCE MFG. CO. LTD', cw*0.4-3, 7), ml+cw-2, y+4, {align:'right'});
-  doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...GR);
-  doc.text('Authorised Signatory', ml+cw-2, y+8, {align:'right'});
+    const sigH=18, sigW=cw/3;
+    for(let s=0;s<3;s++) brd(ml+s*sigW,y,sigW,sigH);
+    ['Sales Exe. Signature','Sales Exe. Name','Customer Signature'].forEach((t,i)=>{
+      lbl(ml+i*sigW+2, y+sigH-2.5, t);
+      if(i===1&&order.salesExec){
+        doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...INK);
+        doc.text(fit1(order.salesExec,sigW-4,9), ml+i*sigW+sigW/2, y+10, {align:'center'});
+      }
+    });
+    return y + sigH;
+  }
 
-  // Middle rows: GST + Note
-  doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...GR);
-  doc.text('GST No. : ________________________________', ml+2, y+13);
-  doc.setTextColor(...INK);
-  const noteLines = doc.splitTextToSize(
-    'Note : Our technician will contact you for assembly after delivery. For any further assistance, please contact customer care.',
-    cw-4
-  );
-  noteLines.slice(0,2).forEach((ln,i)=>doc.text(ln, ml+2, y+16+i*3.5));
+  // ── FOOTER (fixed bottom of every page) ───────────────────
+  function drawFooter() {
+    const y = footerY;
+    brd(ml,y,cw,ftH);
+    hln(ml,y+9,ml+cw);
+    vln(ml+cw*0.6,y,y+9);
+    hln(ml,y+ftH-8,ml+cw);
+    doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...INK);
+    doc.text(fit1('Customer care no. : 18002671122  |  interiocare@godrej.com', cw*0.6-3, 6.5), ml+2, y+4);
+    doc.text(fit1('Website : www.godrejinterio.com', cw*0.6-3, 6.5), ml+2, y+8);
+    doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...INK);
+    doc.text(fit1('For GODREJ & BOYCE MFG. CO. LTD', cw*0.4-3, 7), ml+cw-2, y+4, {align:'right'});
+    doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...GR);
+    doc.text('Authorised Signatory', ml+cw-2, y+8, {align:'right'});
+    doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...GR);
+    doc.text('GST No. : ' + (order.gstNumber || '________________________________'), ml+2, y+13);
+    doc.setTextColor(...INK);
+    const noteLines = doc.splitTextToSize(
+      'Note : Our technician will contact you for assembly after delivery. For any further assistance, please contact customer care.',
+      cw-4
+    );
+    noteLines.slice(0,2).forEach((ln,i)=>doc.text(ln, ml+2, y+16+i*3.5));
+    doc.setFillColor(220,220,220); doc.rect(ml, y+ftH-8, cw, 8, 'F');
+    doc.setFont('helvetica','bold'); doc.setFontSize(6.5); doc.setTextColor(...BLK);
+    doc.text(fit1('H.O. : Godrej Interio Division, Pirojshanagar, Vikhroli, Mumbai 400 079.', cw-4, 6.5), ml+2, y+ftH-3.5);
+  }
 
-  // H.O. line — grey shade + deep black text
-  doc.setFillColor(220,220,220);
-  doc.rect(ml, y+ftH-8, cw, 8, 'F');
-  doc.setFont('helvetica','bold'); doc.setFontSize(6.5); doc.setTextColor(...BLK);
-  doc.text(
-    fit1('H.O. : Godrej Interio Division, Pirojshanagar, Vikhroli, Mumbai 400 079.', cw-4, 6.5),
-    ml+2, y+ftH-3.5
-  );
+  // ── LAYOUT DRIVER (paginates items, keeps header+footer per page) ──
+  let pageNo = 1;
+  let y = 6;
+  y = drawHeaderBand(y);
+  y = drawTopBlock(y);
+  y = drawItemsHeader(y);
+
+  const items = order.items || [];
+  for (let i = 0; i < items.length; i++) {
+    if (y + rH > itemAreaBottom) {           // no room for another row → new page
+      drawFooter();
+      doc.addPage(); pageNo++;
+      y = 6;
+      y = drawHeaderBand(y);
+      y = drawContinuationBanner(y, pageNo);
+      y = drawItemsHeader(y);
+    }
+    y = drawItemRow(y, items[i], i);
+  }
+
+  // Totals must sit together on one page; move to a fresh page if they don't fit.
+  const nTotRows      = 6 + (orderDiscAmt > 0 ? 2 : 0);
+  const totalsBlockH  = 5.7*nTotRows + 18 /*receipt*/ + 18 /*signature*/;
+  if (y + totalsBlockH > itemAreaBottom) {
+    drawFooter();
+    doc.addPage(); pageNo++;
+    y = 6;
+    y = drawHeaderBand(y);
+    y = drawContinuationBanner(y, pageNo);
+  }
+  drawTotalsBlock(y);
+  drawFooter();
 
   return doc;
 }
@@ -729,9 +773,10 @@ const { useState, useEffect, useRef, useCallback } = React;
 
 const BLANK_ORDER = () => ({
   no:'', customer:'', phone:'', alt:'', email:'',
+  gstNumber:'',
   billing:'', delivery:'', liftAvailable:'Yes',
   customerCode:'', poRef:'', source:'Walk-in',
-  discountCode:'', plannedDly:'', installNote:'',
+  discountCode:'', orderDiscount:'', plannedDly:'', installNote:'',
   paymentMode:'', earnest:'', receiptNo:'',
   followUp:'', salesExec:'', won:'',
   orderType:'B2C', items:[],
@@ -873,10 +918,7 @@ function App() {
   async function doSaveOrder(draft) {
     setLoading(true);
     try {
-      const subtotal = draft.items.reduce((s,i)=>s+i.total,0);
-      const cgst = Math.round(subtotal*.09);
-      const sgst = Math.round(subtotal*.09);
-      const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: subtotal+cgst+sgst } });
+      const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total } });
       if (res.ok) {
         const saved = {...draft, no: res.orderNo, internalNo: res.internalNo};
         setOrder(saved);
@@ -1206,9 +1248,10 @@ function SearchScreen({ctx}) {
       newItems = order.items.map((x,idx)=>idx===exists?{...x,qty:x.qty+1,total:(x.qty+1)*(x.unitPrice||x.mrp||x.cpl||0)}:x);
     } else {
       newItems = [...(order.items||[]),{
-        code:item.code, name:item.name, cat:item.cat,
+        code:item.code, name:item.name, cat:item.cat, item:item.item||'',
         qty:1, mrp:item.mrp||item.cpl||0, cpl:item.cpl||item.mrp||0,
         unitPrice, total:unitPrice, disc,
+        ageing:false, sweetner:false,
         branch:(item.stock||[])[0]?.b||'KB',
         inStock:(item.stock||[]).reduce((s,x)=>s+x.q,0),
       }];
@@ -1420,13 +1463,10 @@ function OrderFormScreen({ctx}) {
   const {order,setOrder,nav,user,doSaveOrder} = ctx;
   const o = order;
   const setF = (k,v) => setOrder(prev=>({...prev,[k]:v}));
-  const subtotal = (o.items||[]).reduce((s,i)=>s+i.total,0);
-  const cgst = Math.round(subtotal*.09);
-  const sgst = Math.round(subtotal*.09);
-  const total = subtotal+cgst+sgst;
-  const balance = total-(Number(o.earnest)||0);
+  const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, balance} = orderTotals(o);
 
   function removeItem(idx) { setOrder(prev=>({...prev,items:prev.items.filter((_,i)=>i!==idx)})); }
+  function toggleScheme(idx,key) { setOrder(prev=>({...prev,items:prev.items.map((it,i)=>i===idx?{...it,[key]:!it[key]}:it)})); }
   function updateItemQty(idx,delta) {
     setOrder(prev=>({...prev,items:prev.items.map((it,i)=>{
       if(i!==idx) return it;
@@ -1464,6 +1504,7 @@ function OrderFormScreen({ctx}) {
         <Field label="Phone" value={o.phone} onChange={v=>setF('phone',v)} mono required type="tel" action="CALL" onAction={()=>o.phone&&window.open('tel:'+o.phone)}/>
         <Field label="Alt. Phone" value={o.alt} onChange={v=>setF('alt',v)} mono type="tel"/>
         <Field label="E-mail" value={o.email} onChange={v=>setF('email',v)} type="email" hint="Optional · for digital copy"/>
+        <Field label="Customer GST No." value={o.gstNumber} onChange={v=>setF('gstNumber',v.toUpperCase())} mono hint="Fill only if the customer wants a GST bill · printed on the PDF"/>
         <Field label="P.O. Reference" value={o.poRef} onChange={v=>setF('poRef',v)} mono hint="Leave blank — auto-assigned on save"/>
         <Field label="Lead Source" value={o.source} onChange={v=>setF('source',v)} hint="Walk-in / Reference / Digital / Repeat"/>
         <SectionHead n="02" label="Address"/>
@@ -1508,6 +1549,16 @@ function OrderFormScreen({ctx}) {
                       placeholder="0%"
                     />
                   </div>
+                  {/* Scheme flags — saved to CRM "Disc Allowed"; NOT printed on the PDF */}
+                  <div style={{display:'flex',gap:8,marginTop:8,alignItems:'center',flexWrap:'wrap'}}>
+                    <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>SCHEME</span>
+                    {[['ageing','Ageing'],['sweetner','Sweetner']].map(([k,lbl])=>(
+                      <label key={k} style={{display:'inline-flex',alignItems:'center',gap:5,padding:'3px 9px',borderRadius:99,cursor:'pointer',border:`1px solid ${it[k]?T.green:T.line}`,background:it[k]?T.greenSoft:'#fff'}}>
+                        <input type="checkbox" checked={!!it[k]} onChange={()=>toggleScheme(i,k)} style={{width:14,height:14,accentColor:T.green,cursor:'pointer'}}/>
+                        <span style={{fontSize:11,fontWeight:600,color:it[k]?T.green:T.ink3}}>{lbl}</span>
+                      </label>
+                    ))}
+                  </div>
                 </div>
                 <div style={{textAlign:'right',flexShrink:0}}>
                   <div style={{fontFamily:T.mono,fontSize:15,fontWeight:700}}>₹{(curPrice*it.qty).toLocaleString('en-IN')}</div>
@@ -1524,6 +1575,7 @@ function OrderFormScreen({ctx}) {
         </div>
         <SectionHead n="04" label="Commercials"/>
         <Field label="Discount Code" value={o.discountCode} onChange={v=>setF('discountCode',v)} mono hint="e.g. 11% or 11%+5%"/>
+        <Field label="Additional Order Discount %" value={o.orderDiscount} onChange={v=>setF('orderDiscount',v.replace(/[^\d.]/g,''))} mono type="number" hint="Extra discount on the whole order (on top of per-item discounts). Shown on the PDF."/>
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setF('plannedDly',v)} mono required type="date"/>
         <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
         <SectionHead n="05" label="Payment"/>
@@ -1549,7 +1601,9 @@ function OrderFormScreen({ctx}) {
         <Field label="Order Type" value={o.orderType||'B2C'} onChange={v=>setF('orderType',v)} hint="B2C / B2B / B2BE"/>
         <div style={{padding:'14px 14px 18px'}}>
           <div style={{background:T.ink,color:'#fff',borderRadius:8,padding:'14px 16px',fontFamily:T.mono}}>
-            {[['Subtotal',subtotal],['CGST 9%',cgst],['SGST 9%',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>{k}</span><span>₹{v.toLocaleString('en-IN')}</span></div>)}
+            <div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>Items subtotal</span><span>₹{itemsSubtotal.toLocaleString('en-IN')}</span></div>
+            {orderDiscAmt>0&&<div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13,color:'#ffd27a'}}><span>Order disc {(orderDiscPct*100).toLocaleString('en-IN')}%</span><span>−₹{orderDiscAmt.toLocaleString('en-IN')}</span></div>}
+            {[['CGST 9%',cgst],['SGST 9%',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>{k}</span><span>₹{v.toLocaleString('en-IN')}</span></div>)}
             <div style={{height:1,background:'rgba(255,255,255,.2)',margin:'8px 0'}}/>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:18,fontWeight:700}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginTop:4,color:'rgba(255,255,255,.6)'}}><span>Earnest</span><span>₹{(Number(o.earnest)||0).toLocaleString('en-IN')}</span></div>
@@ -1569,10 +1623,7 @@ function OrderFormScreen({ctx}) {
 function PDFPreviewScreen({ctx}) {
   const {order,nav} = ctx;
   const o = order;
-  const subtotal = (o.items||[]).reduce((s,i)=>s+i.total,0);
-  const cgst = Math.round(subtotal*.09);
-  const sgst = Math.round(subtotal*.09);
-  const total = subtotal+cgst+sgst;
+  const {itemsSubtotal, orderDiscPct, orderDiscAmt, cgst, sgst, total} = orderTotals(o);
   const qrRef = useRef(null);
 
   useEffect(()=>{
@@ -1644,8 +1695,10 @@ function PDFPreviewScreen({ctx}) {
               ))}
             </div>
             <div style={{display:'flex',justifyContent:'flex-end',marginBottom:12}}>
-              <div style={{width:160,fontFamily:T.mono,fontSize:9}}>
-                {[['Subtotal',subtotal],['CGST 9%',cgst],['SGST 9%',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>{k}</span><span>₹{v.toLocaleString('en-IN')}</span></div>)}
+              <div style={{width:170,fontFamily:T.mono,fontSize:9}}>
+                <div style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>Subtotal</span><span>₹{itemsSubtotal.toLocaleString('en-IN')}</span></div>
+                {orderDiscAmt>0&&<div style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.bad}}><span>Order disc {(orderDiscPct*100).toLocaleString('en-IN')}%</span><span>−₹{orderDiscAmt.toLocaleString('en-IN')}</span></div>}
+                {[['CGST 9%',cgst],['SGST 9%',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>{k}</span><span>₹{v.toLocaleString('en-IN')}</span></div>)}
                 <div style={{borderTop:`1px solid ${T.ink}`,marginTop:2,paddingTop:3,display:'flex',justifyContent:'space-between',fontWeight:700,fontSize:11,color:T.ink}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
                 <div style={{display:'flex',justifyContent:'space-between',color:T.green,marginTop:1}}><span>Earnest</span><span>₹{(Number(o.earnest)||0).toLocaleString('en-IN')}</span></div>
               </div>
@@ -1920,11 +1973,11 @@ function SettingsScreen({ctx}) {
                   <>
                     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
                       <div style={{fontSize:11,fontWeight:700,color:T.green}}>OPS: {debugResult.opsName}</div>
-                      <span style={{fontSize:9,fontFamily:T.mono,background:debugResult.scriptVersion==='v15'?T.okSoft:T.badSoft,color:debugResult.scriptVersion==='v15'?T.ok:T.bad,padding:'2px 6px',borderRadius:3,fontWeight:700}}>
+                      <span style={{fontSize:9,fontFamily:T.mono,background:debugResult.scriptVersion==='v16'?T.okSoft:T.badSoft,color:debugResult.scriptVersion==='v16'?T.ok:T.bad,padding:'2px 6px',borderRadius:3,fontWeight:700}}>
                         API {debugResult.scriptVersion||'OLD — REDEPLOY!'}
                       </span>
                     </div>
-                    {debugResult.scriptVersion !== 'v15' && (
+                    {debugResult.scriptVersion !== 'v16' && (
                       <div style={{fontSize:11,color:T.bad,marginBottom:8,padding:'6px 8px',background:T.badSoft,borderRadius:4}}>
                         ⚠ Old Code.gs detected. Copy the latest Code.gs from GitHub → save in Apps Script → Deploy → New version.
                       </div>

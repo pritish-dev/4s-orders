@@ -28,7 +28,10 @@
 
 // ─── IDs & version ───────────────────────────────────────────────────────────
 var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
-var SCRIPT_VERSION  = 'v15';   // bump this whenever you redeploy
+// CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
+var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
+var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
+var SCRIPT_VERSION  = 'v16';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -702,10 +705,15 @@ function handleSaveOrder(o) {
 
   var now      = new Date();
   var dateStr  = now.toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'2-digit' }).replace(/\//g,'.');
-  var subtotal = o.items ? o.items.reduce(function(s,i){ return s + (i.total||0); }, 0) : 0;
-  var cgst     = Math.round(subtotal * 0.09);
-  var sgst     = Math.round(subtotal * 0.09);
-  var total    = subtotal + cgst + sgst;
+  // Item totals are already net of each item's own discount. Apply the
+  // optional order-level discount (a percentage) before charging GST.
+  var itemsSubtotal = o.items ? o.items.reduce(function(s,i){ return s + (i.total||0); }, 0) : 0;
+  var orderDiscPct  = Math.max(0, parseFloat(o.orderDiscount) || 0) / 100;
+  var orderDiscAmt  = Math.round(itemsSubtotal * orderDiscPct);
+  var subtotal      = itemsSubtotal - orderDiscAmt;   // taxable value (after order discount)
+  var cgst          = Math.round(subtotal * 0.09);
+  var sgst          = Math.round(subtotal * 0.09);
+  var total         = subtotal + cgst + sgst;
 
   sh.appendRow([
     now, internalNo, orderNo,
@@ -722,7 +730,110 @@ function handleSaveOrder(o) {
   _appendLog(String(o.salesExec||''), orderNo, 'CREATE',
     'Customer: ' + (o.customer||'') + ' | Items: ' + (o.items ? o.items.length : 0));
 
-  return { ok: true, orderNo: orderNo, internalNo: internalNo };
+  // Mirror every ordered item into the CRM spreadsheet (one row per item).
+  // Never let a CRM failure block the order save — just report it back.
+  var crm;
+  try { crm = _appendOrderToCRM(o, orderNo, internalNo, dateStr); }
+  catch (e) { crm = { ok: false, error: e.message }; }
+
+  var result = { ok: true, orderNo: orderNo, internalNo: internalNo };
+  if (crm && crm.ok) result.crmRows = crm.rows;
+  else if (crm)      result.crmError = crm.error;
+  return result;
+}
+
+// ─── CRM EXPORT ─────────────────────────────────────────────────────────────
+// Appends one row per ordered item to the CRM spreadsheet, matching the app's
+// values to the sheet's columns BY HEADER NAME (column order does not matter).
+// Back-office columns (Godrej SO/invoice/purchase-bill/etc.) are left blank.
+function _crmKey(h) { return String(h || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+
+function _appendOrderToCRM(o, orderNo, internalNo, orderDateStr) {
+  var ss;
+  try { ss = SpreadsheetApp.openById(CRM_SHEET_ID); }
+  catch (e) { return { ok: false, error: 'Cannot open CRM sheet (' + CRM_SHEET_ID + '): ' + e.message }; }
+
+  var sh = ss.getSheetByName(CRM_TAB_NAME);
+  if (!sh) { var shts = ss.getSheets(); sh = shts.length ? shts[0] : null; }
+  if (!sh) return { ok: false, error: 'CRM tab not found: ' + CRM_TAB_NAME };
+
+  var lastRow = sh.getLastRow();
+  var lastCol = sh.getLastColumn();
+  if (lastCol < 1 || lastRow < 1) return { ok: false, error: 'CRM sheet has no header row' };
+  var header = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+
+  // Normalised header text -> column index
+  var idx = {};
+  for (var c = 0; c < header.length; c++) {
+    var key = _crmKey(header[c]);
+    if (key && idx[key] === undefined) idx[key] = c;
+  }
+  function colOf(candidates) {
+    for (var k = 0; k < candidates.length; k++) {
+      var ci = idx[_crmKey(candidates[k])];
+      if (ci !== undefined) return ci;
+    }
+    return -1;
+  }
+
+  var items = o.items || [];
+  if (!items.length) return { ok: true, rows: 0 };
+
+  var orderDiscPct = Math.max(0, parseFloat(o.orderDiscount) || 0) / 100;
+  var slStart      = lastRow;   // header is row 1, so existing data rows = lastRow-1; next serial = lastRow
+  var out          = [];
+
+  for (var i = 0; i < items.length; i++) {
+    var it   = items[i];
+    var qty  = Number(it.qty) || 0;
+    var unitMrp = Number(it.mrp) || Number(it.cpl) || 0;
+    var unitCpl = Number(it.cpl) || Number(it.mrp) || 0;
+    var unitItem = (it.unitPrice !== undefined && it.unitPrice !== '') ? (Number(it.unitPrice) || 0) : unitMrp;
+    var lineNet  = Math.round(unitItem * qty * (1 - orderDiscPct));    // after item + order discount, before tax
+    var unitAll  = qty > 0 ? (lineNet / qty) : unitItem;
+    var grossMrp = Math.round(unitMrp * qty);
+
+    var schemes = [];
+    if (it.ageing)   schemes.push('Ageing');
+    if (it.sweetner) schemes.push('Sweetner');
+
+    var row = [];
+    for (var z = 0; z < header.length; z++) row.push('');
+    function put(cands, value) { var ci = colOf(cands); if (ci >= 0) row[ci] = value; }
+
+    put(['SL NO.', 'SL NO'], slStart + i);
+    put(['INTERNAL ODER NO', 'INTERNAL ORDER NO'], internalNo);
+    put(['ORDER DATE'], orderDateStr);
+    put(['ORDER NO'], orderNo);
+    put(['CUSTOMER NAME'], o.customer || '');
+    put(['CONTACT NUMBER'], o.phone || '');
+    put(['EMAIL ADDRESS'], o.email || '');
+    put(['CATEGORY'], it.cat || '');
+    put(['PRODUCT NAME'], it.name || '');
+    put(['CATEGORY TYPE'], it.item || '');
+    put(['MRP/UNIT(AS PER PRICE LIST )', 'MRP/UNIT(AS PER PRICE LIST)', 'MRP/UNIT'], unitMrp);
+    put(['MRP'], unitMrp);
+    put(['CPL'], unitCpl);
+    put(['ORDER UNIT PRICE=(AFTER DISC + TAX)', 'ORDER UNIT PRICE'], Math.round(unitAll * 1.18));
+    put(['QTY'], qty);
+    put(['GROSS ORDER VALUE(MRP)'], grossMrp);
+    put(['ORDER AMOUNT (WITH TAX AND AFTER DISC )', 'ORDER AMOUNT (WITH TAX AND AFTER DISC)'], Math.round(lineNet * 1.18));
+    put(['DISC ALLOWED'], schemes.join(', '));
+    put(['DISCOUNT GIVEN'], grossMrp - lineNet);   // total rupee discount (item + order share), pre-tax
+    put(['CROSS CHECK GROSS AMT (Order Value Without Tax)', 'CROSS CHECK GROSS AMT'], lineNet);
+    put(['CUSTOMER DELIVERY DATE (TO BE)'], o.plannedDly || '');
+    put(['SALES PERSON'], o.salesExec || '');
+    if (i === 0) put(['ADV RECEIVED'], Number(o.earnest) || 0);   // order-level — first row only
+    put(['REFERENCE ORDER NO.', 'REFERENCE ORDER NO'], o.poRef || '');
+    put(['DELIVERY REMARKS(DELIVERED/PENDING)', 'DELIVERY REMARKS'], 'Pending');
+    put(['POSTED BY'], o.salesExec || '');
+    put(['PINELAB / BAJAJ', 'PINELAB/BAJAJ'], o.paymentMode || '');
+
+    out.push(row);
+  }
+
+  sh.getRange(lastRow + 1, 1, out.length, header.length).setValues(out);
+  return { ok: true, rows: out.length };
 }
 
 // ─── UPDATE WON ───────────────────────────────────────────────────────────────
