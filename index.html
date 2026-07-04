@@ -2287,9 +2287,22 @@ function SettingsScreen({ctx}) {
                         ⚠ The deployed Apps Script did not report a version. Copy the latest Code.gs → save in Apps Script → Deploy → Manage deployments → Edit → New version.
                       </div>
                     )}
-                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v19' && (
+                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v20' && (
                       <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>
-                        Latest available is v19 — a redeploy is optional but recommended for the newest fixes.
+                        Latest available is v20 — a redeploy is optional but recommended for the newest fixes.
+                      </div>
+                    )}
+                    {debugResult.discontinued && (
+                      <div style={{fontSize:10,color:T.ink3,marginBottom:8,padding:'8px 10px',background:'#fff',borderRadius:4,border:`1px solid ${T.line}`}}>
+                        <div style={{fontWeight:700,color:T.ink,marginBottom:3}}>Discontinued Products tab</div>
+                        {!debugResult.discontinued.found
+                          ? <span style={{color:T.bad}}>Not found</span>
+                          : <>
+                              <div>Alt-code column: <b>{debugResult.discontinued.altColHeader||'(none)'}</b> · rows with alt code: <b>{debugResult.discontinued.rowsWithAlt}</b></div>
+                              {(debugResult.discontinued.samples||[]).slice(0,4).map((s,i)=>(
+                                <div key={i} style={{fontFamily:T.mono,fontSize:9,color:T.ink4,marginTop:2}}>{s.code} → <b style={{color:T.green}}>{s.alt}</b> ({s.remarks})</div>
+                              ))}
+                            </>}
                       </div>
                     )}
                     <div style={{fontSize:10,fontWeight:700,color:T.ink4,marginBottom:4}}>

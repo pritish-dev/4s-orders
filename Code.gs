@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v19';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v20';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -425,6 +425,7 @@ function handlePriceList(p) {
   //   Any row that carries an Alt item code → item.altCode, which the order
   //   form / PDF / CRM use in place of the (old) price-list code. The alt code
   //   is applied whenever it exists, regardless of the exact REMARKS wording.
+  var annDiscontinued = 0, annAltCode = 0;
   try {
     var discMap = _getDiscontinuedMap(opsSS);
     if (discMap) {
@@ -434,10 +435,12 @@ function handlePriceList(p) {
         if (info.remarks.indexOf('discontinu') !== -1) {
           all[d].discontinued = true;
           all[d].discSince    = info.date || '';
+          annDiscontinued++;
         }
         if (info.altCode) {
           all[d].altCode = info.altCode;
           if (info.altName) all[d].altName = info.altName;
+          annAltCode++;
         }
       }
     }
@@ -459,7 +462,8 @@ function handlePriceList(p) {
     };
   }
 
-  var result = { ok: true, scriptVersion: SCRIPT_VERSION, mode: usedFallback ? 'auto-scan' : 'config', items: all, counts: counts, totalTabs: Object.keys(counts).length };
+  var result = { ok: true, scriptVersion: SCRIPT_VERSION, mode: usedFallback ? 'auto-scan' : 'config', items: all, counts: counts, totalTabs: Object.keys(counts).length,
+                 annotated: { discontinued: annDiscontinued, altCode: annAltCode } };
   if (errors.length) result.tabErrors = errors;
   _cachePut(cacheKey, result);   // speed up the next load
   return result;
@@ -680,11 +684,15 @@ function _getDiscontinuedMap(opsSS) {
   if (rows.length < 2) return {};
 
   var hdr   = rows[0].map(function(c){ return String(c || '').toUpperCase().trim(); });
-  var cCode = _hdrIdx(hdr, ['ITEM CODE', 'ITEM_CODE', 'CODE']);
-  var cDate = _hdrIdx(hdr, ['DATE OF DISCONTINUATION', 'DISCONTINUATION DATE', 'DATE']);
-  var cRem  = _hdrIdx(hdr, ['REMARKS', 'REMARK', 'STATUS']);
-  var cAlt  = _hdrIdx(hdr, ['ALT ITEM CODE', 'ALT ITEM_CODE', 'ALTERNATE ITEM CODE', 'ALT CODE']);
-  var cAltD = _hdrIdx(hdr, ['ALT ITEM CODE DESCRIPTION', 'ALT ITEM CODE DESC', 'ALT DESCRIPTION']);
+  // Normalised matching (ignores spaces / underscores / punctuation / NBSP) so
+  // headers like "Alt  item  code" or "Alt-Item Code" still resolve correctly.
+  // IMPORTANT: match the DESCRIPTION column first, then EXCLUDE it when finding
+  // the alt-code column, so "Alt Item code Description" is never mistaken for it.
+  var cCode = _hdrKeyIdx(hdr, ['ITEM CODE', 'ITEMCODE', 'CODE', 'OLD ITEM CODE', 'OLD CODE']);
+  var cDate = _hdrKeyIdx(hdr, ['DATE OF DISCONTINUATION', 'DISCONTINUATION DATE', 'DATE']);
+  var cRem  = _hdrKeyIdx(hdr, ['REMARKS', 'REMARK', 'STATUS']);
+  var cAltD = _hdrKeyIdx(hdr, ['ALT ITEM CODE DESCRIPTION', 'ALT ITEM CODE DESC', 'ALT CODE DESCRIPTION', 'ALTERNATE ITEM CODE DESCRIPTION', 'ALT DESCRIPTION']);
+  var cAlt  = _hdrKeyIdx(hdr, ['ALT ITEM CODE', 'ALTERNATE ITEM CODE', 'ALTERNATIVE ITEM CODE', 'ALT CODE', 'ALTERNATE CODE', 'ALT ITEM', 'NEW ITEM CODE', 'NEW CODE', 'REPLACEMENT ITEM CODE', 'REPLACEMENT CODE'], [cAltD]);
 
   // Positional fallback matching the documented header order
   if (cCode < 0) cCode = 0;
@@ -724,6 +732,23 @@ function _hdrIdx(headers, candidates) {
     var key = candidates[i].toUpperCase();
     for (var j = 0; j < headers.length; j++) {
       if (headers[j].toUpperCase() === key) return j;
+    }
+  }
+  return -1;
+}
+
+// Like _hdrIdx but normalises both sides (strips spaces/underscores/punctuation)
+// so header quirks don't break detection. `exclude` is a list of column indexes
+// to skip (e.g. so the alt-code column never resolves to the alt-code-DESCRIPTION
+// column). Returns -1 if none match.
+function _hdrKeyIdx(headers, candidates, exclude) {
+  var normHdr = headers.map(_crmKey);            // _crmKey: UPPER, [^A-Z0-9] removed
+  var skip = {};
+  (exclude || []).forEach(function(i){ if (i >= 0) skip[i] = true; });
+  for (var i = 0; i < candidates.length; i++) {
+    var k = _crmKey(candidates[i]);
+    for (var j = 0; j < normHdr.length; j++) {
+      if (!skip[j] && normHdr[j] === k) return j;
     }
   }
   return -1;
@@ -1037,7 +1062,37 @@ function handleDebugPriceList() {
     allTabs:     allTabs,
     priceConfig: priceCfg,
     tabInfo:     tabInfo,
+    discontinued: _debugDiscontinued(opsSS),
   };
+}
+
+// Diagnostic: how the "Discontinued Products" tab is being read, and which
+// column is used as the Alt item code (surfaced in the Settings → Debug panel).
+function _debugDiscontinued(opsSS) {
+  try {
+    var sh = opsSS.getSheetByName('Discontinued Products');
+    if (!sh) return { found: false };
+    var rows = sh.getDataRange().getValues();
+    if (rows.length < 2) return { found: true, rows: 0 };
+    var hdr   = rows[0].map(function(c){ return String(c || '').toUpperCase().trim(); });
+    var cCode = _hdrKeyIdx(hdr, ['ITEM CODE', 'ITEMCODE', 'CODE', 'OLD ITEM CODE', 'OLD CODE']); if (cCode < 0) cCode = 0;
+    var cRem  = _hdrKeyIdx(hdr, ['REMARKS', 'REMARK', 'STATUS']); if (cRem < 0) cRem = 4;
+    var cAltD = _hdrKeyIdx(hdr, ['ALT ITEM CODE DESCRIPTION', 'ALT ITEM CODE DESC', 'ALT CODE DESCRIPTION', 'ALTERNATE ITEM CODE DESCRIPTION', 'ALT DESCRIPTION']);
+    var cAlt  = _hdrKeyIdx(hdr, ['ALT ITEM CODE', 'ALTERNATE ITEM CODE', 'ALTERNATIVE ITEM CODE', 'ALT CODE', 'ALTERNATE CODE', 'ALT ITEM', 'NEW ITEM CODE', 'NEW CODE', 'REPLACEMENT ITEM CODE', 'REPLACEMENT CODE'], [cAltD]); if (cAlt < 0) cAlt = 5;
+    var withAlt = 0, samples = [];
+    for (var i = 1; i < rows.length; i++) {
+      var code = String(rows[i][cCode] || '').trim();
+      var alt  = String(rows[i][cAlt]  || '').trim();
+      if (!code) continue;
+      if (alt) {
+        withAlt++;
+        if (samples.length < 6) samples.push({ code: code, alt: alt, remarks: String(rows[i][cRem] || '').trim() });
+      }
+    }
+    return { found: true, rows: rows.length - 1, header: hdr, altColIndex: cAlt, altColHeader: hdr[cAlt] || '', rowsWithAlt: withAlt, samples: samples };
+  } catch (e) {
+    return { found: false, error: e.message };
+  }
 }
 
 // ─── ensureSheets ─────────────────────────────────────────────────────────────
