@@ -121,6 +121,54 @@ const T = {
 };
 
 // ═══════════════════════════════════════════════════════════
+// BRAND / PDF ASSETS
+// Drop these PNG files next to index.html to have them embedded in the
+// PDF exactly (otherwise the PDF falls back to drawn graphics / a
+// generated QR):
+//   interio-logo.png  → the "interio by Godrej" logo (PDF header)
+//   fs-logo.png        → the 4S Interiors logo (store address block)
+//   review-qr.png      → your Google review QR (the "Scan to review us" box)
+// ═══════════════════════════════════════════════════════════
+const PDF_ASSETS = {};   // key -> { data:<pngDataURL>, w, h }
+function _loadImageAsset(key, url) {
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  img.onload = () => {
+    try {
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      c.getContext('2d').drawImage(img, 0, 0);
+      PDF_ASSETS[key] = { data: c.toDataURL('image/png'), w: img.naturalWidth, h: img.naturalHeight };
+    } catch (e) { /* tainted or unsupported — skip, fall back to drawn version */ }
+  };
+  img.onerror = () => {};
+  img.src = url;
+}
+function preloadPdfAssets() {
+  _loadImageAsset('interio', 'interio-logo.png');
+  _loadImageAsset('fs',      'fs-logo.png');
+  _loadImageAsset('reviewQR','review-qr.png');
+}
+preloadPdfAssets();
+
+function getReviewUrl() {
+  return localStorage.getItem('4s_review_url') ||
+    'https://www.google.com/search?q=4S+Interiors+Patia+Bhubaneswar+reviews';
+}
+// Generate a QR PNG data URL synchronously via qrcodejs (canvas backend)
+function makeQrDataUrl(text, size = 160) {
+  try {
+    const div = document.createElement('div');
+    new window.QRCode(div, { text, width: size, height: size, correctLevel: window.QRCode.CorrectLevel.M });
+    const cv = div.querySelector('canvas');
+    if (cv) return cv.toDataURL('image/png');
+    const im = div.querySelector('img');
+    if (im && im.src) return im.src;
+  } catch (e) {}
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════
 // API LAYER
 // ═══════════════════════════════════════════════════════════
 function getApiUrl() { return localStorage.getItem('4s_api_url') || ''; }
@@ -141,17 +189,30 @@ async function apiGet(action, params = {}, timeoutMs = 15000) {
   });
 }
 
-async function apiPost(body) {
+async function apiPost(body, tries = 3) {
   const url = getApiUrl();
   if (!url) throw new Error('API URL not configured.');
-  const r = await fetch(url, {
-    method: 'POST',
-    body: JSON.stringify(body),
-    headers: { 'Content-Type': 'text/plain' }, // avoid CORS preflight
-    redirect: 'follow',
-  });
-  if (!r.ok) throw new Error('Server error: ' + r.status);
-  return r.json();
+  let lastErr;
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 45000);
+      const r = await fetch(url, {
+        method: 'POST',
+        body: JSON.stringify(body),
+        headers: { 'Content-Type': 'text/plain' }, // avoid CORS preflight
+        redirect: 'follow',
+        signal: ctrl.signal,
+      });
+      clearTimeout(t);
+      if (!r.ok) throw new Error('Server error: ' + r.status);
+      return await r.json();
+    } catch (e) {
+      lastErr = e;
+      if (attempt < tries) await new Promise(res => setTimeout(res, 800 * attempt)); // backoff, then retry
+    }
+  }
+  throw lastErr || new Error('Network error');
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -515,36 +576,59 @@ function generatePDF(order) {
     doc.rect(ml, y, leftW, hH, 'F');
     doc.setFont('times','bolditalic'); doc.setFontSize(15); doc.setTextColor(255,255,255);
     doc.text('Order Confirmation Form', ml + leftW/2, y + hH/2 + 2.5, {align:'center'});
-    doc.setFillColor(236,236,236);
+    doc.setFillColor(255,255,255);
     doc.rect(ml+leftW, y, rightW, hH, 'F');
+    // Use the exact interio logo image if the PNG was supplied; else draw text.
+    const A = PDF_ASSETS.interio;
+    if (A && A.data) {
+      const boxW = rightW-6, boxH = hH-4, ar = A.w/A.h;
+      let w = boxW, h = w/ar;
+      if (h > boxH) { h = boxH; w = h*ar; }
+      try { doc.addImage(A.data,'PNG', ml+leftW+(rightW-w)/2, y+(hH-h)/2, w, h); } catch(e) { _interioText(y, leftW); }
+    } else {
+      _interioText(y, leftW);
+    }
+    lw0(); doc.rect(ml, y, cw, hH, 'S');
+    vln(ml+leftW, y, y+hH);
+    return y + hH;
+  }
+  function _interioText(y, leftW) {
     const lx = ml + leftW + 4;
     doc.setFont('times','bolditalic'); doc.setFontSize(17); doc.setTextColor(...DRED);
     doc.text('interio', lx, y + 8.5);
     doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...NAVY);
     doc.text('by Godrej', lx, y + 14.5);
     doc.setFontSize(5); doc.text('®', lx + 24, y + 12.5);
-    lw0(); doc.rect(ml, y, cw, hH, 'S');
-    vln(ml+leftW, y, y+hH);
-    return y + hH;
   }
 
   // ── TOP BLOCK (page 1 only): store / customer / instructions ─
   function drawTopBlock(y) {
-    // Store + WON + Order row
-    const r1H = 17, c1w = 55, c2w = 68, c3w = cw - c1w - c2w;
+    // Store + WON + Order row (taller to fit the 4S logo + full address)
+    const r1H = 22, c1w = 74, c2w = 56, c3w = cw - c1w - c2w;
     brd(ml,y,cw,r1H); vln(ml+c1w, y, y+r1H); vln(ml+c1w+c2w, y, y+r1H);
     lbl(ml+1, y+3.5, 'Store Address :');
-    val(ml+1, y+8.5, fit1('4S Interiors', c1w-3, 7.5), 7.5, true);
-    val(ml+1, y+13,  fit1('Patia Sq., BBSR — Ph: 0674-2744906', c1w-3, 6), 6);
+    // 4S Interiors logo (image if supplied)
+    let tx = ml+1;
+    const F = PDF_ASSETS.fs;
+    if (F && F.data) {
+      const s = 13, ar = F.w/F.h; let w = s*ar, h = s;
+      if (w > 15) { w = 15; h = w/ar; }
+      try { doc.addImage(F.data,'PNG', ml+1, y+5.5, w, h); tx = ml+1+w+2; } catch(e) {}
+    }
+    val(tx, y+8, fit1('4S Interiors', c1w-(tx-ml)-2, 7.5), 7.5, true);
+    doc.setFont('helvetica','normal'); doc.setFontSize(5.4); doc.setTextColor(...INK);
+    doc.splitTextToSize('Plot No 193, beside Croma, Gayatri Vihar, Kanan Vihar, Patia, Bhubaneswar, Odisha 751024', c1w-(tx-ml)-2)
+       .slice(0,3).forEach((ln,i)=>doc.text(ln, tx, y+11.5+i*2.8));
+    val(tx, y+r1H-2, 'Ph: 08291957842', 6, true);
     lbl(ml+c1w+1, y+3.5, 'WON No.');
     doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(...DRED);
-    doc.text(fit1(order.won||'Pending', c2w-3, 10), ml+c1w+1, y+10);
-    lbl(ml+c1w+1, y+14.5, 'Date :');
-    val(ml+c1w+11, y+14.5, fit1(oDate, c2w-14, 7.5), 7.5);
+    doc.text(fit1(order.won||'Pending', c2w-3, 10), ml+c1w+1, y+11);
+    lbl(ml+c1w+1, y+16.5, 'Date :');
+    val(ml+c1w+11, y+16.5, fit1(oDate, c2w-14, 7.5), 7.5);
     const ox = ml+c1w+c2w;
     lbl(ox+1, y+3.5, 'Order No. (Sl / Receipt)');
     doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...DRED);
-    doc.text(fit1(orderRef, c3w-3, 9), ox+1, y+11);
+    doc.text(fit1(orderRef, c3w-3, 9), ox+1, y+12);
     y += r1H;
 
     // Billing / Delivery header
@@ -607,6 +691,28 @@ function generatePDF(order) {
     lbl(ml+2,y+5,'Salesman Code',7);
     val(ml+30,y+5, fit1(order.salesExec||'',cw-32,7.5), 7.5);
     y += scH;
+
+    // Site measurements row (sofa dims required for order completion + any
+    // other site access measurements that were captured)
+    const measParts = [];
+    if (order.sofaWidth||order.sofaHeight||order.sofaDepth)
+      measParts.push('Sofa (W x H x D): ' + [order.sofaWidth,order.sofaHeight,order.sofaDepth].map(v=>v||'-').join(' x '));
+    if (order.liftHeight||order.liftWidth)
+      measParts.push('Lift (H x W): ' + [order.liftHeight,order.liftWidth].map(v=>v||'-').join(' x '));
+    if (order.staircaseWidth||order.staircaseLandingHeight)
+      measParts.push('Staircase (W / Landing H): ' + [order.staircaseWidth,order.staircaseLandingHeight].map(v=>v||'-').join(' / '));
+    if (order.entryDoorWidth||order.entryDoorHeight)
+      measParts.push('Entry Door (W x H): ' + [order.entryDoorWidth,order.entryDoorHeight].map(v=>v||'-').join(' x '));
+    if (measParts.length) {
+      doc.setFontSize(7);
+      const mLines = doc.splitTextToSize(measParts.join('     |     '), cw-32);
+      const mH = 4 + mLines.length*3.4;
+      brd(ml,y,cw,mH); vln(ml+28,y,y+mH);
+      lbl(ml+2,y+5,'Site Meas.',7);
+      doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...INK);
+      mLines.forEach((ln,i)=>doc.text(ln, ml+30, y+4.2+i*3.4));
+      y += mH;
+    }
     return y;
   }
 
@@ -668,12 +774,25 @@ function generatePDF(order) {
     fRows.push(['Earnest Amt.',inr(earnest),  false]);
     fRows.push(['Balance Amt.',inr(balance),  true ]);
 
-    const tsH = 5.7*fRows.length, tsLW = cw*0.55, tsRW = cw*0.45, tsRX = ml+tsLW;
+    const tsH = Math.max(5.7*fRows.length, 44), tsLW = cw*0.55, tsRW = cw*0.45, tsRX = ml+tsLW;
     brd(ml,y,tsLW,tsH); brd(tsRX,y,tsRW,tsH);
     lbl(ml+2,y+5,'(Invoice / billing details to be filled after order processing)',6.5);
     if (order.gstNumber) {
       lbl(ml+2, y+11, 'Customer GSTIN :', 7);
       val(ml+2, y+15.5, fit1(order.gstNumber, tsLW-4, 8.5), 8.5, true);
+    }
+    // "Scan to review us" QR — the supplied review-qr.png if present, else a
+    // QR generated from the saved review URL.
+    const qrData = (PDF_ASSETS.reviewQR && PDF_ASSETS.reviewQR.data) || makeQrDataUrl(getReviewUrl(), 160);
+    if (qrData) {
+      const qs = 18, qx = ml+2, qy = y+tsH-qs-2;
+      try {
+        doc.addImage(qrData,'PNG', qx, qy, qs, qs);
+        doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...DRED);
+        doc.text('Scan to review us', qx+qs+3, qy+qs/2-1);
+        doc.setFont('helvetica','normal'); doc.setFontSize(6); doc.setTextColor(...GR);
+        doc.text('We value your feedback!', qx+qs+3, qy+qs/2+3.5);
+      } catch(e) {}
     }
     const vSp = tsRX+tsRW*0.54;
     vln(vSp,y,y+tsH);
@@ -760,7 +879,7 @@ function generatePDF(order) {
 
   // Totals must sit together on one page; move to a fresh page if they don't fit.
   const nTotRows      = 6 + (orderDiscAmt > 0 ? 2 : 0);
-  const totalsBlockH  = 5.7*nTotRows + 18 /*receipt*/ + 18 /*signature*/;
+  const totalsBlockH  = Math.max(5.7*nTotRows, 44) + 18 /*receipt*/ + 18 /*signature*/;
   if (y + totalsBlockH > itemAreaBottom) {
     drawFooter();
     doc.addPage(); pageNo++;
@@ -789,6 +908,12 @@ const BLANK_ORDER = () => ({
   paymentMode:'', earnest:'', receiptNo:'',
   followUp:'', salesExec:'', won:'',
   orderType:'B2C', items:[],
+  // Customer profiling (mandatory; saved to sheet, not on PDF)
+  dob:'', anniversary:'', awareness:'', purchasePattern:[], purchasingFor:'',
+  // Site measurements (sofa ones are mandatory when a sofa is ordered + shown on PDF)
+  sofaWidth:'', sofaHeight:'', sofaDepth:'',
+  liftHeight:'', liftWidth:'', staircaseWidth:'', staircaseLandingHeight:'',
+  entryDoorWidth:'', entryDoorHeight:'',
 });
 
 function App() {
@@ -896,6 +1021,15 @@ function App() {
     } catch {}
   }, [order, user]);
 
+  // Flush offline-queued orders on login and whenever the network comes back
+  useEffect(() => {
+    if (!user) return;
+    flushQueue();
+    const onOnline = () => flushQueue();
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [user]);
+
   // Handle deep-link action from PWA shortcut (?action=...)
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
@@ -991,12 +1125,29 @@ function App() {
         return null;
       }
     } catch(e) {
-      showToast('Saved offline — sync needed','warn');
+      showToast('No internet — order saved on this phone, will sync automatically','warn');
       const q = JSON.parse(localStorage.getItem('4s_queue')||'[]');
-      q.push(draft);
+      q.push({...draft, _queuedAt: Date.now()});
       localStorage.setItem('4s_queue', JSON.stringify(q));
       return draft;
     } finally { setLoading(false); }
+  }
+
+  // Re-send any orders that were saved while offline
+  async function flushQueue() {
+    let q;
+    try { q = JSON.parse(localStorage.getItem('4s_queue')||'[]'); } catch { q = []; }
+    if (!q.length) return;
+    const remaining = [];
+    for (const draft of q) {
+      try {
+        const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total } });
+        if (!res || !res.ok) remaining.push(draft);
+      } catch { remaining.push(draft); }
+    }
+    localStorage.setItem('4s_queue', JSON.stringify(remaining));
+    const sent = q.length - remaining.length;
+    if (sent > 0) { showToast(sent+' pending order'+(sent>1?'s':'')+' synced ✓'); try { loadOrders(); } catch {} }
   }
 
   async function doUpdateWON(orderNo, internalNo, won) {
@@ -1545,8 +1696,15 @@ function OrderFormScreen({ctx}) {
   const setF = (k,v) => setOrder(prev=>({...prev,[k]:v}));
   const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, balance} = orderTotals(o);
 
+  // A sofa in the cart makes the sofa measurements mandatory
+  const hasSofa = (o.items||[]).some(it => /sofa/i.test((it.name||'')+' '+(it.cat||'')+' '+(it.item||'')));
+  const AWARENESS  = ['Social Media','Whatsapp','Newspaper','Friends & Relatives','Website','Others'];
+  const PATTERNS   = ['1st Time','2nd Time','3rd Time','More than 3'];
+  const PURCHASING = ['New Home','Renovation','Rented Home','Other'];
+
   function removeItem(idx) { setOrder(prev=>({...prev,items:prev.items.filter((_,i)=>i!==idx)})); }
   function toggleScheme(idx,key) { setOrder(prev=>({...prev,items:prev.items.map((it,i)=>i===idx?{...it,[key]:!it[key]}:it)})); }
+  function togglePattern(p) { setOrder(prev=>{ const cur=prev.purchasePattern||[]; return {...prev,purchasePattern: cur.includes(p)?cur.filter(x=>x!==p):[...cur,p]}; }); }
   function updateItemQty(idx,delta) {
     setOrder(prev=>({...prev,items:prev.items.map((it,i)=>{
       if(i!==idx) return it;
@@ -1561,6 +1719,14 @@ function OrderFormScreen({ctx}) {
     if(!o.customer) return ctx.showToast('Customer name is required','bad');
     if(!o.phone)    return ctx.showToast('Phone number is required','bad');
     if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item','bad');
+    // Mandatory customer-profiling fields
+    if(!o.dob)          return ctx.showToast('Date of Birth is required','bad');
+    if(!o.anniversary)  return ctx.showToast('Marriage Anniversary is required','bad');
+    if(!o.awareness)    return ctx.showToast('Select how they came to know about the showroom','bad');
+    if(!o.purchasePattern||o.purchasePattern.length===0) return ctx.showToast('Select the purchase pattern','bad');
+    if(!o.purchasingFor) return ctx.showToast('Select what they are purchasing for','bad');
+    // Sofa measurements are mandatory only when a sofa is in the order
+    if(hasSofa && (!o.sofaWidth||!o.sofaHeight||!o.sofaDepth)) return ctx.showToast('Enter Sofa width, height & depth (mandatory for sofas)','bad');
     const saved = await doSaveOrder({...o,salesExec:o.salesExec||user?.name||''});
     if(saved) { setOrder(saved); nav('pdf'); }
   }
@@ -1591,7 +1757,57 @@ function OrderFormScreen({ctx}) {
         <Field label="Billing Address" value={o.billing} onChange={v=>setF('billing',v)} multiline required/>
         <Field label="Delivery Address" value={o.delivery} onChange={v=>setF('delivery',v)} multiline action="SAME AS BILLING" onAction={()=>setF('delivery',o.billing)}/>
         <Field label="Lift available?" value={o.liftAvailable} onChange={v=>setF('liftAvailable',v)} hint="If No — installation handling fee applies"/>
-        <SectionHead n="03" label={`Items · ${(o.items||[]).length}`} action="+ ADD ITEM" onAction={()=>nav('search')}/>
+
+        <SectionHead n="03" label="Customer Profile"/>
+        <Field label="Date of Birth" value={o.dob} onChange={v=>setF('dob',v)} type="date" mono required/>
+        <Field label="Marriage Anniversary" value={o.anniversary} onChange={v=>setF('anniversary',v)} type="date" mono required/>
+        <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>How did they hear about us? <span style={{color:T.bad,marginLeft:3}}>*</span></div>
+          <select value={o.awareness} onChange={e=>setF('awareness',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.awareness?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+            <option value="">Select an option…</option>
+            {AWARENESS.map(a=><option key={a}>{a}</option>)}
+          </select>
+        </div>
+        <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:8}}>Purchase Pattern <span style={{color:T.bad,marginLeft:3}}>*</span></div>
+          <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+            {PATTERNS.map(p=>{ const on=(o.purchasePattern||[]).includes(p); return (
+              <label key={p} style={{display:'inline-flex',alignItems:'center',gap:6,padding:'6px 12px',borderRadius:99,cursor:'pointer',border:`1px solid ${on?T.green:T.line}`,background:on?T.greenSoft:'#fff'}}>
+                <input type="checkbox" checked={on} onChange={()=>togglePattern(p)} style={{width:14,height:14,accentColor:T.green,cursor:'pointer'}}/>
+                <span style={{fontSize:12,fontWeight:600,color:on?T.green:T.ink3}}>{p}</span>
+              </label>
+            );})}
+          </div>
+        </div>
+        <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Purchasing For <span style={{color:T.bad,marginLeft:3}}>*</span></div>
+          <select value={o.purchasingFor} onChange={e=>setF('purchasingFor',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.purchasingFor?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+            <option value="">Select an option…</option>
+            {PURCHASING.map(a=><option key={a}>{a}</option>)}
+          </select>
+        </div>
+
+        <SectionHead n="04" label="Site Measurements"/>
+        {hasSofa && (
+          <>
+            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Sofa in order — width, height & depth are mandatory (printed on the PDF)</div>
+            <Field label="Sofa Width" value={o.sofaWidth} onChange={v=>setF('sofaWidth',v)} mono required hint="e.g. 84 in / 213 cm"/>
+            <Field label="Sofa Height" value={o.sofaHeight} onChange={v=>setF('sofaHeight',v)} mono required/>
+            <Field label="Sofa Depth" value={o.sofaDepth} onChange={v=>setF('sofaDepth',v)} mono required/>
+          </>
+        )}
+        <Field label="Lift — Height" value={o.liftHeight} onChange={v=>setF('liftHeight',v)} mono hint="Information required from customer"/>
+        <Field label="Lift — Width" value={o.liftWidth} onChange={v=>setF('liftWidth',v)} mono/>
+        {String(o.liftAvailable||'').toLowerCase().startsWith('n') && (
+          <>
+            <Field label="Staircase Width" value={o.staircaseWidth} onChange={v=>setF('staircaseWidth',v)} mono hint="Needed when lift is not available"/>
+            <Field label="Staircase Landing Height" value={o.staircaseLandingHeight} onChange={v=>setF('staircaseLandingHeight',v)} mono/>
+          </>
+        )}
+        <Field label="Entry Door Width" value={o.entryDoorWidth} onChange={v=>setF('entryDoorWidth',v)} mono/>
+        <Field label="Entry Door Height" value={o.entryDoorHeight} onChange={v=>setF('entryDoorHeight',v)} mono/>
+
+        <SectionHead n="05" label={`Items · ${(o.items||[]).length}`} action="+ ADD ITEM" onAction={()=>nav('search')}/>
         <div style={{background:'#fff'}}>
           {(o.items||[]).map((it,i)=>{
             const mrpVal   = it.mrp||it.cpl||0;
@@ -1654,12 +1870,12 @@ function OrderFormScreen({ctx}) {
             {Icon.search(T.green,16)}<span style={{fontSize:13}}>Search & add item</span>
           </div>
         </div>
-        <SectionHead n="04" label="Commercials"/>
+        <SectionHead n="06" label="Commercials"/>
         <Field label="Discount Code" value={o.discountCode} onChange={v=>setF('discountCode',v)} mono hint="e.g. 11% or 11%+5%"/>
         <Field label="Additional Order Discount %" value={o.orderDiscount} onChange={v=>setF('orderDiscount',v.replace(/[^\d.]/g,''))} mono type="number" hint="Extra discount on the whole order (on top of per-item discounts). Shown on the PDF."/>
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setF('plannedDly',v)} mono required type="date"/>
         <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
-        <SectionHead n="05" label="Payment"/>
+        <SectionHead n="07" label="Payment"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>PAYMENT MODE <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <select value={o.paymentMode} onChange={e=>setF('paymentMode',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.paymentMode?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
@@ -1677,7 +1893,7 @@ function OrderFormScreen({ctx}) {
         <Field label="Earnest Amount" value={o.earnest} onChange={v=>setF('earnest',v)} mono type="number" required/>
         <Field label="Receipt No. & Date" value={o.receiptNo} onChange={v=>setF('receiptNo',v)} mono/>
         <Field label="Follow-up Date" value={o.followUp} onChange={v=>setF('followUp',v)} mono type="date" hint="Reminder at 10:00 AM"/>
-        <SectionHead n="06" label="Internal"/>
+        <SectionHead n="08" label="Internal"/>
         <Field label="Salesperson" value={o.salesExec||user?.name||''} onChange={v=>setF('salesExec',v)} mono/>
         <Field label="Order Type" value={o.orderType||'B2C'} onChange={v=>setF('orderType',v)} hint="B2C / B2B / B2BE"/>
         <div style={{padding:'14px 14px 18px'}}>
@@ -1978,6 +2194,14 @@ function SettingsScreen({ctx}) {
               </Btn>
             </div>
           </div>
+          <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,margin:'14px 0 6px'}}>GOOGLE REVIEW LINK (for PDF QR)</div>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
+            <input defaultValue={localStorage.getItem('4s_review_url')||''}
+              onBlur={e=>{ localStorage.setItem('4s_review_url', e.target.value.trim()); showToast('Review link saved ✓'); }}
+              style={{width:'100%',border:'none',outline:'none',fontFamily:T.mono,fontSize:11,color:T.ink,background:'transparent'}}
+              placeholder="https://g.page/r/…/review"/>
+            <div style={{fontSize:10,color:T.ink4,marginTop:6,lineHeight:1.5}}>Used for the "Scan to review us" QR on the order PDF. Or drop a <b>review-qr.png</b> into the app folder to use your exact QR image.</div>
+          </div>
           {pingResult && (
             <div style={{marginTop:8,padding:'12px',borderRadius:6,background:pingResult.ok?T.okSoft:T.badSoft,border:`1px solid ${pingResult.ok?T.ok:T.bad}`}}>
               <div style={{fontSize:13,fontWeight:700,color:pingResult.ok?T.ok:T.bad}}>{pingResult.msg}</div>
@@ -2063,9 +2287,9 @@ function SettingsScreen({ctx}) {
                         ⚠ The deployed Apps Script did not report a version. Copy the latest Code.gs → save in Apps Script → Deploy → Manage deployments → Edit → New version.
                       </div>
                     )}
-                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v18' && (
+                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v19' && (
                       <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>
-                        Latest available is v18 — a redeploy is optional but recommended for the newest fixes.
+                        Latest available is v19 — a redeploy is optional but recommended for the newest fixes.
                       </div>
                     )}
                     <div style={{fontSize:10,fontWeight:700,color:T.ink4,marginBottom:4}}>

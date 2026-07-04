@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v18';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v19';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -421,8 +421,10 @@ function handlePriceList(p) {
   }
 
   // Annotate items using the "Discontinued Products" tab (matched by item code):
-  //   REMARKS "Discontinued"  → item.discontinued + item.discSince (date)
-  //   REMARKS "change of Code" → item.altCode (used as the code in the order form)
+  //   REMARKS "Discontinued" → item.discontinued + item.discSince (date)
+  //   Any row that carries an Alt item code → item.altCode, which the order
+  //   form / PDF / CRM use in place of the (old) price-list code. The alt code
+  //   is applied whenever it exists, regardless of the exact REMARKS wording.
   try {
     var discMap = _getDiscontinuedMap(opsSS);
     if (discMap) {
@@ -433,7 +435,7 @@ function handlePriceList(p) {
           all[d].discontinued = true;
           all[d].discSince    = info.date || '';
         }
-        if (info.remarks.indexOf('change') !== -1 && info.altCode) {
+        if (info.altCode) {
           all[d].altCode = info.altCode;
           if (info.altName) all[d].altName = info.altName;
         }
@@ -933,6 +935,24 @@ function _appendOrderToCRM(o, orderNo, internalNo, orderDateStr) {
     put(['DELIVERY REMARKS(DELIVERED/PENDING)', 'DELIVERY REMARKS'], 'Pending');
     put(['POSTED BY'], o.salesExec || '');
     put(['PINELAB / BAJAJ', 'PINELAB/BAJAJ'], o.paymentMode || '');
+
+    // ── Customer profiling + site measurements (order-level; not on the PDF
+    //    except the sofa measurements). Written by header name, so add these
+    //    columns to the CRM sheet to capture them; missing columns are skipped.
+    put(['DATE OF BIRTH', 'DOB'], o.dob || '');
+    put(['MARRIAGE ANNIVERSARY', 'MARRIAGE ANNIVERSARY DATE', 'ANNIVERSARY'], o.anniversary || '');
+    put(['HOW DID THEY COME TO KNOW ABOUT OUR SHOWROOM?', 'HOW DID THEY COME TO KNOW ABOUT OUR SHOWROOM', 'HOW DID THEY COME TO KNOW', 'SOURCE OF AWARENESS'], o.awareness || '');
+    put(['PURCHASE PATTERN'], Array.isArray(o.purchasePattern) ? o.purchasePattern.join(', ') : (o.purchasePattern || ''));
+    put(['PURCHASING FOR', 'PURCHASING FOR:'], o.purchasingFor || '');
+    put(['SOFA WIDTH'], o.sofaWidth || '');
+    put(['SOFA HEIGHT'], o.sofaHeight || '');
+    put(['SOFA DEPTH'], o.sofaDepth || '');
+    put(['LIFT HEIGHT'], o.liftHeight || '');
+    put(['LIFT WIDTH'], o.liftWidth || '');
+    put(['STAIRCASE WIDTH', 'STAIR CASE WIDTH'], o.staircaseWidth || '');
+    put(['STAIRCASE LANDING HEIGHT', 'STAIR CASE LANDING HEIGHT'], o.staircaseLandingHeight || '');
+    put(['CUSTOMER HOUSE ENTRY DOOR WIDTH', 'ENTRY DOOR WIDTH'], o.entryDoorWidth || '');
+    put(['CUSTOMER HOUSE ENTRY DOOR HEIGHT', 'ENTRY DOOR HEIGHT'], o.entryDoorHeight || '');
 
     out.push(row);
   }
