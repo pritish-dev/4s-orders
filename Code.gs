@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v21';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v22';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -59,20 +59,19 @@ function _openOPS() {
 }
 
 // ─── Master spreadsheet helpers ───────────────────────────────────────────────
+// The app no longer uses a master spreadsheet at runtime (the CRM tab is the
+// single source of truth). This only opens an EXISTING master if one is still
+// configured (e.g. the legacy Staff login fallback) — it never auto-creates one.
 function _getMasterSS() {
   var props = PropertiesService.getScriptProperties();
   var id    = props.getProperty('MASTER_SHEET_ID');
   if (id) {
     try { return SpreadsheetApp.openById(id); } catch(e) {}
   }
-  // Auto-setup: creates Orders_Master, Staff, Change_Log tabs in a new spreadsheet
-  ensureSheets();
-  id = props.getProperty('MASTER_SHEET_ID');
-  if (!id) throw new Error('Master sheet not configured. Run ensureSheets() from the Apps Script editor.');
-  return SpreadsheetApp.openById(id);
+  return null;
 }
 
-function _getSheet(name) { return _getMasterSS().getSheetByName(name); }
+function _getSheet(name) { var ss = _getMasterSS(); return ss ? ss.getSheetByName(name) : null; }
 
 // ─── Response helpers ─────────────────────────────────────────────────────────
 function _jsonOut(callback, obj) {
@@ -802,131 +801,227 @@ function _makeItem(tabName, cat, group, code, desc, cpl, extra) {
 }
 
 // ─── ORDERS ───────────────────────────────────────────────────────────────────
+// Reads past orders from the CRM tab (one row per item) and groups them into
+// one summary per order, identified by ORDER NO + CONTACT NUMBER.
 function handleOrders(p) {
-  var sh = _getSheet('Orders_Master');
-  if (!sh) return { ok: false, error: 'Orders_Master sheet not found. Run ensureSheets().' };
+  var sh;
+  try { sh = _openCRMSheet(); }
+  catch (e) { return { ok: false, error: e.message }; }
 
-  var rows   = sh.getDataRange().getValues();
+  var C     = _crmCols(sh);
+  var colOf = C.colOf;
+  var ncol  = C.header.length;
+
+  var cOrderNo = colOf(CRM_H.ORDER_NO);
+  var cPhone   = colOf(CRM_H.PHONE);
+  var cIntNo   = colOf(CRM_H.INT_NO);
+  var cWon     = colOf(CRM_H.WON);
+  var cCust    = colOf(CRM_H.CUSTOMER);
+  var cDate    = colOf(CRM_H.DATE);
+  var cSales   = colOf(CRM_H.SALES);
+  var cAmt     = colOf(CRM_H.AMOUNT);
+
+  var lastRow = sh.getLastRow();
+  var data    = lastRow >= 2 ? sh.getRange(2, 1, lastRow - 1, ncol).getValues() : [];
+
   var exec   = (p.exec || '').trim().toLowerCase();
   var cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 60);
 
-  var orders = [];
-  for (var i = rows.length - 1; i >= 1; i--) {
-    var r  = rows[i];
-    var ts = r[COL_ORD.TS];
-    if (!ts) continue;
-    var rowDate = ts instanceof Date ? ts : new Date(ts);
-    if (rowDate < cutoff) break;
-
-    var salesExec = String(r[COL_ORD.SALES_EXEC] || '');
-    if (exec && salesExec.toLowerCase().indexOf(exec) === -1) continue;
-
-    orders.push({
-      no:         String(r[COL_ORD.ORDER_NO]      || ''),
-      internalNo: Number(r[COL_ORD.INTERNAL_NO]   || 0),
-      won:        String(r[COL_ORD.WON]            || ''),
-      customer:   String(r[COL_ORD.CUSTOMER]       || ''),
-      phone:      String(r[COL_ORD.PHONE]          || ''),
-      date:       String(r[COL_ORD.DATE]           || ''),
-      amt:        Number(r[COL_ORD.TOTAL_WITH_TAX] || 0),
-      status:     String(r[COL_ORD.STATUS]         || 'draft'),
-      salesExec:  salesExec,
-    });
+  var map = {}, keys = [];
+  for (var i = 0; i < data.length; i++) {
+    var r  = data[i];
+    var no = cOrderNo >= 0 ? String(r[cOrderNo] || '').trim() : '';
+    var ph = cPhone   >= 0 ? String(r[cPhone]   || '').trim() : '';
+    if (!no && !ph) continue;
+    var key = no + '|' + ph;
+    if (!map[key]) {
+      map[key] = {
+        no:         no,
+        internalNo: cIntNo >= 0 ? Number(r[cIntNo]) || 0 : 0,
+        won:        '',
+        customer:   cCust  >= 0 ? String(r[cCust]  || '') : '',
+        phone:      ph,
+        date:       cDate  >= 0 ? String(r[cDate]  || '') : '',
+        salesExec:  cSales >= 0 ? String(r[cSales] || '') : '',
+        amt:        0,
+        _row:       i,
+      };
+      keys.push(key);
+    }
+    var m = map[key];
+    m.amt += cAmt >= 0 ? (Number(r[cAmt]) || 0) : 0;
+    m._row = i;   // remember the order's last row → sort newest-first
+    if (cWon >= 0) { var w = String(r[cWon] || '').trim(); if (w) m.won = w; }
   }
+
+  var orders = keys.map(function(k){ return map[k]; })
+    .filter(function(m){
+      if (exec && String(m.salesExec || '').toLowerCase().indexOf(exec) === -1) return false;
+      var dt = _parseCrmDate(m.date);
+      if (dt && dt < cutoff) return false;
+      return true;
+    })
+    .sort(function(a,b){ return b._row - a._row; })
+    .map(function(m){
+      return {
+        no: m.no, internalNo: m.internalNo, won: m.won,
+        customer: m.customer, phone: m.phone, date: m.date,
+        amt: m.amt, status: m.won ? 'billed' : 'pending-won', salesExec: m.salesExec,
+      };
+    });
+
   return { ok: true, orders: orders };
 }
 
-// ─── SAVE ORDER ───────────────────────────────────────────────────────────────
-function handleSaveOrder(o) {
-  if (!o) throw new Error('No order data provided.');
-  var sh = _getSheet('Orders_Master');
-  if (!sh) throw new Error('Orders_Master sheet not found. Run ensureSheets().');
-
-  var lastRow    = sh.getLastRow();
-  var internalNo = lastRow;
-  var receiptNo  = String(o.receiptNo || '').trim();
-  var orderNo    = receiptNo ? (internalNo + '/' + receiptNo) : String(internalNo);
-
-  var now      = new Date();
-  var dateStr  = now.toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'2-digit' }).replace(/\//g,'.');
-  // Item totals are already net of each item's own discount. Apply the
-  // optional order-level discount (a percentage) before charging GST.
-  var itemsSubtotal = o.items ? o.items.reduce(function(s,i){ return s + (i.total||0); }, 0) : 0;
-  var orderDiscPct  = Math.max(0, parseFloat(o.orderDiscount) || 0) / 100;
-  var orderDiscAmt  = Math.round(itemsSubtotal * orderDiscPct);
-  var subtotal      = itemsSubtotal - orderDiscAmt;   // taxable value (after order discount)
-  var cgst          = Math.round(subtotal * 0.09);
-  var sgst          = Math.round(subtotal * 0.09);
-  var total         = subtotal + cgst + sgst;
-
-  sh.appendRow([
-    now, internalNo, orderNo,
-    String(o.won          || ''), 'pending-won',
-    String(o.customer     || ''), String(o.phone       || ''), String(o.alt          || ''), String(o.email        || ''),
-    String(o.billing      || ''), String(o.delivery    || ''), String(o.liftAvailable|| ''), String(o.customerCode || ''),
-    String(o.poRef        || ''), String(o.source      || ''), String(o.discountCode || ''), String(o.plannedDly   || ''),
-    String(o.installNote  || ''), String(o.paymentMode || ''), Number(o.earnest      || 0),  receiptNo,
-    String(o.followUp     || ''), String(o.salesExec   || ''), String(o.orderType    || 'B2C'),
-    JSON.stringify(o.items || []),
-    subtotal, cgst, sgst, total, dateStr,
-  ]);
-
-  _appendLog(String(o.salesExec||''), orderNo, 'CREATE',
-    'Customer: ' + (o.customer||'') + ' | Items: ' + (o.items ? o.items.length : 0));
-
-  // Mirror every ordered item into the CRM spreadsheet (one row per item).
-  // Never let a CRM failure block the order save — just report it back.
-  var crm;
-  try { crm = _appendOrderToCRM(o, orderNo, internalNo, dateStr); }
-  catch (e) { crm = { ok: false, error: e.message }; }
-
-  var result = { ok: true, orderNo: orderNo, internalNo: internalNo };
-  if (crm && crm.ok) result.crmRows = crm.rows;
-  else if (crm)      result.crmError = crm.error;
-  return result;
-}
-
-// ─── CRM EXPORT ─────────────────────────────────────────────────────────────
-// Appends one row per ordered item to the CRM spreadsheet, matching the app's
-// values to the sheet's columns BY HEADER NAME (column order does not matter).
-// Back-office columns (Godrej SO/invoice/purchase-bill/etc.) are left blank.
+// ─── CRM SHEET HELPERS ───────────────────────────────────────────────────────
+// The CRM tab "B2C FRANCHISE APP ORDER DETAILS 26-27" is the ONE source of
+// truth: the app writes orders here (one row per item), reads history from
+// here, and updates the WON here. Everything is matched to columns BY HEADER
+// NAME (column order does not matter); missing columns are simply skipped.
 function _crmKey(h) { return String(h || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
 
-function _appendOrderToCRM(o, orderNo, internalNo, orderDateStr) {
-  var ss;
-  try { ss = SpreadsheetApp.openById(CRM_SHEET_ID); }
-  catch (e) { return { ok: false, error: 'Cannot open CRM sheet (' + CRM_SHEET_ID + '): ' + e.message }; }
-
+function _openCRMSheet() {
+  var ss = SpreadsheetApp.openById(CRM_SHEET_ID);   // throws if it cannot open
   var sh = ss.getSheetByName(CRM_TAB_NAME);
   if (!sh) { var shts = ss.getSheets(); sh = shts.length ? shts[0] : null; }
-  if (!sh) return { ok: false, error: 'CRM tab not found: ' + CRM_TAB_NAME };
+  if (!sh) throw new Error('CRM tab not found: ' + CRM_TAB_NAME);
+  return sh;
+}
 
-  var lastRow = sh.getLastRow();
-  var lastCol = sh.getLastColumn();
-  if (lastCol < 1 || lastRow < 1) return { ok: false, error: 'CRM sheet has no header row' };
-  var header = sh.getRange(1, 1, 1, lastCol).getValues()[0];
-
-  // Normalised header text -> column index
+// Reads the header row and returns { header, colOf } for by-name lookups.
+function _crmCols(sh) {
+  var lastCol = Math.max(1, sh.getLastColumn());
+  var header  = sh.getRange(1, 1, 1, lastCol).getValues()[0];
   var idx = {};
   for (var c = 0; c < header.length; c++) {
     var key = _crmKey(header[c]);
     if (key && idx[key] === undefined) idx[key] = c;
   }
-  function colOf(candidates) {
-    for (var k = 0; k < candidates.length; k++) {
-      var ci = idx[_crmKey(candidates[k])];
+  function colOf(cands) {
+    for (var k = 0; k < cands.length; k++) {
+      var ci = idx[_crmKey(cands[k])];
       if (ci !== undefined) return ci;
     }
     return -1;
   }
+  return { header: header, colOf: colOf };
+}
 
+// Header aliases for the columns used to identify / group an order.
+var CRM_H = {
+  ORDER_NO: ['ORDER NO', 'ORDER NO.'],
+  PHONE:    ['CONTACT NUMBER', 'PHONE', 'CONTACT NO'],
+  INT_NO:   ['INTERNAL ODER NO', 'INTERNAL ORDER NO'],
+  WON:      ['WON', 'WON NO', 'WON NO.', 'WON NUMBER', 'WON NUMBER (WON NO.)'],
+  DATE:     ['ORDER DATE'],
+  CUSTOMER: ['CUSTOMER NAME'],
+  SALES:    ['SALES PERSON'],
+  AMOUNT:   ['ORDER AMOUNT (WITH TAX AND AFTER DISC )', 'ORDER AMOUNT (WITH TAX AND AFTER DISC)'],
+};
+
+// Parse a "dd.mm.yy" / "dd.mm.yyyy" ORDER DATE string → Date (or null).
+function _parseCrmDate(s) {
+  s = String(s || '').trim();
+  if (!s) return null;
+  var m = s.match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})$/);
+  if (!m) { var d0 = new Date(s); return isNaN(d0.getTime()) ? null : d0; }
+  var d = Number(m[1]), mo = Number(m[2]), y = Number(m[3]);
+  if (y < 100) y += 2000;
+  var dt = new Date(y, mo - 1, d);
+  return isNaN(dt.getTime()) ? null : dt;
+}
+
+// ─── SAVE ORDER ───────────────────────────────────────────────────────────────
+// Writes the order to the CRM tab ONLY (no Orders_Master). One row per item.
+// An order is identified by ORDER NO + CONTACT NUMBER (+ WON). Re-saving an
+// order (or adding items) replaces its existing rows instead of duplicating.
+function handleSaveOrder(o) {
+  if (!o) throw new Error('No order data provided.');
+  var res = _writeOrderToCRM(o);
+  if (!res.ok) throw new Error(res.error || 'Could not write the order to the CRM sheet.');
+  return { ok: true, orderNo: res.orderNo, internalNo: res.internalNo, crmRows: res.rows };
+}
+
+function _writeOrderToCRM(o) {
+  var sh;
+  try { sh = _openCRMSheet(); }
+  catch (e) { return { ok: false, error: e.message }; }
+
+  var C      = _crmCols(sh);
+  var colOf  = C.colOf;
+  var header = C.header;
+  var ncol   = header.length;
+  if (ncol < 1) return { ok: false, error: 'CRM sheet has no header row.' };
+
+  var cOrderNo = colOf(CRM_H.ORDER_NO);
+  var cPhone   = colOf(CRM_H.PHONE);
+  var cIntNo   = colOf(CRM_H.INT_NO);
+  var cWon     = colOf(CRM_H.WON);
+  var cDate    = colOf(CRM_H.DATE);
+
+  var lastRow = sh.getLastRow();
+  var data    = lastRow >= 2 ? sh.getRange(2, 1, lastRow - 1, ncol).getValues() : [];
+
+  var phoneDigits    = String(o.phone || '').replace(/\D/g, '');
+  var incomingOrder  = String(o.no || '').trim();
+
+  // Find existing rows for this order (only when the client already has an
+  // order number — a brand-new order has none, so nothing matches).
+  var matchRows = [], existingWon = '', existingDate = '';
+  if (incomingOrder && cOrderNo >= 0) {
+    for (var i = 0; i < data.length; i++) {
+      if (String(data[i][cOrderNo] || '').trim() !== incomingOrder) continue;
+      if (phoneDigits && cPhone >= 0 &&
+          String(data[i][cPhone] || '').replace(/\D/g, '') !== phoneDigits) continue;
+      matchRows.push(i);
+      if (cWon  >= 0 && !existingWon)  existingWon  = String(data[i][cWon]  || '').trim();
+      if (cDate >= 0 && !existingDate) existingDate = String(data[i][cDate] || '').trim();
+    }
+  }
+
+  // Order number: keep the existing one, else assign the next internal number.
+  var internalNo, orderNo;
+  if (incomingOrder) {
+    orderNo    = incomingOrder;
+    internalNo = Number(o.internalNo) ||
+                 (matchRows.length && cIntNo >= 0 ? Number(data[matchRows[0]][cIntNo]) || 0 : 0);
+  }
+  if (!internalNo) {
+    var maxInt = 0;
+    if (cIntNo >= 0) for (var j = 0; j < data.length; j++) {
+      var v = Number(data[j][cIntNo]) || 0; if (v > maxInt) maxInt = v;
+    }
+    internalNo = maxInt + 1;
+  }
+  if (!orderNo) {
+    var receiptNo = String(o.receiptNo || '').trim();
+    orderNo = receiptNo ? (internalNo + '/' + receiptNo) : String(internalNo);
+  }
+
+  var now          = new Date();
+  var todayStr     = now.toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'2-digit' }).replace(/\//g,'.');
+  var orderDateStr = String(o.date || '') || existingDate || todayStr;   // keep original date on re-save
+  var wonToWrite   = String(o.won || '').trim() || existingWon || '';    // preserve a WON already on the sheet
+
+  // Replace: delete the order's old rows (bottom-up) so item count can change.
+  if (matchRows.length) {
+    var sheetRows = matchRows.map(function(x){ return x + 2; }).sort(function(a,b){ return b - a; });
+    for (var d = 0; d < sheetRows.length; d++) sh.deleteRow(sheetRows[d]);
+  }
+
+  var built = _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wonToWrite, sh.getLastRow());
+  if (!built.length) return { ok: true, orderNo: orderNo, internalNo: internalNo, rows: 0 };
+  sh.getRange(sh.getLastRow() + 1, 1, built.length, ncol).setValues(built);
+  return { ok: true, orderNo: orderNo, internalNo: internalNo, rows: built.length };
+}
+
+// Builds the per-item rows for one order (values matched to columns by header).
+function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, won, slBaseRow) {
   var items = o.items || [];
-  if (!items.length) return { ok: true, rows: 0 };
-
+  if (!items.length) return [];
   var orderDiscPct = Math.max(0, parseFloat(o.orderDiscount) || 0) / 100;
-  var slStart      = lastRow;   // header is row 1, so existing data rows = lastRow-1; next serial = lastRow
-  var out          = [];
+  var out = [];
 
   for (var i = 0; i < items.length; i++) {
     var it   = items[i];
@@ -946,12 +1041,13 @@ function _appendOrderToCRM(o, orderNo, internalNo, orderDateStr) {
     for (var z = 0; z < header.length; z++) row.push('');
     function put(cands, value) { var ci = colOf(cands); if (ci >= 0) row[ci] = value; }
 
-    put(['SL NO.', 'SL NO'], slStart + i);
-    put(['INTERNAL ODER NO', 'INTERNAL ORDER NO'], internalNo);
-    put(['ORDER DATE'], orderDateStr);
-    put(['ORDER NO'], orderNo);
-    put(['CUSTOMER NAME'], o.customer || '');
-    put(['CONTACT NUMBER'], o.phone || '');
+    put(['SL NO.', 'SL NO'], slBaseRow + i);
+    put(CRM_H.INT_NO, internalNo);
+    put(CRM_H.DATE, orderDateStr);
+    put(CRM_H.ORDER_NO, orderNo);
+    put(CRM_H.WON, won);
+    put(CRM_H.CUSTOMER, o.customer || '');
+    put(CRM_H.PHONE, o.phone || '');
     put(['EMAIL ADDRESS'], o.email || '');
     put(['CATEGORY'], it.cat || '');
     put(['PRODUCT NAME'], it.name || '');
@@ -962,12 +1058,12 @@ function _appendOrderToCRM(o, orderNo, internalNo, orderDateStr) {
     put(['ORDER UNIT PRICE=(AFTER DISC + TAX)', 'ORDER UNIT PRICE'], Math.round(unitAll * 1.18));
     put(['QTY'], qty);
     put(['GROSS ORDER VALUE(MRP)'], grossMrp);
-    put(['ORDER AMOUNT (WITH TAX AND AFTER DISC )', 'ORDER AMOUNT (WITH TAX AND AFTER DISC)'], Math.round(lineNet * 1.18));
+    put(CRM_H.AMOUNT, Math.round(lineNet * 1.18));
     put(['DISC ALLOWED'], schemes.join(', '));
     put(['DISCOUNT GIVEN'], grossMrp - lineNet);   // total rupee discount (item + order share), pre-tax
     put(['CROSS CHECK GROSS AMT (Order Value Without Tax)', 'CROSS CHECK GROSS AMT'], lineNet);
     put(['CUSTOMER DELIVERY DATE (TO BE)'], o.plannedDly || '');
-    put(['SALES PERSON'], o.salesExec || '');
+    put(CRM_H.SALES, o.salesExec || '');
     if (i === 0) put(['ADV RECEIVED'], Number(o.earnest) || 0);   // order-level — first row only
     put(['REFERENCE ORDER NO.', 'REFERENCE ORDER NO'], o.poRef || '');
     put(['DELIVERY REMARKS(DELIVERED/PENDING)', 'DELIVERY REMARKS'], 'Pending');
@@ -1011,41 +1107,55 @@ function _appendOrderToCRM(o, orderNo, internalNo, orderDateStr) {
 
     out.push(row);
   }
-
-  sh.getRange(lastRow + 1, 1, out.length, header.length).setValues(out);
-  return { ok: true, rows: out.length };
+  return out;
 }
 
 // ─── UPDATE WON ───────────────────────────────────────────────────────────────
+// Writes the WON onto every CRM row of the order (matched by ORDER NO or
+// INTERNAL ODER NO). WON lands in the "WON" column if present, else "GODREJ SO NO".
 function handleUpdateWON(body) {
-  var orderNo    = String(body.orderNo    || '');
+  var orderNo    = String(body.orderNo    || '').trim();
   var internalNo = Number(body.internalNo || 0);
   var won        = String(body.won        || '').trim().toUpperCase();
   var updatedBy  = String(body.updatedBy  || '');
   if (!won) return { ok: false, error: 'WON number is required.' };
 
-  var sh = _getSheet('Orders_Master');
-  if (!sh) return { ok: false, error: 'Orders_Master not found.' };
+  var sh;
+  try { sh = _openCRMSheet(); }
+  catch (e) { return { ok: false, error: e.message }; }
 
-  var rows = sh.getDataRange().getValues();
-  for (var i = 1; i < rows.length; i++) {
-    if (Number(rows[i][COL_ORD.INTERNAL_NO]) === internalNo ||
-        String(rows[i][COL_ORD.ORDER_NO])    === orderNo) {
-      sh.getRange(i + 1, COL_ORD.WON    + 1).setValue(won);
-      sh.getRange(i + 1, COL_ORD.STATUS + 1).setValue('billed');
-      _appendLog(updatedBy, orderNo, 'UPDATE_WON', 'WON: ' + won);
-      return { ok: true };
+  var C     = _crmCols(sh);
+  var colOf = C.colOf;
+  var ncol  = C.header.length;
+
+  var cOrderNo = colOf(CRM_H.ORDER_NO);
+  var cIntNo   = colOf(CRM_H.INT_NO);
+  var cWon     = colOf(CRM_H.WON);
+  if (cWon < 0) return { ok: false, error: 'No "WON" column found in the CRM sheet. Add a "WON" header to enable WON updates.' };
+
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return { ok: false, error: 'Order not found: ' + orderNo };
+  var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
+
+  var updated = 0;
+  for (var i = 0; i < data.length; i++) {
+    var matchOrder = cOrderNo >= 0 && orderNo    && String(data[i][cOrderNo] || '').trim() === orderNo;
+    var matchInt   = cIntNo   >= 0 && internalNo && Number(data[i][cIntNo]) === internalNo;
+    if (matchOrder || matchInt) {
+      sh.getRange(i + 2, cWon + 1).setValue(won);
+      updated++;
     }
   }
-  return { ok: false, error: 'Order not found: ' + orderNo };
+  if (!updated) return { ok: false, error: 'Order not found: ' + orderNo };
+  _appendLog(updatedBy, orderNo, 'UPDATE_WON', 'WON: ' + won);
+  return { ok: true, rows: updated };
 }
 
 // ─── CHANGE LOG ───────────────────────────────────────────────────────────────
+// Logger-only now (the app no longer keeps an Orders_Master / Change_Log sheet —
+// the CRM tab is the single source of truth).
 function _appendLog(user, orderNo, action, detail) {
-  try {
-    var sh = _getSheet('Change_Log');
-    if (sh) sh.appendRow([new Date(), user, orderNo, action, detail]);
-  } catch(e) { Logger.log('Change_Log error: ' + e.message); }
+  try { Logger.log([new Date(), user, orderNo, action, detail].join(' | ')); } catch(e) {}
 }
 
 // ─── DEBUG — fast: reads only header row + row count per listed tab ────────────

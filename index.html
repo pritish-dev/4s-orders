@@ -2344,9 +2344,9 @@ function SettingsScreen({ctx}) {
                         ⚠ The deployed Apps Script did not report a version. Copy the latest Code.gs → save in Apps Script → Deploy → Manage deployments → Edit → New version.
                       </div>
                     )}
-                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v21' && (
+                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v22' && (
                       <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>
-                        Latest available is v21 — a redeploy is optional but recommended for the newest fixes.
+                        Latest available is v22 — a redeploy is optional but recommended for the newest fixes.
                       </div>
                     )}
                     {debugResult.discontinued && (
