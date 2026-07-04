@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v17';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v18';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -96,7 +96,7 @@ function doGet(e) {
       case 'ping':           result = handlePing();             break;
       case 'login':          result = handleLogin(p);           break;
       case 'stock':          result = handleStock();            break;
-      case 'priceList':      result = handlePriceList();        break;
+      case 'priceList':      result = handlePriceList(p);       break;
       case 'orders':         result = handleOrders(p);          break;
       case 'debugPriceList': result = handleDebugPriceList();   break;
       default:               result = { ok: false, error: 'Unknown action: ' + (p.action || '(none)') };
@@ -372,7 +372,16 @@ function handleStock() {
 // Reads ONLY the tabs listed in the 'Price_Lists' config sheet.
 // If Price_Lists sheet is missing or empty, returns a SETUP_NEEDED error
 // instead of guessing — prevents stock/admin sheets from being read as prices.
-function handlePriceList() {
+function handlePriceList(p) {
+  // Serve from the fast server-side cache unless the app asked for fresh data
+  // (manual "Sync" passes fresh=1). Cache is versioned so a redeploy busts it.
+  var wantFresh = p && (p.fresh === '1' || p.fresh === 'true' || p.fresh === 1);
+  var cacheKey  = 'pricelist_' + SCRIPT_VERSION;
+  if (!wantFresh) {
+    var hit = _cacheGet(cacheKey);
+    if (hit && hit.ok && hit.items && hit.items.length) { hit.cached = true; return hit; }
+  }
+
   var opsSS = _openOPS();
   if (!opsSS) return { ok: false, error: 'Cannot open OPS spreadsheet (ID: ' + OPS_SHEET_ID + '). Ensure the script owner has access.' };
 
@@ -450,7 +459,32 @@ function handlePriceList() {
 
   var result = { ok: true, scriptVersion: SCRIPT_VERSION, mode: usedFallback ? 'auto-scan' : 'config', items: all, counts: counts, totalTabs: Object.keys(counts).length };
   if (errors.length) result.tabErrors = errors;
+  _cachePut(cacheKey, result);   // speed up the next load
   return result;
+}
+
+// ─── Chunked script cache (values >100KB are split across keys) ──────────────
+function _cachePut(key, obj) {
+  try {
+    var cache = CacheService.getScriptCache();
+    var s = JSON.stringify(obj);
+    var size = 90000, n = Math.ceil(s.length / size), map = {};
+    for (var i = 0; i < n; i++) map[key + '_' + i] = s.substring(i * size, (i + 1) * size);
+    map[key + '_meta'] = JSON.stringify({ n: n });
+    cache.putAll(map, 3600);   // 1 hour
+  } catch (e) { /* cache is best-effort */ }
+}
+function _cacheGet(key) {
+  try {
+    var cache = CacheService.getScriptCache();
+    var meta  = cache.get(key + '_meta');
+    if (!meta) return null;
+    var n = JSON.parse(meta).n, keys = [];
+    for (var i = 0; i < n; i++) keys.push(key + '_' + i);
+    var parts = cache.getAll(keys), s = '';
+    for (var j = 0; j < n; j++) { var pc = parts[key + '_' + j]; if (pc === undefined || pc === null) return null; s += pc; }
+    return JSON.parse(s);
+  } catch (e) { return null; }
 }
 
 // Reads Price_Lists sheet. Expected columns: Tab Name | Category

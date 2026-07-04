@@ -161,16 +161,18 @@ async function apiPost(body) {
 // ═══════════════════════════════════════════════════════════
 const OPS_SHEET_ID = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 
-async function loadPriceListItems() {
+async function loadPriceListItems(forceFresh = false) {
   const CACHE_KEY = '4s_price_items_v9';
   const CACHE_TS  = '4s_price_items_v9_ts';
   const AGE_MS    = 6 * 60 * 60 * 1000; // 6 hours
 
-  // Serve from cache if fresh
-  const cached   = localStorage.getItem(CACHE_KEY);
-  const cachedAt = localStorage.getItem(CACHE_TS);
-  if (cached && cachedAt && Date.now() - Number(cachedAt) < AGE_MS) {
-    try { const p = JSON.parse(cached); if (p.length > 0) return p; } catch {}
+  // Serve from the local cache if fresh (skipped on a manual Sync)
+  if (!forceFresh) {
+    const cached   = localStorage.getItem(CACHE_KEY);
+    const cachedAt = localStorage.getItem(CACHE_TS);
+    if (cached && cachedAt && Date.now() - Number(cachedAt) < AGE_MS) {
+      try { const p = JSON.parse(cached); if (p.length > 0) return p; } catch {}
+    }
   }
 
   const apiUrl = getApiUrl();
@@ -178,32 +180,39 @@ async function loadPriceListItems() {
     throw new Error('NO_URL: No Apps Script URL saved. Go to Settings → paste your Apps Script URL → Save URL.');
   }
 
+  // On a manual sync, ask the server to bypass its cache too.
+  const params = forceFresh ? { fresh: '1' } : {};
   let res;
   try {
-    res = await apiGet('priceList', {}, 60000);
-  } catch (e) {
-    const msg = e.message || '';
-    if (msg.includes('timed out')) throw new Error('Request timed out (60s). The price sheet may be large or the script slow to wake — tap Sync to retry.');
-    throw new Error('Network error: ' + msg);
+    // One automatic retry so a slow cold-start doesn't surface as an error.
+    res = await apiGet('priceList', params, 60000);
+  } catch (e1) {
+    const m1 = e1.message || '';
+    if (m1.includes('timed out')) {
+      try { res = await apiGet('priceList', params, 60000); }
+      catch (e2) { throw new Error('Sync timed out twice — the sheet may be busy. Please tap Sync to retry.'); }
+    } else {
+      throw new Error('Network error: ' + m1);
+    }
   }
 
   if (!res || !res.ok) {
     const err   = (res && res.error)     || 'Unknown error from Apps Script';
     const code  = (res && res.errorCode) || '';
     if (code === 'SETUP_NEEDED') throw new Error('SETUP_NEEDED: ' + err);
+    // Only a genuine "Unknown action" means the deployed script is too old to
+    // handle this request — never guess "old version" just from a missing field,
+    // as that produced false "update Code.gs" alarms on perfectly good deploys.
     if (err.includes('Unknown action')) throw new Error('REDEPLOY_NEEDED: Apps Script is outdated. Go to Apps Script → paste the latest Code.gs → Save → Deploy → Manage deployments → Edit → New version → Deploy.');
+    if (/timed out|timeout/i.test(err)) throw new Error('Sync timed out — the sheet may be busy. Tap Sync to retry.');
     throw new Error('API_ERROR: ' + err);
   }
 
-  // Version gate: if scriptVersion is missing the new Code.gs is not deployed
-  if (!res.scriptVersion) {
-    throw new Error('REDEPLOY_NEEDED: Your Apps Script is running an old version that does not support Price_Lists config. Please:\n1. Open your Apps Script project\n2. Replace Code.gs with the latest version from the GitHub repo\n3. Save, then Deploy → Manage deployments → Edit → New version → Deploy');
-  }
-
+  // Any response with items is good — we do NOT gate on scriptVersion here.
   if (!Array.isArray(res.items) || res.items.length === 0) {
     const errs = res.tabErrors ? '\n\nTab errors:\n' + res.tabErrors.join('\n') : '';
-    throw new Error('SETUP_NEEDED: Price_Lists sheet is configured but 0 items were parsed.' + errs +
-      '\n\nCheck that each tab listed in Price_Lists has a valid header row (ITEM_CODE + DESCRIPTION, or LN CODE).');
+    throw new Error('SETUP_NEEDED: 0 items were read from the price sheet.' + errs +
+      '\n\nCheck that each price tab has a valid header row (ITEM_CODE + DESCRIPTION, or LN CODE).');
   }
 
   localStorage.setItem(CACHE_KEY, JSON.stringify(res.items));
@@ -797,18 +806,42 @@ function App() {
   const [loading,       setLoading]      = useState(false);
 
   const showToast = (msg,type='ok') => setToast({msg,type});
+
+  // ── Navigation with a real back-stack ─────────────────────────
+  // nav(s)   → remember where we were, then go to screen s
+  // back()   → return to the previous screen (also wired to the
+  //            hardware / browser back button)
+  const navStack = useRef([]);
   const nav = useCallback((s) => {
-    if (s !== 'home') window.history.pushState({screen:'home'}, '', '');
-    setScreen(s);
+    setScreen(prev => {
+      if (s !== prev) {
+        navStack.current.push(prev);
+        window.history.pushState({ screen: s }, '', '');
+      }
+      return s;
+    });
+  }, []);
+  const back = useCallback(() => {
+    // Route everything through the browser history so the on-screen and
+    // hardware back buttons behave identically.
+    window.history.back();
+  }, []);
+  const popScreen = useCallback(() => {
+    setScreen(prev => {
+      const st = navStack.current;
+      let target = st.length ? st.pop() : 'home';
+      // Never get stuck on auth screens after logging in
+      if (!target || target === prev || target === 'loading') target = 'home';
+      return target;
+    });
   }, []);
 
-  // Hardware / browser back button → always return to home
   useEffect(() => {
-    window.history.replaceState({screen:'home'}, '', '');
-    const handler = () => setScreen('home');
+    window.history.replaceState({ screen: 'home' }, '', '');
+    const handler = () => popScreen();
     window.addEventListener('popstate', handler);
     return () => window.removeEventListener('popstate', handler);
-  }, []);
+  }, [popScreen]);
 
   // Restore session
   useEffect(() => {
@@ -822,14 +855,15 @@ function App() {
     }
   }, []);
 
-  // Load stock + price list on login
+  // Load stock + price list on login (quietly — cached data shows instantly)
   useEffect(() => {
     if (!user) return;
     const cached = localStorage.getItem('4s_items');
     if (cached) try { setItems(JSON.parse(cached)); } catch {}
     const cachedPL = localStorage.getItem('4s_price_items_v9');
-    if (cachedPL) try { setPriceItems(JSON.parse(cachedPL)); } catch {}
-    syncStock();
+    let hadCachedPL = false;
+    if (cachedPL) try { const p = JSON.parse(cachedPL); setPriceItems(p); hadCachedPL = p.length > 0; } catch {}
+    syncStock({ silent: true });
     loadPriceListItems()
       .then(pi => {
         if (pi.length > 0) {
@@ -838,8 +872,29 @@ function App() {
           if (ts) setPriceSyncedAt(new Date(Number(ts)).toISOString());
         }
       })
-      .catch(e => showToast('Price list load failed: ' + e.message, 'bad'));
+      // If we already have cached prices, stay silent — no scary toast on a
+      // slow background refresh. Only surface an error when there's nothing to show.
+      .catch(e => { if (!hadCachedPL) setPriceSyncError(e.message); });
   }, [user]);
+
+  // Restore an unsaved order draft once, right after login
+  useEffect(() => {
+    if (!user) return;
+    try {
+      const d = localStorage.getItem('4s_draft');
+      if (d) { const o = JSON.parse(d); if (!o.no && ((o.items&&o.items.length) || o.customer)) setOrder(o); }
+    } catch {}
+  }, [user]);
+
+  // Keep the working order backed up so a reload/crash never loses a booking
+  useEffect(() => {
+    if (!user) return;
+    try {
+      if (order.no) localStorage.removeItem('4s_draft');            // saved → no longer a draft
+      else if ((order.items&&order.items.length) || order.customer) localStorage.setItem('4s_draft', JSON.stringify(order));
+      else localStorage.removeItem('4s_draft');
+    } catch {}
+  }, [order, user]);
 
   // Handle deep-link action from PWA shortcut (?action=...)
   useEffect(() => {
@@ -849,20 +904,27 @@ function App() {
     if (action === 'history' && user) nav('history');
   }, [user]);
 
-  async function syncStock() {
+  async function syncStock(opts) {
+    const silent = opts && opts.silent;
     setLoading(true);
     try {
-      const res = await apiGet('stock', {}, 60000);
+      // One retry so a slow cold-start doesn't surface as a sync error.
+      let res;
+      try { res = await apiGet('stock', {}, 60000); }
+      catch (e1) {
+        if ((e1.message||'').includes('timed out')) res = await apiGet('stock', {}, 60000);
+        else throw e1;
+      }
       if (res.ok) {
         setItems(res.items);
         setSyncedAt(res.syncedAt || new Date().toISOString());
         localStorage.setItem('4s_items', JSON.stringify(res.items));
-        showToast(res.items.length + ' items synced ✓');
-      } else {
-        showToast(res.error || 'Sync failed — check sheet data', 'bad');
+        if (!silent) showToast(res.items.length + ' items synced ✓');
+      } else if (!silent) {
+        showToast(res.error || 'Stock sync failed — check the Stock tab', 'bad');
       }
     } catch(e) {
-      showToast('Sync failed: ' + e.message, 'bad');
+      if (!silent) showToast('Stock sync failed: ' + e.message, 'bad');
     } finally {
       setLoading(false);
     }
@@ -874,7 +936,7 @@ function App() {
     setPriceSyncError(null);
     setLoading(true);
     try {
-      const pi = await loadPriceListItems();
+      const pi = await loadPriceListItems(true);   // force fresh from the sheet
       setPriceItems(pi);
       setPriceSyncedAt(new Date().toISOString());
       localStorage.setItem('4s_price_items_v9_ts', String(Date.now()));
@@ -955,7 +1017,7 @@ function App() {
     nav('login');
   }
 
-  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, doLogin, doSaveOrder, doUpdateWON, doSignOut, syncStock, syncPriceList, loadOrders };
+  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, back, doLogin, doSaveOrder, doUpdateWON, doSignOut, syncStock, syncPriceList, loadOrders };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -1199,10 +1261,10 @@ function HomeScreen({ctx}) {
 
 // ─── Stock Search ────────────────────────────────────────────
 function SearchScreen({ctx}) {
-  const {items, priceItems, syncedAt, priceSyncedAt, nav, order, setOrder, syncPriceList, loading} = ctx;
+  const {items, priceItems, syncedAt, priceSyncedAt, nav, back, order, setOrder, syncPriceList, loading} = ctx;
   const [q,   setQ]   = useState('');
   const [cat, setCat] = useState('all');
-  const [addMode]     = useState(!!order.items);
+  const cartCount = (order.items||[]).reduce((s,i)=>s+(i.qty||0),0);
 
   const hasPriceList = priceItems && priceItems.length > 0;
   const {priceSyncError} = ctx;
@@ -1269,17 +1331,20 @@ function SearchScreen({ctx}) {
     <div className="screen">
       <div style={{flexShrink:0}}>
         <StockRibbon syncedAt={syncedAt}/>
-        <div style={{padding:'14px 18px 8px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-          <div>
-            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>
-              {hasPriceList
-                ? <>PRICE LIST · {allItems.length} SKUs {priceSyncedAt&&<span style={{color:T.ok}}>· synced {new Date(priceSyncedAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}</span>}</>
-                : <span style={{color:T.warn,fontWeight:700}}>PRICE LIST NOT LOADED</span>}
+        <div style={{padding:'14px 18px 8px',display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+          <div style={{display:'flex',alignItems:'center',gap:10,minWidth:0}}>
+            <button onClick={back} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.back()}</button>
+            <div style={{minWidth:0}}>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>
+                {hasPriceList
+                  ? <>PRICE LIST · {allItems.length} SKUs {priceSyncedAt&&<span style={{color:T.ok}}>· synced {new Date(priceSyncedAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}</span>}</>
+                  : <span style={{color:T.warn,fontWeight:700}}>PRICE LIST NOT LOADED</span>}
+              </div>
+              <div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2}}>{cartCount>0?'Add item':'Search items'}</div>
             </div>
-            <div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2}}>{addMode&&order.customer?'Add item':'Search items'}</div>
           </div>
-          <div style={{display:'flex',gap:8,alignItems:'center'}}>
-            {addMode&&order.customer&&<Btn size="sm" onClick={()=>nav('order')} icon={Icon.back()}>Order</Btn>}
+          <div style={{display:'flex',gap:8,alignItems:'center',flexShrink:0}}>
+            {cartCount>0&&<Btn size="sm" primary onClick={()=>nav('order')} icon={Icon.doc('#fff',15)}>Order · {cartCount}</Btn>}
           </div>
         </div>
 
@@ -1459,6 +1524,15 @@ function SearchScreen({ctx}) {
         )}
         <div style={{height:8}}/>
       </div>
+      {cartCount>0&&(
+        <div onClick={()=>nav('order')} style={{flexShrink:0,display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'12px 16px',background:T.green,color:'#fff',cursor:'pointer'}}>
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            {Icon.doc('#fff',18)}
+            <span style={{fontSize:14,fontWeight:700}}>{cartCount} item{cartCount>1?'s':''} in this order</span>
+          </div>
+          <span style={{fontSize:13,fontWeight:700,display:'flex',alignItems:'center',gap:4}}>Continue booking →</span>
+        </div>
+      )}
       <BottomNav screen="search" nav={nav}/>
     </div>
   );
@@ -1466,7 +1540,7 @@ function SearchScreen({ctx}) {
 
 // ─── Order Form ──────────────────────────────────────────────
 function OrderFormScreen({ctx}) {
-  const {order,setOrder,nav,user,doSaveOrder} = ctx;
+  const {order,setOrder,nav,back,user,doSaveOrder} = ctx;
   const o = order;
   const setF = (k,v) => setOrder(prev=>({...prev,[k]:v}));
   const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, balance} = orderTotals(o);
@@ -1495,7 +1569,7 @@ function OrderFormScreen({ctx}) {
     <div className="screen">
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,flexShrink:0}}>
         <div style={{display:'flex',alignItems:'center',gap:10}}>
-          <button onClick={()=>nav('home')} style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+          <button onClick={back} style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
           <div>
             <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>New order</div>
             <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono}}>DRAFT{o.no?' · '+o.no:''}</div>
@@ -1619,7 +1693,7 @@ function OrderFormScreen({ctx}) {
         </div>
       </div>
       <div style={{display:'flex',gap:8,padding:'10px 14px',background:'#fff',borderTop:`1px solid ${T.line}`,flexShrink:0}}>
-        <Btn onClick={()=>nav('home')}>Discard</Btn>
+        <Btn onClick={()=>{ if((o.items&&o.items.length)&&!window.confirm('Discard this order and its items?'))return; try{localStorage.removeItem('4s_draft');}catch{} setOrder(BLANK_ORDER()); nav('home'); }}>Discard</Btn>
         <Btn primary full onClick={handleSave}>Save & Generate PDF →</Btn>
       </div>
     </div>
@@ -1980,13 +2054,18 @@ function SettingsScreen({ctx}) {
                   <>
                     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
                       <div style={{fontSize:11,fontWeight:700,color:T.green}}>OPS: {debugResult.opsName}</div>
-                      <span style={{fontSize:9,fontFamily:T.mono,background:debugResult.scriptVersion==='v17'?T.okSoft:T.badSoft,color:debugResult.scriptVersion==='v17'?T.ok:T.bad,padding:'2px 6px',borderRadius:3,fontWeight:700}}>
+                      <span style={{fontSize:9,fontFamily:T.mono,background:debugResult.scriptVersion?T.okSoft:T.badSoft,color:debugResult.scriptVersion?T.ok:T.bad,padding:'2px 6px',borderRadius:3,fontWeight:700}}>
                         API {debugResult.scriptVersion||'OLD — REDEPLOY!'}
                       </span>
                     </div>
-                    {debugResult.scriptVersion !== 'v17' && (
+                    {!debugResult.scriptVersion && (
                       <div style={{fontSize:11,color:T.bad,marginBottom:8,padding:'6px 8px',background:T.badSoft,borderRadius:4}}>
-                        ⚠ Old Code.gs detected. Copy the latest Code.gs from GitHub → save in Apps Script → Deploy → New version.
+                        ⚠ The deployed Apps Script did not report a version. Copy the latest Code.gs → save in Apps Script → Deploy → Manage deployments → Edit → New version.
+                      </div>
+                    )}
+                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v18' && (
+                      <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>
+                        Latest available is v18 — a redeploy is optional but recommended for the newest fixes.
                       </div>
                     )}
                     <div style={{fontSize:10,fontWeight:700,color:T.ink4,marginBottom:4}}>
