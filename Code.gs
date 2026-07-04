@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v23';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v24';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -113,9 +113,10 @@ function doPost(e) {
   var result;
   try {
     switch (body.action || '') {
-      case 'saveOrder':  result = handleSaveOrder(body.order); break;
-      case 'updateWON':  result = handleUpdateWON(body);       break;
-      default:           result = { ok: false, error: 'Unknown action: ' + body.action };
+      case 'saveOrder':       result = handleSaveOrder(body.order);   break;
+      case 'updateWON':       result = handleUpdateWON(body);         break;
+      case 'updateDelivery':  result = handleUpdateDelivery(body);    break;
+      default:                result = { ok: false, error: 'Unknown action: ' + body.action };
     }
   } catch(err) {
     result = { ok: false, error: err.message };
@@ -820,6 +821,7 @@ function handleOrders(p) {
   var cDate    = colOf(CRM_H.DATE);
   var cSales   = colOf(CRM_H.SALES);
   var cAmt     = colOf(CRM_H.AMOUNT);
+  var cDeliv   = colOf(CRM_H.DELIVERY);
 
   var lastRow = sh.getLastRow();
   var data    = lastRow >= 2 ? sh.getRange(2, 1, lastRow - 1, ncol).getValues() : [];
@@ -844,6 +846,7 @@ function handleOrders(p) {
         phone:      ph,
         date:       cDate  >= 0 ? String(r[cDate]  || '') : '',
         salesExec:  cSales >= 0 ? String(r[cSales] || '') : '',
+        deliveryStatus: '',
         amt:        0,
         _row:       i,
       };
@@ -853,6 +856,7 @@ function handleOrders(p) {
     m.amt += cAmt >= 0 ? (Number(r[cAmt]) || 0) : 0;
     m._row = i;   // remember the order's last row → sort newest-first
     if (cWon >= 0) { var w = String(r[cWon] || '').trim(); if (w) m.won = w; }
+    if (cDeliv >= 0) { var dv = String(r[cDeliv] || '').trim(); if (dv) m.deliveryStatus = dv; }
   }
 
   var orders = keys.map(function(k){ return map[k]; })
@@ -864,10 +868,14 @@ function handleOrders(p) {
     })
     .sort(function(a,b){ return b._row - a._row; })
     .map(function(m){
+      var delivered = /deliver/i.test(m.deliveryStatus);
       return {
         no: m.no, internalNo: m.internalNo, won: m.won,
         customer: m.customer, phone: m.phone, date: m.date,
-        amt: m.amt, status: m.won ? 'billed' : 'pending-won', salesExec: m.salesExec,
+        amt: m.amt,
+        deliveryStatus: m.deliveryStatus || 'Pending',
+        status: delivered ? 'delivered' : (m.won ? 'billed' : 'pending-won'),
+        salesExec: m.salesExec,
       };
     });
 
@@ -919,6 +927,7 @@ var CRM_H = {
   CUSTOMER: ['CUSTOMER NAME'],
   SALES:    ['SALES PERSON'],
   AMOUNT:   ['ORDER AMOUNT (WITH TAX AND AFTER DISC )', 'ORDER AMOUNT (WITH TAX AND AFTER DISC)'],
+  DELIVERY: ['DELIVERY REMARKS(DELIVERED/PENDING)', 'DELIVERY REMARKS', 'DELIVERY STATUS'],
 };
 
 // Parse a "dd.mm.yy" / "dd.mm.yyyy" ORDER DATE string → Date (or null).
@@ -1150,6 +1159,47 @@ function handleUpdateWON(body) {
   }
   if (!updated) return { ok: false, error: 'Order not found: ' + orderNo };
   _appendLog(updatedBy, orderNo, 'UPDATE_WON', 'WON: ' + won);
+  return { ok: true, rows: updated };
+}
+
+// ─── UPDATE DELIVERY STATUS ────────────────────────────────────────────────────
+// Sets the "DELIVERY REMARKS(DELIVERED/PENDING)" column for every row of an order.
+// Called by the salesperson once an order has physically been delivered.
+function handleUpdateDelivery(body) {
+  var orderNo    = String(body.orderNo    || '').trim();
+  var internalNo = Number(body.internalNo || 0);
+  var status     = String(body.deliveryStatus || body.status || '').trim();
+  var updatedBy  = String(body.updatedBy  || '');
+  if (!status) return { ok: false, error: 'Delivery status is required.' };
+
+  var sh;
+  try { sh = _openCRMSheet(); }
+  catch (e) { return { ok: false, error: e.message }; }
+
+  var C     = _crmCols(sh);
+  var colOf = C.colOf;
+  var ncol  = C.header.length;
+
+  var cOrderNo = colOf(CRM_H.ORDER_NO);
+  var cIntNo   = colOf(CRM_H.INT_NO);
+  var cDeliv   = colOf(CRM_H.DELIVERY);
+  if (cDeliv < 0) return { ok: false, error: 'No "Delivery Remarks" column found in the CRM sheet.' };
+
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return { ok: false, error: 'Order not found: ' + orderNo };
+  var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
+
+  var updated = 0;
+  for (var i = 0; i < data.length; i++) {
+    var matchOrder = cOrderNo >= 0 && orderNo    && String(data[i][cOrderNo] || '').trim() === orderNo;
+    var matchInt   = cIntNo   >= 0 && internalNo && Number(data[i][cIntNo]) === internalNo;
+    if (matchOrder || matchInt) {
+      sh.getRange(i + 2, cDeliv + 1).setValue(status);
+      updated++;
+    }
+  }
+  if (!updated) return { ok: false, error: 'Order not found: ' + orderNo };
+  _appendLog(updatedBy, orderNo, 'UPDATE_DELIVERY', 'Delivery: ' + status);
   return { ok: true, rows: updated };
 }
 
