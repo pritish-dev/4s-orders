@@ -1,0 +1,73 @@
+name: Deploy Apps Script backend
+
+# Pushes Code.gs to the Google Apps Script project and re-deploys the existing
+# web app (keeping the same /exec URL) whenever the backend changes on master.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   CLASPRC_JSON               Contents of your local ~/.clasprc.json after `clasp login`
+#   APPS_SCRIPT_ID             The script ID of the Apps Script project
+#   APPS_SCRIPT_DEPLOYMENT_ID  The deployment ID of the live web app (to keep the same URL)
+#
+# See APPS_SCRIPT_DEPLOY.md for the full one-time setup.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'Code.gs'
+      - 'appsscript.json'
+      - '.github/workflows/deploy-appsscript.yml'
+  workflow_dispatch: {}
+
+# Never let two deploys race each other.
+concurrency:
+  group: appsscript-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install clasp
+        run: npm install -g @google/clasp@2.4.2
+
+      - name: Write clasp credentials
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          if [ -z "$CLASPRC_JSON" ]; then
+            echo "::error::CLASPRC_JSON secret is not set. See APPS_SCRIPT_DEPLOY.md."
+            exit 1
+          fi
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+
+      - name: Write .clasp.json
+        env:
+          APPS_SCRIPT_ID: ${{ secrets.APPS_SCRIPT_ID }}
+        run: |
+          if [ -z "$APPS_SCRIPT_ID" ]; then
+            echo "::error::APPS_SCRIPT_ID secret is not set. See APPS_SCRIPT_DEPLOY.md."
+            exit 1
+          fi
+          printf '{ "scriptId": "%s", "rootDir": "." }\n' "$APPS_SCRIPT_ID" > .clasp.json
+
+      - name: Push code to Apps Script (updates the editor / HEAD)
+        run: clasp push --force
+
+      - name: Re-deploy the live web app (keeps the same /exec URL)
+        env:
+          DEPLOYMENT_ID: ${{ secrets.APPS_SCRIPT_DEPLOYMENT_ID }}
+        run: |
+          if [ -z "$DEPLOYMENT_ID" ]; then
+            echo "::error::APPS_SCRIPT_DEPLOYMENT_ID secret is not set — code was pushed but the live /exec URL was NOT updated. See APPS_SCRIPT_DEPLOY.md."
+            exit 1
+          fi
+          clasp deploy --deploymentId "$DEPLOYMENT_ID" --description "CI deploy ${GITHUB_SHA}"
