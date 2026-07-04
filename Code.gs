@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v20';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v21';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -212,6 +212,7 @@ function _loginWithCreds(sh, username, password) {
   var cPass  = _hdrIdx(hdr, ['password']);
   var cHash  = _hdrIdx(hdr, ['password_hash', 'passwordhash', 'hash']);
   var cActive = _hdrIdx(hdr, ['active', 'status', 'enabled']);
+  var cRole  = _hdrIdx(hdr, ['role', 'user role', 'access', 'access level', 'designation']);
 
   // Positional defaults if headers not recognised
   if (cName   < 0) cName   = 0;
@@ -219,6 +220,7 @@ function _loginWithCreds(sh, username, password) {
   if (cPass   < 0) cPass   = 2;
   if (cHash   < 0) cHash   = 3;
   if (cActive < 0) cActive = 4;
+  // cRole has NO positional default — if there's no Role column, everyone is 'sales'.
 
   for (var i = 1; i < rows.length; i++) {
     var r           = rows[i];
@@ -251,12 +253,13 @@ function _loginWithCreds(sh, username, password) {
     }
 
     if (matched) {
+      var roleVal = (cRole >= 0 && cRole < r.length) ? String(r[cRole] || '').trim() : '';
       return {
         ok:   true,
         user: {
           name:   nameVal || username,
           code:   rowUser,
-          role:   'sales',
+          role:   _normRole(roleVal),
           branch: 'Patia',
         },
       };
@@ -283,12 +286,22 @@ function _loginWithStaff(sh, username, password) {
       user: {
         name:   String(r[COL_USR.NAME] || ''),
         code:   String(r[COL_USR.CODE] || ''),
-        role:   String(r[COL_USR.ROLE] || 'sales'),
+        role:   _normRole(r[COL_USR.ROLE]),
         branch: 'Patia',
       },
     };
   }
   return null;
+}
+
+// Normalise a raw role cell to one of: 'sales' | 'manager' | 'admin'.
+// Anything unrecognised (or blank) falls back to 'sales' — the least-privileged
+// role — so a typo in the sheet can never accidentally grant elevated access.
+function _normRole(raw) {
+  var r = String(raw || '').toLowerCase().trim();
+  if (r === 'admin' || r === 'administrator' || r === 'owner') return 'admin';
+  if (r === 'manager' || r === 'mgr' || r === 'store manager') return 'manager';
+  return 'sales';
 }
 
 // MD5 hex digest using Apps Script Utilities
@@ -978,6 +991,23 @@ function _appendOrderToCRM(o, orderNo, internalNo, orderDateStr) {
     put(['STAIRCASE LANDING HEIGHT', 'STAIR CASE LANDING HEIGHT'], o.staircaseLandingHeight || '');
     put(['CUSTOMER HOUSE ENTRY DOOR WIDTH', 'ENTRY DOOR WIDTH'], o.entryDoorWidth || '');
     put(['CUSTOMER HOUSE ENTRY DOOR HEIGHT', 'ENTRY DOOR HEIGHT'], o.entryDoorHeight || '');
+
+    // ── Extra fields captured by the app (write only if the column exists).
+    //    Add these headers to the CRM sheet to capture them.
+    put(['ORDER TYPE', 'B2C/B2B', 'ORDER CATEGORY'], o.orderType || 'B2C');
+    put(['LEAD SOURCE'], o.awareness || '');            // renamed field — alias of "How did they come to know…"
+    put(['CUSTOMER GST NO', 'CUSTOMER GSTIN', 'GST NO', 'GSTIN'], o.gstNumber || '');
+    put(['ALT PHONE', 'ALTERNATE PHONE', 'ALT CONTACT NUMBER', 'ALTERNATE CONTACT NUMBER'], o.alt || '');
+    put(['BILLING ADDRESS'], o.billing || '');
+    put(['DELIVERY ADDRESS'], o.delivery || '');
+    put(['LIFT AVAILABLE', 'LIFT AVAILABLE?'], o.liftAvailable || '');
+    put(['ORDER DISCOUNT %', 'ADDITIONAL ORDER DISCOUNT %', 'ORDER DISCOUNT'], o.orderDiscount ? (o.orderDiscount + '%') : '');
+    put(['ITEM DISCOUNT %', 'PER ITEM DISCOUNT %', 'ITEM DISC %'], (parseFloat(it.disc) || 0) ? (parseFloat(it.disc) + '%') : '');
+    put(['PAYMENT MODE'], o.paymentMode || '');
+    put(['FOLLOW-UP DATE', 'FOLLOW UP DATE', 'FOLLOWUP DATE'], o.followUp || '');
+    put(['SPECIFIC INSTRUCTION', 'INSTALLATION NOTE', 'INSTALL NOTE'], o.installNote || '');
+    put(['RECEIPT NO', 'RECEIPT NO.', 'RECEIPT NO & DATE'], o.receiptNo || '');
+    put(['DISCOUNT CODE'], o.discountCode || '');
 
     out.push(row);
   }

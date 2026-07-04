@@ -371,6 +371,19 @@ function orderTotals(o) {
   return { itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance };
 }
 
+// ─── ROLE-BASED ACCESS ──────────────────────────────────────
+// Sales = base access. Manager / Admin unlock extra, sensitive
+// detail (cost price, margins, …). Gate any privileged UI behind
+// hasManagerAccess(user); everything else stays visible to all.
+const PRIVILEGED_ROLES = ['manager','admin'];
+function normRole(role) {
+  const r = String(role||'sales').toLowerCase().trim();
+  return PRIVILEGED_ROLES.indexOf(r) >= 0 ? r : (r === 'sales' ? 'sales' : r || 'sales');
+}
+function hasManagerAccess(user) {
+  return PRIVILEGED_ROLES.indexOf(normRole(user && user.role)) >= 0;
+}
+
 // ═══════════════════════════════════════════════════════════
 // ICONS (SVG)
 // ═══════════════════════════════════════════════════════════
@@ -552,13 +565,14 @@ function generatePDF(order) {
   // the Unicode rupee glyph (U+20B9) produces wrong metrics and overflows.
   const inr = (n) => 'Rs.' + n.toLocaleString('en-IN');
 
-  // Items table columns (adds a per-item Disc column)
+  // Items table columns (MRP → per-item Disc → discounted price → total)
   const tC = {
     code:{ x:ml,          w:22, t:'Item Code' },
     qty: { x:ml+22,       w:10, t:'Qty' },
-    desc:{ x:ml+32,       w:cw-32-26-16-24, t:'Product Description' },
-    cpl: { x:ml+cw-66,    w:26, t:'Unit Price' },
-    disc:{ x:ml+cw-40,    w:16, t:'Disc' },
+    desc:{ x:ml+32,       w:cw-32-22-14-26-24, t:'Product Description' },
+    mrp: { x:ml+cw-86,    w:22, t:'MRP' },
+    disc:{ x:ml+cw-64,    w:14, t:'Disc' },
+    cpl: { x:ml+cw-50,    w:26, t:'Disc. Price' },
     tot: { x:ml+cw-24,    w:24, t:'Total (Rs.)' },
   };
   const thH = 8;    // items header height
@@ -680,7 +694,10 @@ function generatePDF(order) {
     doc.splitTextToSize(order.installNote||'',lw5-4).slice(0,4).forEach((ln,i)=>doc.text(ln,ml+2,y+11+i*4));
     vln(rx5+rw5*0.5,y+7,y+siH);
     const r5=(l,v,ry)=>{ hln(rx5,y+ry,rx5+rw5); lbl(rx5+2,y+ry-5.5,l); val(rx5+rw5*0.5+2,y+ry-1.5,fit1(v,rw5*0.48,8.5),8.5,true); };
-    r5('Discount Code',        order.discountCode||'', 14);
+    // Discount Code — manual code plus every distinct per-item discount, comma separated
+    const perItemDiscs = [...new Set((order.items||[]).map(it=>parseFloat(it.disc)||0).filter(d=>d>0).map(d=>d+'%'))];
+    const discCodeDisplay = [order.discountCode, perItemDiscs.join(', ')].filter(Boolean).join(' · ');
+    r5('Discount Code',        discCodeDisplay,        14);
     r5('Planned Dly Schedule', order.plannedDly||'',   21);
     r5('Reference no.',        order.poRef||'',        siH);
     y += siH;
@@ -749,13 +766,18 @@ function generatePDF(order) {
     const nm = doc.splitTextToSize(it.name||'', tC.desc.w-2);
     doc.text(nm[0]||'', tC.desc.x+1.5, y+4.5);
     if(nm[1]){ doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...GR); doc.text(nm[1], tC.desc.x+1.5, y+9); }
-    doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...INK);
-    const cplV = it.unitPrice>0?it.unitPrice:(it.mrp||it.cpl||0);
-    rval(tC.cpl.x+tC.cpl.w-1.5, y+7, cplV>0?cplV.toLocaleString('en-IN'):'—');
-    // Disc — per-item discount %
+    // MRP — the (possibly edited) list price per unit
+    const mrpV = it.mrp||it.cpl||0;
     const dPct = parseFloat(it.disc)||0;
+    // Disc. Price — MRP after the per-item discount
+    const cplV = it.unitPrice>0?it.unitPrice:(mrpV>0?Math.round(mrpV*(1-dPct/100)):0);
+    doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...INK);
+    rval(tC.mrp.x+tC.mrp.w-1.5, y+7, mrpV>0?mrpV.toLocaleString('en-IN'):'—');
+    // Disc — per-item discount %
     doc.setFontSize(7.5); doc.setTextColor(...(dPct>0?DRED:GR));
     doc.text(dPct>0?dPct+'%':'—', tC.disc.x+tC.disc.w/2, y+7, {align:'center'});
+    doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...INK);
+    rval(tC.cpl.x+tC.cpl.w-1.5, y+7, cplV>0?cplV.toLocaleString('en-IN'):'—');
     doc.setFont('helvetica','bold'); doc.setTextColor(...INK);
     rval(tC.tot.x+tC.tot.w-1.5, y+7, (it.total||0).toLocaleString('en-IN'));
     return y + rH;
@@ -902,8 +924,8 @@ const { useState, useEffect, useRef, useCallback } = React;
 const BLANK_ORDER = () => ({
   no:'', customer:'', phone:'', alt:'', email:'',
   gstNumber:'',
-  billing:'', delivery:'', liftAvailable:'Yes',
-  customerCode:'', poRef:'', source:'Walk-in',
+  billing:'', delivery:'', liftAvailable:'',
+  customerCode:'', poRef:'', source:'',
   discountCode:'', orderDiscount:'', plannedDly:'', installNote:'',
   paymentMode:'', earnest:'', receiptNo:'',
   followUp:'', salesExec:'', won:'',
@@ -1338,7 +1360,9 @@ function HomeScreen({ctx}) {
         <div style={{padding:'14px 18px 6px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
           <div>
             <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>{new Date().toLocaleDateString('en-IN',{weekday:'short',day:'2-digit',month:'short'}).toUpperCase()}</div>
-            <div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2}}>Hi, {user?.name||'there'}</div>
+            <div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2,display:'flex',alignItems:'center',gap:8}}>Hi, {user?.name||'there'}
+              {hasManagerAccess(user)&&<span style={{fontSize:9,fontWeight:800,letterSpacing:.6,color:'#fff',background:T.ink,padding:'2px 7px',borderRadius:99,textTransform:'uppercase'}}>{normRole(user?.role)}</span>}
+            </div>
           </div>
           <div style={{width:42,height:42,borderRadius:6,background:T.green,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:T.mono,fontSize:16,fontWeight:700}}>{(user?.name||'?').slice(0,2).toUpperCase()}</div>
         </div>
@@ -1696,6 +1720,11 @@ function OrderFormScreen({ctx}) {
   const setF = (k,v) => setOrder(prev=>({...prev,[k]:v}));
   const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, balance} = orderTotals(o);
 
+  // Manager / Admin see cost + margin; Sales does not.
+  const priv        = hasManagerAccess(user);
+  const totalCost   = (o.items||[]).reduce((s,it)=>s+((Number(it.cpl)||Number(it.mrp)||0)*(it.qty||0)),0);
+  const totalMargin = itemsSubtotal - totalCost;
+
   // A sofa in the cart makes the sofa measurements mandatory
   const hasSofa = (o.items||[]).some(it => /sofa/i.test((it.name||'')+' '+(it.cat||'')+' '+(it.item||'')));
   const AWARENESS  = ['Social Media','Whatsapp','Newspaper','Friends & Relatives','Website','Others'];
@@ -1718,16 +1747,19 @@ function OrderFormScreen({ctx}) {
   async function handleSave() {
     if(!o.customer) return ctx.showToast('Customer name is required','bad');
     if(!o.phone)    return ctx.showToast('Phone number is required','bad');
+    if(!o.email)    return ctx.showToast('E-mail is required','bad');
+    if(!o.liftAvailable) return ctx.showToast('Select whether a lift is available','bad');
     if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item','bad');
     // Mandatory customer-profiling fields
     if(!o.dob)          return ctx.showToast('Date of Birth is required','bad');
     if(!o.anniversary)  return ctx.showToast('Marriage Anniversary is required','bad');
-    if(!o.awareness)    return ctx.showToast('Select how they came to know about the showroom','bad');
+    if(!o.awareness)    return ctx.showToast('Select the Lead Source','bad');
     if(!o.purchasePattern||o.purchasePattern.length===0) return ctx.showToast('Select the purchase pattern','bad');
     if(!o.purchasingFor) return ctx.showToast('Select what they are purchasing for','bad');
     // Sofa measurements are mandatory only when a sofa is in the order
     if(hasSofa && (!o.sofaWidth||!o.sofaHeight||!o.sofaDepth)) return ctx.showToast('Enter Sofa width, height & depth (mandatory for sofas)','bad');
-    const saved = await doSaveOrder({...o,salesExec:o.salesExec||user?.name||''});
+    // Lead Source is now the awareness dropdown — keep the OPS "Source" column in sync
+    const saved = await doSaveOrder({...o,salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||''});
     if(saved) { setOrder(saved); nav('pdf'); }
   }
 
@@ -1749,25 +1781,17 @@ function OrderFormScreen({ctx}) {
         <Field label="Customer Name" value={o.customer} onChange={v=>setF('customer',v)} required/>
         <Field label="Phone" value={o.phone} onChange={v=>setF('phone',v)} mono required type="tel" action="CALL" onAction={()=>o.phone&&window.open('tel:'+o.phone)}/>
         <Field label="Alt. Phone" value={o.alt} onChange={v=>setF('alt',v)} mono type="tel"/>
-        <Field label="E-mail" value={o.email} onChange={v=>setF('email',v)} type="email" hint="Optional · for digital copy"/>
+        <Field label="E-mail" value={o.email} onChange={v=>setF('email',v)} type="email" required hint="Mandatory · digital copy is sent here"/>
         <Field label="Customer GST No." value={o.gstNumber} onChange={v=>setF('gstNumber',v.toUpperCase())} mono hint="Fill only if the customer wants a GST bill · printed on the PDF"/>
-        <Field label="P.O. Reference" value={o.poRef} onChange={v=>setF('poRef',v)} mono hint="Leave blank — auto-assigned on save"/>
-        <Field label="Lead Source" value={o.source} onChange={v=>setF('source',v)} hint="Walk-in / Reference / Digital / Repeat"/>
-        <SectionHead n="02" label="Address"/>
-        <Field label="Billing Address" value={o.billing} onChange={v=>setF('billing',v)} multiline required/>
-        <Field label="Delivery Address" value={o.delivery} onChange={v=>setF('delivery',v)} multiline action="SAME AS BILLING" onAction={()=>setF('delivery',o.billing)}/>
-        <Field label="Lift available?" value={o.liftAvailable} onChange={v=>setF('liftAvailable',v)} hint="If No — installation handling fee applies"/>
-
-        <SectionHead n="03" label="Customer Profile"/>
-        <Field label="Date of Birth" value={o.dob} onChange={v=>setF('dob',v)} type="date" mono required/>
-        <Field label="Marriage Anniversary" value={o.anniversary} onChange={v=>setF('anniversary',v)} type="date" mono required/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
-          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>How did they hear about us? <span style={{color:T.bad,marginLeft:3}}>*</span></div>
+          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Lead Source <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <select value={o.awareness} onChange={e=>setF('awareness',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.awareness?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
             <option value="">Select an option…</option>
             {AWARENESS.map(a=><option key={a}>{a}</option>)}
           </select>
         </div>
+        <Field label="Date of Birth" value={o.dob} onChange={v=>setF('dob',v)} type="date" mono required/>
+        <Field label="Marriage Anniversary" value={o.anniversary} onChange={v=>setF('anniversary',v)} type="date" mono required/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:8}}>Purchase Pattern <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
@@ -1787,7 +1811,19 @@ function OrderFormScreen({ctx}) {
           </select>
         </div>
 
-        <SectionHead n="04" label="Site Measurements"/>
+        <SectionHead n="02" label="Address"/>
+        <Field label="Billing Address" value={o.billing} onChange={v=>setF('billing',v)} multiline required/>
+        <Field label="Delivery Address" value={o.delivery} onChange={v=>setF('delivery',v)} multiline action="SAME AS BILLING" onAction={()=>setF('delivery',o.billing)}/>
+        <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Lift available? <span style={{color:T.bad,marginLeft:3}}>*</span></div>
+          <select value={o.liftAvailable} onChange={e=>setF('liftAvailable',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.liftAvailable?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+            <option value="">Select an option…</option>
+            <option>Yes</option>
+            <option>No</option>
+          </select>
+        </div>
+
+        <SectionHead n="03" label="Site Measurements"/>
         {hasSofa && (
           <>
             <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Sofa in order — width, height & depth are mandatory (printed on the PDF)</div>
@@ -1807,7 +1843,7 @@ function OrderFormScreen({ctx}) {
         <Field label="Entry Door Width" value={o.entryDoorWidth} onChange={v=>setF('entryDoorWidth',v)} mono/>
         <Field label="Entry Door Height" value={o.entryDoorHeight} onChange={v=>setF('entryDoorHeight',v)} mono/>
 
-        <SectionHead n="05" label={`Items · ${(o.items||[]).length}`} action="+ ADD ITEM" onAction={()=>nav('search')}/>
+        <SectionHead n="04" label={`Items · ${(o.items||[]).length}`} action="+ ADD ITEM" onAction={()=>nav('search')}/>
         <div style={{background:'#fff'}}>
           {(o.items||[]).map((it,i)=>{
             const mrpVal   = it.mrp||it.cpl||0;
@@ -1824,7 +1860,10 @@ function OrderFormScreen({ctx}) {
                     {it.discontinued&&<Pill tone="bad" size="sm">DISCONTINUED{it.discSince?' since '+it.discSince:''}</Pill>}
                   </div>
                   <div style={{fontSize:13,fontWeight:600,lineHeight:1.3}}>{it.name}</div>
-                  {mrpVal>0&&<div style={{fontSize:10,color:T.ink4,marginTop:2}}>MRP: ₹{mrpVal.toLocaleString('en-IN')} /unit</div>}
+                  {discPct>0&&curPrice>0&&<div style={{fontSize:10,color:T.green,marginTop:2,fontWeight:700}}>Disc. price: ₹{curPrice.toLocaleString('en-IN')} /unit</div>}
+                  {priv&&(()=>{const cplU=Number(it.cpl)||Number(it.mrp)||0;const m=curPrice-cplU;const mp=cplU>0?Math.round(m/cplU*100):0;return(
+                    <div style={{fontSize:10,color:T.ink4,marginTop:2}}>CPL: ₹{cplU.toLocaleString('en-IN')} · Margin: <b style={{color:m>=0?T.green:T.bad}}>₹{m.toLocaleString('en-IN')}{cplU>0?` (${mp}%)`:''}</b> <span style={{opacity:.7}}>· mgr only</span></div>
+                  );})()}
                   <div style={{display:'flex',gap:8,marginTop:6,alignItems:'center',flexWrap:'wrap'}}>
                     <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>QTY</span>
                     <button onClick={()=>updateItemQty(i,-1)} style={{width:24,height:24,borderRadius:4,border:`1px solid ${T.line}`,background:'#fff',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,color:T.ink}}>−</button>
@@ -1832,16 +1871,16 @@ function OrderFormScreen({ctx}) {
                     <button onClick={()=>updateItemQty(i,1)} style={{width:24,height:24,borderRadius:4,border:`1px solid ${T.line}`,background:'#fff',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,color:T.ink}}>+</button>
                   </div>
                   <div style={{display:'flex',gap:8,marginTop:6,alignItems:'center',flexWrap:'wrap'}}>
-                    <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>PRICE ₹</span>
+                    <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>MRP ₹</span>
                     <input
-                      value={curPrice}
-                      onChange={e=>{const v=Number(e.target.value)||0;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,unitPrice:v,total:v*x.qty}:x)}));}}
+                      value={mrpVal}
+                      onChange={e=>{const v=Number(e.target.value)||0;const up=Math.round(v*(1-discPct));setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,mrp:v,unitPrice:up,total:up*x.qty}:x)}));}}
                       style={{width:72,border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 6px',fontFamily:T.mono,fontSize:13,fontWeight:700,textAlign:'right',color:T.ink}}
                     />
                     <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>DISC</span>
                     <input
                       value={it.disc||''}
-                      onChange={e=>{const v=e.target.value;const pct=parseFloat(v||0)/100;const newUp=Math.round((it.mrp||it.cpl||0)*(1-pct));setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,disc:v,unitPrice:newUp,total:newUp*x.qty}:x)}));}}
+                      onChange={e=>{const v=e.target.value;const pct=parseFloat(v||0)/100;const newUp=Math.round(mrpVal*(1-pct));setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,disc:v,unitPrice:newUp,total:newUp*x.qty}:x)}));}}
                       style={{width:46,border:`1px solid ${T.line}`,borderRadius:4,padding:'2px 6px',fontFamily:T.mono,fontSize:12,textAlign:'center'}}
                       placeholder="0%"
                     />
@@ -1870,12 +1909,12 @@ function OrderFormScreen({ctx}) {
             {Icon.search(T.green,16)}<span style={{fontSize:13}}>Search & add item</span>
           </div>
         </div>
-        <SectionHead n="06" label="Commercials"/>
+        <SectionHead n="05" label="Commercials"/>
         <Field label="Discount Code" value={o.discountCode} onChange={v=>setF('discountCode',v)} mono hint="e.g. 11% or 11%+5%"/>
         <Field label="Additional Order Discount %" value={o.orderDiscount} onChange={v=>setF('orderDiscount',v.replace(/[^\d.]/g,''))} mono type="number" hint="Extra discount on the whole order (on top of per-item discounts). Shown on the PDF."/>
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setF('plannedDly',v)} mono required type="date"/>
         <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
-        <SectionHead n="07" label="Payment"/>
+        <SectionHead n="06" label="Payment"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>PAYMENT MODE <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <select value={o.paymentMode} onChange={e=>setF('paymentMode',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.paymentMode?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
@@ -1893,9 +1932,15 @@ function OrderFormScreen({ctx}) {
         <Field label="Earnest Amount" value={o.earnest} onChange={v=>setF('earnest',v)} mono type="number" required/>
         <Field label="Receipt No. & Date" value={o.receiptNo} onChange={v=>setF('receiptNo',v)} mono/>
         <Field label="Follow-up Date" value={o.followUp} onChange={v=>setF('followUp',v)} mono type="date" hint="Reminder at 10:00 AM"/>
-        <SectionHead n="08" label="Internal"/>
+        <SectionHead n="07" label="Internal"/>
         <Field label="Salesperson" value={o.salesExec||user?.name||''} onChange={v=>setF('salesExec',v)} mono/>
-        <Field label="Order Type" value={o.orderType||'B2C'} onChange={v=>setF('orderType',v)} hint="B2C / B2B / B2BE"/>
+        <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Order Type <span style={{color:T.bad,marginLeft:3}}>*</span></div>
+          <select value={o.orderType||'B2C'} onChange={e=>setF('orderType',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+            <option>B2C</option>
+            <option>B2B</option>
+          </select>
+        </div>
         <div style={{padding:'14px 14px 18px'}}>
           <div style={{background:T.ink,color:'#fff',borderRadius:8,padding:'14px 16px',fontFamily:T.mono}}>
             <div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>Items subtotal</span><span>₹{itemsSubtotal.toLocaleString('en-IN')}</span></div>
@@ -1905,6 +1950,14 @@ function OrderFormScreen({ctx}) {
             <div style={{display:'flex',justifyContent:'space-between',fontSize:18,fontWeight:700}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginTop:4,color:'rgba(255,255,255,.6)'}}><span>Earnest</span><span>₹{(Number(o.earnest)||0).toLocaleString('en-IN')}</span></div>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:15,fontWeight:700,color:'#ffd27a',marginTop:2}}><span>Balance</span><span>₹{balance.toLocaleString('en-IN')}</span></div>
+            {priv&&(
+              <>
+                <div style={{height:1,background:'rgba(255,255,255,.2)',margin:'8px 0'}}/>
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:13,color:'rgba(255,255,255,.6)'}}><span>Total cost (CPL)</span><span>₹{totalCost.toLocaleString('en-IN')}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:14,fontWeight:700,color:'#7ee0a8'}}><span>Gross margin</span><span>₹{totalMargin.toLocaleString('en-IN')}</span></div>
+                <div style={{fontSize:9,color:'rgba(255,255,255,.4)',marginTop:3}}>Cost &amp; margin are visible to Manager / Admin only</div>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -2287,9 +2340,9 @@ function SettingsScreen({ctx}) {
                         ⚠ The deployed Apps Script did not report a version. Copy the latest Code.gs → save in Apps Script → Deploy → Manage deployments → Edit → New version.
                       </div>
                     )}
-                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v20' && (
+                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v21' && (
                       <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>
-                        Latest available is v20 — a redeploy is optional but recommended for the newest fixes.
+                        Latest available is v21 — a redeploy is optional but recommended for the newest fixes.
                       </div>
                     )}
                     {debugResult.discontinued && (
