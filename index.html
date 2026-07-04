@@ -130,6 +130,9 @@ const T = {
 //   review-qr.png      → your Google review QR (the "Scan to review us" box)
 // ═══════════════════════════════════════════════════════════
 const PDF_ASSETS = {};   // key -> { data:<pngDataURL>, w, h }
+// Bump ASSET_VERSION whenever a brand PNG (logo / review QR) is replaced —
+// it cache-busts the HTTP + service-worker caches so the new image loads.
+const ASSET_VERSION = 'v21';
 function _loadImageAsset(key, url) {
   const img = new Image();
   img.crossOrigin = 'anonymous';
@@ -145,9 +148,10 @@ function _loadImageAsset(key, url) {
   img.src = url;
 }
 function preloadPdfAssets() {
-  _loadImageAsset('interio', 'interio-logo.png');
-  _loadImageAsset('fs',      'fs-logo.png');
-  _loadImageAsset('reviewQR','review-qr.png');
+  const v = '?a=' + ASSET_VERSION;
+  _loadImageAsset('interio', 'interio-logo.png' + v);
+  _loadImageAsset('fs',      'fs-logo.png' + v);
+  _loadImageAsset('reviewQR','review-qr.png' + v);
 }
 preloadPdfAssets();
 
