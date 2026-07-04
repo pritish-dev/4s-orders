@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '18';
+  var V = '19';
   if (localStorage.getItem('4s_code_v') !== V) {
     localStorage.setItem('4s_code_v', V);
     // Clear ALL local storage (stale caches) then unregister SW and hard reload
@@ -1186,6 +1186,16 @@ function App() {
     finally { setLoading(false); }
   }
 
+  async function doUpdateDelivery(orderNo, internalNo, deliveryStatus) {
+    setLoading(true);
+    try {
+      const res = await apiPost({ action:'updateDelivery', orderNo, internalNo, deliveryStatus, updatedBy: user?.name });
+      if (res.ok) { showToast('Delivery status updated ✓'); loadOrders(); return true; }
+      else { showToast(res.error||'Update failed','bad'); return false; }
+    } catch(e) { showToast(e.message,'bad'); return false; }
+    finally { setLoading(false); }
+  }
+
   function doSignOut() {
     localStorage.removeItem('4s_user');
     setUser(null);
@@ -1194,7 +1204,7 @@ function App() {
     nav('login');
   }
 
-  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, back, doLogin, doSaveOrder, doUpdateWON, doSignOut, syncStock, syncPriceList, loadOrders };
+  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doSignOut, syncStock, syncPriceList, loadOrders };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -2081,8 +2091,9 @@ function PDFPreviewScreen({ctx}) {
 
 // ─── Order History ───────────────────────────────────────────
 function HistoryScreen({ctx}) {
-  const {orders,nav,loadOrders} = ctx;
+  const {orders,nav,loadOrders,doUpdateDelivery} = ctx;
   const [tab,setTab] = useState('all');
+  const [salesFilter,setSalesFilter] = useState('');
   const [wonOrder,setWonOrder] = useState(null);
   useEffect(()=>{ loadOrders(); },[]);
   const tabs = [
@@ -2091,8 +2102,15 @@ function HistoryScreen({ctx}) {
     {id:'drafts',  label:'Drafts',      filter:o=>o.status==='draft'},
     {id:'delivered',label:'Delivered',  filter:o=>o.status==='delivered'},
   ];
+  // Unique salesperson names present in the loaded orders (for the filter dropdown)
+  const salespeople = [...new Set(orders.map(o=>(o.salesExec||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
   const active = tabs.find(t=>t.id===tab)||tabs[0];
-  const shown  = orders.filter(active.filter);
+  const shown  = orders.filter(active.filter)
+    .filter(o=>!salesFilter || (o.salesExec||'').trim().toLowerCase()===salesFilter.toLowerCase());
+
+  async function changeDelivery(o, val){
+    if(val && val!==(o.deliveryStatus||'Pending')) await doUpdateDelivery(o.no, o.internalNo, val);
+  }
 
   if(wonOrder) return <WONUpdateScreen ctx={ctx} orderOverride={wonOrder} onClose={()=>setWonOrder(null)}/>;
 
@@ -2109,6 +2127,15 @@ function HistoryScreen({ctx}) {
             return <span key={t.id} onClick={()=>setTab(t.id)} style={{padding:'6px 11px',borderRadius:99,background:t.id===tab?T.ink:'#fff',color:t.id===tab?'#fff':T.ink2,border:`1px solid ${t.id===tab?T.ink:T.line}`,fontSize:12,fontWeight:600,display:'inline-flex',gap:5,alignItems:'center',cursor:'pointer',flexShrink:0}}>{t.label}<span style={{fontFamily:T.mono,opacity:.7,fontSize:11}}>{n}</span></span>;
           })}
         </div>
+        <div style={{padding:'0 18px 10px',display:'flex',alignItems:'center',gap:8}}>
+          <span style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1,flexShrink:0}}>SALESPERSON</span>
+          <select value={salesFilter} onChange={e=>setSalesFilter(e.target.value)}
+            style={{flex:1,padding:'8px 10px',borderRadius:8,border:`1px solid ${salesFilter?T.ink:T.line}`,background:'#fff',color:salesFilter?T.ink:T.ink2,fontSize:13,fontWeight:600,cursor:'pointer',WebkitAppearance:'none',appearance:'none'}}>
+            <option value="">All salespeople</option>
+            {salespeople.map(s=><option key={s} value={s}>{s}</option>)}
+          </select>
+          {salesFilter&&<span onClick={()=>setSalesFilter('')} style={{fontSize:12,color:T.green,fontWeight:600,cursor:'pointer',flexShrink:0}}>Clear</span>}
+        </div>
       </div>
       <div className="scroll">
         {shown.map(o=>(
@@ -2119,11 +2146,19 @@ function HistoryScreen({ctx}) {
                 {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:<span onClick={e=>{e.stopPropagation();setWonOrder(o);}} style={{display:'inline-flex',alignItems:'center',height:16,padding:'0 6px',borderRadius:4,background:T.warnSoft,color:T.warn,border:'1px solid #e6cc95',fontSize:10,fontWeight:700,cursor:'pointer'}}>+ ADD WON</span>}
               </div>
               <div style={{fontSize:14,fontWeight:700,color:T.ink}}>{o.customer}</div>
-              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.salesExec} · {o.status.toUpperCase()}</div>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2,display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                <span>{o.salesExec}</span>
+                <Pill tone={/deliver/i.test(o.deliveryStatus||'')?'ok':'warn'} size="sm">{/deliver/i.test(o.deliveryStatus||'')?'DELIVERED':'PENDING DLY'}</Pill>
+              </div>
             </div>
             <div style={{textAlign:'right'}}>
               <div style={{fontSize:16,fontFamily:T.mono,fontWeight:700,color:T.ink,letterSpacing:-0.4}}>₹{o.amt.toLocaleString('en-IN')}</div>
-              <div style={{display:'flex',gap:6,marginTop:6,justifyContent:'flex-end'}}>
+              <div style={{display:'flex',gap:6,marginTop:6,justifyContent:'flex-end',alignItems:'center'}}>
+                <select value={/deliver/i.test(o.deliveryStatus||'')?'Delivered':'Pending'} onClick={e=>e.stopPropagation()} onChange={e=>{e.stopPropagation();changeDelivery(o,e.target.value);}}
+                  style={{padding:'4px 6px',borderRadius:4,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:11,fontWeight:600,cursor:'pointer',WebkitAppearance:'none',appearance:'none'}}>
+                  <option value="Pending">Pending</option>
+                  <option value="Delivered">Delivered</option>
+                </select>
                 <span onClick={e=>{e.stopPropagation();const phone=(o.phone||'').replace(/\D/g,'');if(phone)window.open('https://wa.me/91'+phone);}} style={{width:28,height:24,borderRadius:4,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',13)}</span>
               </div>
             </div>
