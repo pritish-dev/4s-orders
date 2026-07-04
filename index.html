@@ -584,7 +584,7 @@ function generatePDF(order) {
       const boxW = rightW-6, boxH = hH-4, ar = A.w/A.h;
       let w = boxW, h = w/ar;
       if (h > boxH) { h = boxH; w = h*ar; }
-      try { doc.addImage(A.data,'PNG', ml+leftW+(rightW-w)/2, y+(hH-h)/2, w, h); } catch(e) { _interioText(y, leftW); }
+      try { doc.addImage(A.data,'PNG', ml+leftW+(rightW-w)/2, y+(hH-h)/2, w, h, 'interio', 'MEDIUM'); } catch(e) { _interioText(y, leftW); }
     } else {
       _interioText(y, leftW);
     }
@@ -613,7 +613,7 @@ function generatePDF(order) {
     if (F && F.data) {
       const s = 13, ar = F.w/F.h; let w = s*ar, h = s;
       if (w > 15) { w = 15; h = w/ar; }
-      try { doc.addImage(F.data,'PNG', ml+1, y+5.5, w, h); tx = ml+1+w+2; } catch(e) {}
+      try { doc.addImage(F.data,'PNG', ml+1, y+5.5, w, h, 'fslogo', 'MEDIUM'); tx = ml+1+w+2; } catch(e) {}
     }
     val(tx, y+8, fit1('4S Interiors', c1w-(tx-ml)-2, 7.5), 7.5, true);
     doc.setFont('helvetica','normal'); doc.setFontSize(5.4); doc.setTextColor(...INK);
@@ -783,15 +783,15 @@ function generatePDF(order) {
     }
     // "Scan to review us" QR — the supplied review-qr.png if present, else a
     // QR generated from the saved review URL.
-    const qrData = (PDF_ASSETS.reviewQR && PDF_ASSETS.reviewQR.data) || makeQrDataUrl(getReviewUrl(), 160);
+    const qrData = (PDF_ASSETS.reviewQR && PDF_ASSETS.reviewQR.data) || makeQrDataUrl(getReviewUrl(), 200);
     if (qrData) {
-      const qs = 18, qx = ml+2, qy = y+tsH-qs-2;
+      const qs = 22, qx = ml+2, qy = y+tsH-qs-2;
       try {
-        doc.addImage(qrData,'PNG', qx, qy, qs, qs);
-        doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...DRED);
+        doc.addImage(qrData,'PNG', qx, qy, qs, qs, 'reviewqr', 'MEDIUM');
+        doc.setFont('helvetica','bold'); doc.setFontSize(8.5); doc.setTextColor(...DRED);
         doc.text('Scan to review us', qx+qs+3, qy+qs/2-1);
         doc.setFont('helvetica','normal'); doc.setFontSize(6); doc.setTextColor(...GR);
-        doc.text('We value your feedback!', qx+qs+3, qy+qs/2+3.5);
+        doc.text('on Google — we value your feedback!', qx+qs+3, qy+qs/2+3.5);
       } catch(e) {}
     }
     const vSp = tsRX+tsRW*0.54;
