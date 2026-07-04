@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v22';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v23';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -913,7 +913,8 @@ var CRM_H = {
   ORDER_NO: ['ORDER NO', 'ORDER NO.'],
   PHONE:    ['CONTACT NUMBER', 'PHONE', 'CONTACT NO'],
   INT_NO:   ['INTERNAL ODER NO', 'INTERNAL ORDER NO'],
-  WON:      ['WON', 'WON NO', 'WON NO.', 'WON NUMBER', 'WON NUMBER (WON NO.)'],
+  // WON and Godrej SO No are the same thing — the WON lands in the GODREJ SO NO column.
+  WON:      ['WON', 'WON NO', 'WON NO.', 'WON NUMBER', 'GODREJ SO NO', 'GODREJ SO NO.', 'GODREJ SO NUMBER'],
   DATE:     ['ORDER DATE'],
   CUSTOMER: ['CUSTOMER NAME'],
   SALES:    ['SALES PERSON'],
@@ -1112,7 +1113,8 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
 
 // ─── UPDATE WON ───────────────────────────────────────────────────────────────
 // Writes the WON onto every CRM row of the order (matched by ORDER NO or
-// INTERNAL ODER NO). WON lands in the "WON" column if present, else "GODREJ SO NO".
+// INTERNAL ODER NO). WON == Godrej SO No, so it lands in the "GODREJ SO NO" column
+// (or a "WON" column if one exists).
 function handleUpdateWON(body) {
   var orderNo    = String(body.orderNo    || '').trim();
   var internalNo = Number(body.internalNo || 0);
@@ -1131,7 +1133,7 @@ function handleUpdateWON(body) {
   var cOrderNo = colOf(CRM_H.ORDER_NO);
   var cIntNo   = colOf(CRM_H.INT_NO);
   var cWon     = colOf(CRM_H.WON);
-  if (cWon < 0) return { ok: false, error: 'No "WON" column found in the CRM sheet. Add a "WON" header to enable WON updates.' };
+  if (cWon < 0) return { ok: false, error: 'No "Godrej SO No" (WON) column found in the CRM sheet.' };
 
   var lastRow = sh.getLastRow();
   if (lastRow < 2) return { ok: false, error: 'Order not found: ' + orderNo };
