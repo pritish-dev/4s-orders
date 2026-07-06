@@ -847,7 +847,7 @@ function handleOrders(p) {
   var cDoorH   = colOf(['CUSTOMER HOUSE ENTRY DOOR HEIGHT','ENTRY DOOR HEIGHT']);
   var cPlanned = colOf(['CUSTOMER DELIVERY DATE (TO BE)']);
   var cInstr   = colOf(['SPECIFIC INSTRUCTION','INSTALLATION NOTE','INSTALL NOTE']);
-  var cDiscCd  = colOf(['DISCOUNT CODE']);
+  var cOFRcpt  = colOf(['ORDER FORM RECEIPT NO','ORDER FORM RECEIPT NO.','ORDER FORM RECEIPT']);
   var cOrdDisc = colOf(['ORDER DISCOUNT %','ADDITIONAL ORDER DISCOUNT %','ORDER DISCOUNT']);
   var cPay     = colOf(['PAYMENT MODE']);
   var cAdv     = colOf(['ADV RECEIVED']);
@@ -918,7 +918,7 @@ function handleOrders(p) {
         entryDoorWidth: sval(r, cDoorW), entryDoorHeight: sval(r, cDoorH),
         plannedDly: sval(r, cPlanned),
         installNote: sval(r, cInstr),
-        discountCode: sval(r, cDiscCd),
+        orderFormReceiptNo: sval(r, cOFRcpt),
         orderDiscount: disc,
         paymentMode: sval(r, cPay),
         earnest: cAdv >= 0 ? Number(r[cAdv]) || 0 : 0,
@@ -1249,7 +1249,7 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['MONEY RECEIPT NO 3'], mr3.no || '');
     put(['MONEY RECEIPT DATE 3'], mr3.date || '');
     put(['DELIVERY STATUS'], o.deliveryStatus || 'Pending');
-    put(['DISCOUNT CODE'], o.discountCode || '');
+    put(['ORDER FORM RECEIPT NO','ORDER FORM RECEIPT NO.','ORDER FORM RECEIPT'], o.orderFormReceiptNo || '');
 
     out.push(row);
   }

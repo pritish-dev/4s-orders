@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '22';
+  var V = '23';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -543,11 +543,24 @@ function customerCopyItems(items) {
     if (!fam) { out.push(it); return; }
     if (groupIndex[fam.key] === undefined) {
       groupIndex[fam.key] = out.length;
-      out.push({ code:'', name:fam.label, qty:0, mrp:0, disc:'', unitPrice:0, total:0, _group:true });
+      out.push({ code:'', name:fam.label, qty:0, mrp:0, disc:'', unitPrice:0, total:0, _group:true, _grossMrp:0 });
     }
     const g = out[groupIndex[fam.key]];
-    g.qty   += Number(it.qty)   || 0;
-    g.total += Number(it.total) || 0;
+    const qty = Number(it.qty) || 0;
+    g.qty       += qty;
+    g.total     += Number(it.total) || 0;
+    g._grossMrp += (Number(it.mrp) || Number(it.cpl) || 0) * qty;   // gross (pre-discount) price
+  });
+  // For each collapsed family, show on one line: the total price in the MRP
+  // column, the overall (average) discount % in the Disc column, and the net
+  // total in the Disc. Price + Total columns.
+  out.forEach(g => {
+    if (!g._group) return;
+    const gross   = g._grossMrp || 0;
+    const discPct = gross > 0 ? rnd((gross - g.total) / gross * 100) : 0;
+    g.mrp       = gross;
+    g.disc      = discPct > 0 ? String(discPct) : '';
+    g.unitPrice = g.total;   // Disc. Price column → net total for the family
   });
   return out;
 }
@@ -578,7 +591,7 @@ function generatePDF(order, copyType) {
 
   // Order number: <Sl No>/<Receipt No> in red
   const slNo     = order.slNo||order.internalNo||'—';
-  const rcptNo   = order.receiptNo||'—';
+  const rcptNo   = order.orderFormReceiptNo || order.receiptNo || '—';
   const orderRef = slNo + ' / ' + rcptNo;
   const oDate    = order.date||new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'2-digit',year:'numeric'});
 
@@ -617,20 +630,21 @@ function generatePDF(order, copyType) {
 
   // ── HEADER BAND (drawn at top of every page) ──────────────
   function drawHeaderBand(y) {
-    const hH = 16, leftW = 105, rightW = cw - leftW;
+    const hH = 20, leftW = 105, rightW = cw - leftW;
     doc.setFillColor(...DRED);
     doc.rect(ml, y, leftW, hH, 'F');
     doc.setFont('times','bolditalic'); doc.setFontSize(15); doc.setTextColor(255,255,255);
-    doc.text('Order Confirmation Form', ml + leftW/2, y + hH/2 + 2.5, {align:'center'});
+    doc.text('Order Confirmation Form', ml + leftW/2, y + hH/2 + 2, {align:'center'});
     doc.setFillColor(255,255,255);
     doc.rect(ml+leftW, y, rightW, hH, 'F');
     // Use the exact interio logo image if the PNG was supplied; else draw text.
+    // Larger logo: fill almost the whole right cell (minimal padding).
     const A = PDF_ASSETS.interio;
     if (A && A.data) {
-      const boxW = rightW-6, boxH = hH-4, ar = A.w/A.h;
+      const boxW = rightW-3, boxH = hH-2, ar = A.w/A.h;
       let w = boxW, h = w/ar;
       if (h > boxH) { h = boxH; w = h*ar; }
-      try { doc.addImage(A.data,'PNG', ml+leftW+(rightW-w)/2, y+(hH-h)/2, w, h, 'interio', 'MEDIUM'); } catch(e) { _interioText(y, leftW); }
+      try { doc.addImage(A.data,'PNG', ml+leftW+(rightW-w)/2, y+(hH-h)/2, w, h, 'interio', 'FAST'); } catch(e) { _interioText(y, leftW); }
     } else {
       _interioText(y, leftW);
     }
@@ -639,12 +653,13 @@ function generatePDF(order, copyType) {
     return y + hH;
   }
   function _interioText(y, leftW) {
-    const lx = ml + leftW + 4;
-    doc.setFont('times','bolditalic'); doc.setFontSize(17); doc.setTextColor(...DRED);
-    doc.text('interio', lx, y + 8.5);
-    doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...NAVY);
-    doc.text('by Godrej', lx, y + 14.5);
-    doc.setFontSize(5); doc.text('®', lx + 24, y + 12.5);
+    const lx = ml + leftW + 5;
+    // Larger + bolder interio wordmark
+    doc.setFont('times','bolditalic'); doc.setFontSize(23); doc.setTextColor(...DRED);
+    doc.text('interio', lx, y + 11);
+    doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(...NAVY);
+    doc.text('by Godrej', lx, y + 17.5);
+    doc.setFontSize(6); doc.text('®', lx + 32, y + 15);
   }
 
   // ── TOP BLOCK (page 1 only): store / customer / instructions ─
@@ -731,11 +746,7 @@ function generatePDF(order, copyType) {
     doc.splitTextToSize(order.installNote||'',lw5-4).slice(0,4).forEach((ln,i)=>doc.text(ln,ml+2,y+11+i*4));
     vln(rx5+rw5*0.5,y+7,y+siH);
     const r5=(l,v,ry)=>{ hln(rx5,y+ry,rx5+rw5); lbl(rx5+2,y+ry-5.5,l); val(rx5+rw5*0.5+2,y+ry-1.5,fit1(v,rw5*0.48,8.5),8.5,true); };
-    // Discount Code — manual code plus every distinct per-item discount, comma separated
-    const perItemDiscs = [...new Set((order.items||[]).map(it=>parseFloat(it.disc)||0).filter(d=>d>0).map(d=>d+'%'))];
-    const discCodeDisplay = [order.discountCode, perItemDiscs.join(', ')].filter(Boolean).join(' · ');
-    r5('Discount Code',        discCodeDisplay,        14);
-    r5('Planned Dly Schedule', order.plannedDly||'',   21);
+    r5('Planned Dly Schedule', order.plannedDly||'',   16);
     r5('Reference no.',        order.poRef||'',        siH);
     y += siH;
 
@@ -840,9 +851,11 @@ function generatePDF(order, copyType) {
       lbl(ml+2, y+11, 'Customer GSTIN :', 7);
       val(ml+2, y+15.5, fit1(order.gstNumber, tsLW-4, 8.5), 8.5, true);
     }
-    // "Scan to review us" QR — the supplied review-qr.png if present, else a
-    // QR generated from the saved review URL.
-    const qrData = (PDF_ASSETS.reviewQR && PDF_ASSETS.reviewQR.data) || makeQrDataUrl(getReviewUrl(), 200);
+    // "Scan to review us" QR — customer copy only (never on the sales copy).
+    // Uses the supplied review-qr.png if present, else a QR from the saved URL.
+    const qrData = isCustomer
+      ? ((PDF_ASSETS.reviewQR && PDF_ASSETS.reviewQR.data) || makeQrDataUrl(getReviewUrl(), 200))
+      : null;
     if (qrData) {
       const qs = 22, qx = ml+2, qy = y+tsH-qs-2;
       try {
@@ -970,8 +983,11 @@ const BLANK_ORDER = () => ({
   // mandatory when the billing address differs from the delivery address.
   contactPersonName:'', contactNumber:'', contactRemark:'',
   customerCode:'', poRef:'', source:'',
-  discountCode:'', orderDiscount:'', plannedDly:'', installNote:'',
+  orderDiscount:'', plannedDly:'', installNote:'',
   paymentMode:'', earnest:'',
+  // Order Form Receipt No — printed as the "Receipt" part of the PDF's
+  // "Order No. (Sl / Receipt)" field.
+  orderFormReceiptNo:'',
   // Up to three money-receipt no + date pairs (updatable over time)
   receiptNo:'', moneyReceipts:[{no:'',date:''},{no:'',date:''},{no:'',date:''}],
   deliveryStatus:'Pending',
@@ -1563,10 +1579,9 @@ function SearchScreen({ctx}) {
   function handleInput(e) { setQ(e.target.value); }
 
   function addToOrder(item) {
-    const disc      = order.discountCode||'0%';
-    const pct       = parseFloat(disc)/100||0;
+    const disc      = '';                       // per-item discount starts blank
     const basePrice = item.mrp||item.cpl||0;
-    const unitPrice = basePrice>0 ? Math.round(basePrice*(1-pct)) : 0;
+    const unitPrice = basePrice;                // no discount applied until entered
     // "Change of Code" items: the order form / PDF must use the Alt Item code
     // even though the price list still lists the old code.
     const effCode   = item.altCode || item.code;
@@ -2048,8 +2063,8 @@ function OrderFormScreen({ctx}) {
           </div>
         </div>
         <SectionHead n="05" label="Commercials"/>
-        <Field label="Discount Code" value={o.discountCode} onChange={v=>setF('discountCode',v)} mono hint="e.g. 11% or 11%+5%"/>
         <Field label="Additional Order Discount %" value={o.orderDiscount} onChange={v=>setF('orderDiscount',v.replace(/[^\d.]/g,''))} mono type="number" hint="Extra discount on the whole order (on top of per-item discounts). Shown on the PDF."/>
+        <Field label="Order Form Receipt No" value={o.orderFormReceiptNo} onChange={v=>setF('orderFormReceiptNo',v)} mono hint="Printed as the Receipt part of the PDF's Order No. (Sl / Receipt)"/>
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setOrder(prev=>({...prev,plannedDly:v,followUp:followUpFromDelivery(v)||prev.followUp}))} mono required type="date" hint="Follow-up auto-set to 2 days before this date"/>
         <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
         <SectionHead n="06" label="Payment"/>
