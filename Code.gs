@@ -812,6 +812,7 @@ function handleOrders(p) {
   var colOf = C.colOf;
   var ncol  = C.header.length;
 
+  // Column indexes (order-level repeated on every row + per-item).
   var cOrderNo = colOf(CRM_H.ORDER_NO);
   var cPhone   = colOf(CRM_H.PHONE);
   var cIntNo   = colOf(CRM_H.INT_NO);
@@ -820,55 +821,173 @@ function handleOrders(p) {
   var cDate    = colOf(CRM_H.DATE);
   var cSales   = colOf(CRM_H.SALES);
   var cAmt     = colOf(CRM_H.AMOUNT);
+  var cEmail   = colOf(['EMAIL ADDRESS']);
+  var cAlt     = colOf(['ALT PHONE','ALTERNATE PHONE','ALT CONTACT NUMBER','ALTERNATE CONTACT NUMBER']);
+  var cGst     = colOf(['CUSTOMER GST NO','CUSTOMER GSTIN','GST NO','GSTIN']);
+  var cBill    = colOf(['BILLING ADDRESS']);
+  var cDelv    = colOf(['DELIVERY ADDRESS']);
+  var cFloor   = colOf(['FLOOR']);
+  var cLandmk  = colOf(['LANDMARK']);
+  var cLiftAv  = colOf(['LIFT AVAILABLE','LIFT AVAILABLE?']);
+  var cLiftTy  = colOf(['LIFT TYPE']);
+  var cCPName  = colOf(['CONTACT PERSON NAME','CONTACT PERSON']);
+  var cCPNum   = colOf(['CONTACT PERSON NUMBER','CONTACT PERSON CONTACT NUMBER']);
+  var cCPRem   = colOf(['CONTACT REMARK','CONTACT REMARKS']);
+  var cDob     = colOf(['DATE OF BIRTH','DOB']);
+  var cAnniv   = colOf(['MARRIAGE ANNIVERSARY','MARRIAGE ANNIVERSARY DATE','ANNIVERSARY']);
+  var cAware   = colOf(['HOW DID THEY COME TO KNOW ABOUT OUR SHOWROOM?','HOW DID THEY COME TO KNOW ABOUT OUR SHOWROOM','LEAD SOURCE','SOURCE OF AWARENESS']);
+  var cPatt    = colOf(['PURCHASE PATTERN']);
+  var cPurpose = colOf(['PURCHASING FOR','PURCHASING FOR:']);
+  var cSofaW   = colOf(['SOFA WIDTH']), cSofaH = colOf(['SOFA HEIGHT']), cSofaD = colOf(['SOFA DEPTH']);
+  var cLiftH   = colOf(['LIFT HEIGHT']), cLiftW = colOf(['LIFT WIDTH']);
+  var cStairW  = colOf(['STAIRCASE WIDTH','STAIR CASE WIDTH']);
+  var cStairL  = colOf(['STAIRCASE LANDING HEIGHT','STAIR CASE LANDING HEIGHT']);
+  var cDoorW   = colOf(['CUSTOMER HOUSE ENTRY DOOR WIDTH','ENTRY DOOR WIDTH']);
+  var cDoorH   = colOf(['CUSTOMER HOUSE ENTRY DOOR HEIGHT','ENTRY DOOR HEIGHT']);
+  var cPlanned = colOf(['CUSTOMER DELIVERY DATE (TO BE)']);
+  var cInstr   = colOf(['SPECIFIC INSTRUCTION','INSTALLATION NOTE','INSTALL NOTE']);
+  var cDiscCd  = colOf(['DISCOUNT CODE']);
+  var cOrdDisc = colOf(['ORDER DISCOUNT %','ADDITIONAL ORDER DISCOUNT %','ORDER DISCOUNT']);
+  var cPay     = colOf(['PAYMENT MODE']);
+  var cAdv     = colOf(['ADV RECEIVED']);
+  var cFollow  = colOf(['FOLLOW-UP DATE','FOLLOW UP DATE','FOLLOWUP DATE']);
+  var cOrdType = colOf(['ORDER TYPE','B2C/B2B','ORDER CATEGORY']);
+  var cPoRef   = colOf(['REFERENCE ORDER NO.','REFERENCE ORDER NO']);
+  var cDelvSt  = colOf(['DELIVERY STATUS','DELIVERY REMARKS(DELIVERED/PENDING)','DELIVERY REMARKS']);
+  var cMr1n=colOf(['MONEY RECEIPT NO 1','MONEY RECEIPT NO','RECEIPT NO','RECEIPT NO.','RECEIPT NO & DATE']);
+  var cMr1d=colOf(['MONEY RECEIPT DATE 1','MONEY RECEIPT DATE','RECEIPT DATE']);
+  var cMr2n=colOf(['MONEY RECEIPT NO 2']), cMr2d=colOf(['MONEY RECEIPT DATE 2']);
+  var cMr3n=colOf(['MONEY RECEIPT NO 3']), cMr3d=colOf(['MONEY RECEIPT DATE 3']);
+  // Per-item columns
+  var cICode = colOf(['ITEM CODE','CODE']);
+  var cIName = colOf(['PRODUCT NAME']);
+  var cICat  = colOf(['CATEGORY']);
+  var cIType = colOf(['CATEGORY TYPE']);
+  var cIMrp  = colOf(['MRP/UNIT(AS PER PRICE LIST )','MRP/UNIT(AS PER PRICE LIST)','MRP/UNIT','MRP']);
+  var cICpl  = colOf(['CPL']);
+  var cIQty  = colOf(['QTY']);
+  var cIDisc = colOf(['ITEM DISCOUNT %','PER ITEM DISCOUNT %','ITEM DISC %']);
+  var cISchm = colOf(['DISC ALLOWED']);
 
   var lastRow = sh.getLastRow();
   var data    = lastRow >= 2 ? sh.getRange(2, 1, lastRow - 1, ncol).getValues() : [];
 
-  var exec   = (p.exec || '').trim().toLowerCase();
+  function cell(r, ci) { return ci >= 0 ? r[ci] : ''; }
+  function sval(r, ci) { return String(cell(r, ci) || '').trim(); }
+
+  // Everyone sees every salesperson's orders (filtering happens client-side).
   var cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 60);
+  cutoff.setDate(cutoff.getDate() - 365);
 
   var map = {}, keys = [];
   for (var i = 0; i < data.length; i++) {
     var r  = data[i];
-    var no = cOrderNo >= 0 ? String(r[cOrderNo] || '').trim() : '';
-    var ph = cPhone   >= 0 ? String(r[cPhone]   || '').trim() : '';
+    var no = sval(r, cOrderNo);
+    var ph = sval(r, cPhone);
     if (!no && !ph) continue;
     var key = no + '|' + ph;
     if (!map[key]) {
+      var disc = sval(r, cOrdDisc).replace('%', '');
       map[key] = {
-        no:         no,
+        no: no,
         internalNo: cIntNo >= 0 ? Number(r[cIntNo]) || 0 : 0,
-        won:        '',
-        customer:   cCust  >= 0 ? String(r[cCust]  || '') : '',
-        phone:      ph,
-        date:       cDate  >= 0 ? String(r[cDate]  || '') : '',
-        salesExec:  cSales >= 0 ? String(r[cSales] || '') : '',
-        amt:        0,
-        _row:       i,
+        wons: [],
+        customer: sval(r, cCust),
+        phone: ph,
+        alt: sval(r, cAlt),
+        email: sval(r, cEmail),
+        gstNumber: sval(r, cGst),
+        billing: sval(r, cBill),
+        delivery: sval(r, cDelv),
+        floor: sval(r, cFloor),
+        landmark: sval(r, cLandmk),
+        liftAvailable: sval(r, cLiftAv),
+        liftType: sval(r, cLiftTy),
+        contactPersonName: sval(r, cCPName),
+        contactNumber: sval(r, cCPNum),
+        contactRemark: sval(r, cCPRem),
+        dob: sval(r, cDob),
+        anniversary: sval(r, cAnniv),
+        awareness: sval(r, cAware),
+        purchasePattern: sval(r, cPatt) ? sval(r, cPatt).split(/\s*,\s*/).filter(String) : [],
+        purchasingFor: sval(r, cPurpose),
+        sofaWidth: sval(r, cSofaW), sofaHeight: sval(r, cSofaH), sofaDepth: sval(r, cSofaD),
+        liftHeight: sval(r, cLiftH), liftWidth: sval(r, cLiftW),
+        staircaseWidth: sval(r, cStairW), staircaseLandingHeight: sval(r, cStairL),
+        entryDoorWidth: sval(r, cDoorW), entryDoorHeight: sval(r, cDoorH),
+        plannedDly: sval(r, cPlanned),
+        installNote: sval(r, cInstr),
+        discountCode: sval(r, cDiscCd),
+        orderDiscount: disc,
+        paymentMode: sval(r, cPay),
+        earnest: cAdv >= 0 ? Number(r[cAdv]) || 0 : 0,
+        followUp: sval(r, cFollow),
+        salesExec: sval(r, cSales),
+        orderType: sval(r, cOrdType) || 'B2C',
+        poRef: sval(r, cPoRef),
+        deliveryStatus: sval(r, cDelvSt) || 'Pending',
+        moneyReceipts: [
+          { no: sval(r, cMr1n), date: sval(r, cMr1d) },
+          { no: sval(r, cMr2n), date: sval(r, cMr2d) },
+          { no: sval(r, cMr3n), date: sval(r, cMr3d) },
+        ],
+        date: sval(r, cDate),
+        amt: 0,
+        items: [],
+        _row: i,
       };
+      map[key].receiptNo = map[key].moneyReceipts[0].no;
       keys.push(key);
     }
     var m = map[key];
     m.amt += cAmt >= 0 ? (Number(r[cAmt]) || 0) : 0;
-    m._row = i;   // remember the order's last row → sort newest-first
-    if (cWon >= 0) { var w = String(r[cWon] || '').trim(); if (w) m.won = w; }
+    m._row = i;
+
+    var rowWon = sval(r, cWon);
+    if (rowWon && m.wons.indexOf(rowWon) === -1) m.wons.push(rowWon);
+
+    // Reconstruct this line's item (in sheet order).
+    var qty  = cIQty >= 0 ? Number(r[cIQty]) || 0 : 0;
+    var mrp  = cIMrp >= 0 ? Number(r[cIMrp]) || 0 : 0;
+    var discPct = parseFloat(sval(r, cIDisc).replace('%', '')) || 0;
+    var unitPrice = Math.round(mrp * (1 - discPct / 100));
+    var schemeStr = sval(r, cISchm);
+    var otherMatch = schemeStr.match(/Other\s*:?\s*([^,]*)/i);
+    m.items.push({
+      code: sval(r, cICode),
+      name: sval(r, cIName),
+      cat: sval(r, cICat),
+      item: sval(r, cIType),
+      qty: qty,
+      mrp: mrp,
+      cpl: cICpl >= 0 ? Number(r[cICpl]) || 0 : 0,
+      disc: discPct ? String(discPct) : '',
+      unitPrice: unitPrice,
+      total: unitPrice * qty,
+      ageing: /ageing/i.test(schemeStr),
+      sweetner: /sweetner/i.test(schemeStr),
+      other: /other/i.test(schemeStr),
+      schemeCode: otherMatch ? (otherMatch[1] || '').trim() : '',
+      won: rowWon,
+    });
   }
 
   var orders = keys.map(function(k){ return map[k]; })
     .filter(function(m){
-      if (exec && String(m.salesExec || '').toLowerCase().indexOf(exec) === -1) return false;
       var dt = _parseCrmDate(m.date);
       if (dt && dt < cutoff) return false;
       return true;
     })
     .sort(function(a,b){ return b._row - a._row; })
     .map(function(m){
-      return {
-        no: m.no, internalNo: m.internalNo, won: m.won,
-        customer: m.customer, phone: m.phone, date: m.date,
-        amt: m.amt, status: m.won ? 'billed' : 'pending-won', salesExec: m.salesExec,
-      };
+      var won = m.wons.join(', ');
+      var completed = /installation done/i.test(m.deliveryStatus || '');
+      var status = completed ? 'completed'
+                 : (won ? 'billed' : 'pending-won');
+      m.won = won;
+      delete m.wons; delete m._row;
+      m.status = status;
+      return m;
     });
 
   return { ok: true, orders: orders };
@@ -1037,6 +1156,7 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     var schemes = [];
     if (it.ageing)   schemes.push('Ageing');
     if (it.sweetner) schemes.push('Sweetner');
+    if (it.other)    schemes.push(it.schemeCode ? ('Other: ' + it.schemeCode) : 'Other');
 
     var row = [];
     for (var z = 0; z < header.length; z++) row.push('');
@@ -1046,7 +1166,10 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(CRM_H.INT_NO, internalNo);
     put(CRM_H.DATE, orderDateStr);
     put(CRM_H.ORDER_NO, orderNo);
-    put(CRM_H.WON, won);
+    // WON == Godrej SO No. Per-item WON (it.won) wins so a single order can carry
+    // several SO numbers across its items; falls back to the order-level WON.
+    put(CRM_H.WON, String(it.won || won || ''));
+    put(['ITEM CODE', 'CODE'], it.code || '');
     put(CRM_H.CUSTOMER, o.customer || '');
     put(CRM_H.PHONE, o.phone || '');
     put(['EMAIL ADDRESS'], o.email || '');
@@ -1067,7 +1190,7 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(CRM_H.SALES, o.salesExec || '');
     if (i === 0) put(['ADV RECEIVED'], Number(o.earnest) || 0);   // order-level — first row only
     put(['REFERENCE ORDER NO.', 'REFERENCE ORDER NO'], o.poRef || '');
-    put(['DELIVERY REMARKS(DELIVERED/PENDING)', 'DELIVERY REMARKS'], 'Pending');
+    put(['DELIVERY REMARKS(DELIVERED/PENDING)', 'DELIVERY REMARKS'], o.deliveryStatus || 'Pending');
     put(['POSTED BY'], o.salesExec || '');
     put(['PINELAB / BAJAJ', 'PINELAB/BAJAJ'], o.paymentMode || '');
 
@@ -1097,13 +1220,31 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['ALT PHONE', 'ALTERNATE PHONE', 'ALT CONTACT NUMBER', 'ALTERNATE CONTACT NUMBER'], o.alt || '');
     put(['BILLING ADDRESS'], o.billing || '');
     put(['DELIVERY ADDRESS'], o.delivery || '');
+    put(['FLOOR'], o.floor || '');
+    put(['LANDMARK'], o.landmark || '');
     put(['LIFT AVAILABLE', 'LIFT AVAILABLE?'], o.liftAvailable || '');
+    put(['LIFT TYPE'], o.liftType || '');
+    // Contact details (order bought on behalf of someone else)
+    put(['CONTACT PERSON NAME', 'CONTACT PERSON'], o.contactPersonName || '');
+    put(['CONTACT PERSON NUMBER', 'CONTACT PERSON CONTACT NUMBER'], o.contactNumber || '');
+    put(['CONTACT REMARK', 'CONTACT REMARKS'], o.contactRemark || '');
     put(['ORDER DISCOUNT %', 'ADDITIONAL ORDER DISCOUNT %', 'ORDER DISCOUNT'], o.orderDiscount ? (o.orderDiscount + '%') : '');
     put(['ITEM DISCOUNT %', 'PER ITEM DISCOUNT %', 'ITEM DISC %'], (parseFloat(it.disc) || 0) ? (parseFloat(it.disc) + '%') : '');
     put(['PAYMENT MODE'], o.paymentMode || '');
     put(['FOLLOW-UP DATE', 'FOLLOW UP DATE', 'FOLLOWUP DATE'], o.followUp || '');
     put(['SPECIFIC INSTRUCTION', 'INSTALLATION NOTE', 'INSTALL NOTE'], o.installNote || '');
-    put(['RECEIPT NO', 'RECEIPT NO.', 'RECEIPT NO & DATE'], o.receiptNo || '');
+    // Money receipts — up to 3 no + date pairs (updatable over time)
+    var mrs = Array.isArray(o.moneyReceipts) ? o.moneyReceipts : [];
+    var mr1 = mrs[0] || { no: o.receiptNo || '', date: '' };
+    var mr2 = mrs[1] || { no: '', date: '' };
+    var mr3 = mrs[2] || { no: '', date: '' };
+    put(['MONEY RECEIPT NO 1', 'MONEY RECEIPT NO', 'RECEIPT NO', 'RECEIPT NO.', 'RECEIPT NO & DATE'], mr1.no || '');
+    put(['MONEY RECEIPT DATE 1', 'MONEY RECEIPT DATE', 'RECEIPT DATE'], mr1.date || '');
+    put(['MONEY RECEIPT NO 2'], mr2.no || '');
+    put(['MONEY RECEIPT DATE 2'], mr2.date || '');
+    put(['MONEY RECEIPT NO 3'], mr3.no || '');
+    put(['MONEY RECEIPT DATE 3'], mr3.date || '');
+    put(['DELIVERY STATUS'], o.deliveryStatus || 'Pending');
     put(['DISCOUNT CODE'], o.discountCode || '');
 
     out.push(row);
@@ -1120,6 +1261,11 @@ function handleUpdateWON(body) {
   var internalNo = Number(body.internalNo || 0);
   var won        = String(body.won        || '').trim().toUpperCase();
   var updatedBy  = String(body.updatedBy  || '');
+  // Optional: 0-based indexes (in sheet/item order) of the items this WON
+  // applies to. Omitted / empty → apply to every item of the order.
+  var itemIndexes = Array.isArray(body.itemIndexes)
+    ? body.itemIndexes.map(function(n){ return Number(n); }).filter(function(n){ return !isNaN(n); })
+    : null;
   if (!won) return { ok: false, error: 'WON number is required.' };
 
   var sh;
@@ -1139,17 +1285,24 @@ function handleUpdateWON(body) {
   if (lastRow < 2) return { ok: false, error: 'Order not found: ' + orderNo };
   var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
 
-  var updated = 0;
+  // Collect the order's rows in sheet order.
+  var matchRows = [];
   for (var i = 0; i < data.length; i++) {
     var matchOrder = cOrderNo >= 0 && orderNo    && String(data[i][cOrderNo] || '').trim() === orderNo;
     var matchInt   = cIntNo   >= 0 && internalNo && Number(data[i][cIntNo]) === internalNo;
-    if (matchOrder || matchInt) {
-      sh.getRange(i + 2, cWon + 1).setValue(won);
-      updated++;
-    }
+    if (matchOrder || matchInt) matchRows.push(i);
   }
-  if (!updated) return { ok: false, error: 'Order not found: ' + orderNo };
-  _appendLog(updatedBy, orderNo, 'UPDATE_WON', 'WON: ' + won);
+  if (!matchRows.length) return { ok: false, error: 'Order not found: ' + orderNo };
+
+  var updated = 0;
+  for (var k = 0; k < matchRows.length; k++) {
+    // When a subset was requested, only stamp the selected item positions.
+    if (itemIndexes && itemIndexes.length && itemIndexes.indexOf(k) === -1) continue;
+    sh.getRange(matchRows[k] + 2, cWon + 1).setValue(won);
+    updated++;
+  }
+  if (!updated) return { ok: false, error: 'No matching items to update for order: ' + orderNo };
+  _appendLog(updatedBy, orderNo, 'UPDATE_WON', 'WON: ' + won + (itemIndexes ? ' items:' + itemIndexes.join(',') : ''));
   return { ok: true, rows: updated };
 }
 

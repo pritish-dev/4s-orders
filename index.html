@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '18';
+  var V = '19';
   if (localStorage.getItem('4s_code_v') !== V) {
     localStorage.setItem('4s_code_v', V);
     // Clear ALL local storage (stale caches) then unregister SW and hard reload
@@ -365,10 +365,10 @@ function orderTotals(o) {
   const items         = o.items || [];
   const itemsSubtotal = items.reduce((s, i) => s + (i.total || 0), 0);
   const orderDiscPct  = Math.max(0, parseFloat(o.orderDiscount) || 0) / 100;
-  const orderDiscAmt  = Math.round(itemsSubtotal * orderDiscPct);
+  const orderDiscAmt  = rnd(itemsSubtotal * orderDiscPct);
   const taxable       = itemsSubtotal - orderDiscAmt;
-  const cgst          = Math.round(taxable * 0.09);
-  const sgst          = Math.round(taxable * 0.09);
+  const cgst          = rnd(taxable * 0.09);
+  const sgst          = rnd(taxable * 0.09);
   const total         = taxable + cgst + sgst;
   const earnest       = Number(o.earnest) || 0;
   const balance       = total - earnest;
@@ -527,7 +527,29 @@ function StockRibbon({syncedAt}) {
 // ═══════════════════════════════════════════════════════════
 // PDF GENERATOR  — matches physical Order Confirmation Form
 // ═══════════════════════════════════════════════════════════
-function generatePDF(order) {
+// Collapse modular-product items (Kalista / Kreation X2 / X3 / Upmods) into a
+// single line per family — used for the CUSTOMER copy of the PDF only. The
+// summed line total is preserved, so order totals never change.
+function customerCopyItems(items) {
+  const out = [], groupIndex = {};
+  (items || []).forEach(it => {
+    const fam = modularFamilyOf(it);
+    if (!fam) { out.push(it); return; }
+    if (groupIndex[fam.key] === undefined) {
+      groupIndex[fam.key] = out.length;
+      out.push({ code:'', name:fam.label, qty:0, mrp:0, disc:'', unitPrice:0, total:0, _group:true });
+    }
+    const g = out[groupIndex[fam.key]];
+    g.qty   += Number(it.qty)   || 0;
+    g.total += Number(it.total) || 0;
+  });
+  return out;
+}
+
+// copyType: 'sales' (default, fully itemised) or 'customer' (modular families
+// collapsed to one line each).
+function generatePDF(order, copyType) {
+  const isCustomer = copyType === 'customer';
   const { jsPDF } = window.jspdf;
   const doc  = new jsPDF({ unit:'mm', format:'a4' });
   const pw   = 210;
@@ -678,13 +700,18 @@ function generatePDF(order) {
     const dx = ml+hw;
     lbl(dx+1,y+3.5,'Delivery Address :');
     doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-    doc.splitTextToSize(order.delivery||order.billing||'',hw-3).slice(0,4).forEach((ln,i)=>doc.text(ln,dx+1,y+8+i*4));
+    const delvText = [order.delivery||order.billing||'',
+      order.floor    ? 'Floor: '    + order.floor    : '',
+      order.landmark ? 'Landmark: ' + order.landmark : '']
+      .filter(Boolean).join('\n');
+    doc.splitTextToSize(delvText,hw-3).slice(0,4).forEach((ln,i)=>doc.text(ln,dx+1,y+8+i*4));
     hln(dx,y+27,dx+hw);
     lbl(dx+1,y+30.5,'E-Mail :'); val(dx+14,y+30.5, fit1(order.email||'',hw-16), 7.5);
     hln(dx,y+33,dx+hw);
-    lbl(dx+1,y+36,'Ph. :');
+    // Contact person (for orders bought on behalf of someone else)
+    lbl(dx+1,y+36,'Contact :'); val(dx+15,y+36, fit1(order.contactPersonName||'',hw-17), 7.5);
     hln(dx,y+39,dx+hw);
-    lbl(dx+1,y+42,'M. :');
+    lbl(dx+1,y+42,'Ph. :'); val(dx+9,y+42, fit1(order.contactNumber||'',hw-11), 7.5);
     y += cdH;
 
     // Instruction + discount
@@ -834,13 +861,17 @@ function generatePDF(order) {
     });
     y += tsH;
 
-    const rcH=9;
-    for(let r=0;r<2;r++){
+    const receipts = (order.moneyReceipts && order.moneyReceipts.length)
+      ? order.moneyReceipts : [{no:order.receiptNo||'',date:''}];
+    const rcH=8;
+    for(let r=0;r<3;r++){
+      const mr = receipts[r] || {no:'',date:''};
       brd(ml,y,cw/2,rcH); brd(ml+cw/2,y,cw/2,rcH);
-      lbl(ml+2,y+5.5,'Receipt No. & Dt :');
-      if(r===0&&order.receiptNo) val(ml+32,y+5.5, fit1(order.receiptNo,cw/2-34,7.5), 7.5);
-      lbl(ml+cw/2+2,y+5.5,'Amount Received :');
-      if(r===0&&earnest) val(ml+cw/2+32,y+5.5, fit1(inr(earnest),cw/2-34,7.5), 7.5);
+      lbl(ml+2,y+5,'Money Receipt No & Dt :');
+      const mrTxt = [mr.no,mr.date].filter(Boolean).join('  ·  ');
+      if(mrTxt) val(ml+40,y+5, fit1(mrTxt,cw/2-42,7.5), 7.5);
+      lbl(ml+cw/2+2,y+5,'Amount Received :');
+      if(r===0&&earnest) val(ml+cw/2+32,y+5, fit1(inr(earnest),cw/2-34,7.5), 7.5);
       y += rcH;
     }
 
@@ -890,7 +921,7 @@ function generatePDF(order) {
   y = drawTopBlock(y);
   y = drawItemsHeader(y);
 
-  const items = order.items || [];
+  const items = isCustomer ? customerCopyItems(order.items) : (order.items || []);
   for (let i = 0; i < items.length; i++) {
     if (y + rH > itemAreaBottom) {           // no room for another row → new page
       drawFooter();
@@ -905,7 +936,7 @@ function generatePDF(order) {
 
   // Totals must sit together on one page; move to a fresh page if they don't fit.
   const nTotRows      = 6 + (orderDiscAmt > 0 ? 2 : 0);
-  const totalsBlockH  = Math.max(5.7*nTotRows, 44) + 18 /*receipt*/ + 18 /*signature*/;
+  const totalsBlockH  = Math.max(5.7*nTotRows, 44) + 24 /*receipt*/ + 18 /*signature*/;
   if (y + totalsBlockH > itemAreaBottom) {
     drawFooter();
     doc.addPage(); pageNo++;
@@ -928,19 +959,56 @@ const { useState, useEffect, useRef, useCallback } = React;
 const BLANK_ORDER = () => ({
   no:'', customer:'', phone:'', alt:'', email:'',
   gstNumber:'',
-  billing:'', delivery:'', liftAvailable:'',
+  billing:'', delivery:'', floor:'', landmark:'', liftAvailable:'', liftType:'',
+  // Contact details (for orders purchased on behalf of someone else) —
+  // mandatory when the billing address differs from the delivery address.
+  contactPersonName:'', contactNumber:'', contactRemark:'',
   customerCode:'', poRef:'', source:'',
   discountCode:'', orderDiscount:'', plannedDly:'', installNote:'',
-  paymentMode:'', earnest:'', receiptNo:'',
+  paymentMode:'', earnest:'',
+  // Up to three money-receipt no + date pairs (updatable over time)
+  receiptNo:'', moneyReceipts:[{no:'',date:''},{no:'',date:''},{no:'',date:''}],
+  deliveryStatus:'Pending',
   followUp:'', salesExec:'', won:'',
   orderType:'B2C', items:[],
-  // Customer profiling (mandatory; saved to sheet, not on PDF)
+  // Customer profiling (saved to sheet, not on PDF). DOB & anniversary optional.
   dob:'', anniversary:'', awareness:'', purchasePattern:[], purchasingFor:'',
   // Site measurements (sofa ones are mandatory when a sofa is ordered + shown on PDF)
   sofaWidth:'', sofaHeight:'', sofaDepth:'',
   liftHeight:'', liftWidth:'', staircaseWidth:'', staircaseLandingHeight:'',
   entryDoorWidth:'', entryDoorHeight:'',
 });
+
+// Delivery-status options. The order is only "Completed" once installation is done.
+const DELIVERY_STATUSES = ['Pending', 'Scheduled for Delivery', 'Delivered', 'Installation Done'];
+// Lift types — one is required when a lift is available.
+const LIFT_TYPES = ['Standard Lift', 'Goods Lift', 'Service Lift'];
+// Godrej modular product families. On the CUSTOMER copy of the PDF, every item
+// belonging to one family is collapsed into a single line (family name + the
+// summed line total). The SALES copy stays fully itemised.
+const MODULAR_FAMILIES = [
+  { key:'kalista',    label:'Kalista',     test:s=>/kalista/i.test(s) },
+  { key:'kreationx3', label:'Kreation X3', test:s=>/kreation\s*[-_]?\s*x\s*[-_]?\s*3/i.test(s) },
+  { key:'kreationx2', label:'Kreation X2', test:s=>/kreation\s*[-_]?\s*x\s*[-_]?\s*2/i.test(s) },
+  { key:'upmods',     label:'Upmods Sofa', test:s=>/upmods/i.test(s) },
+];
+function modularFamilyOf(it) {
+  const hay = [it.cat, it.item, it.name].filter(Boolean).join(' ');
+  for (const f of MODULAR_FAMILIES) if (f.test(hay)) return f;
+  return null;
+}
+// Round half up: .5 and above → next integer, below .5 → previous integer.
+function rnd(n) { return Math.floor((Number(n) || 0) + 0.5); }
+
+// Follow-up date = 2 days before the planned delivery date (yyyy-mm-dd in, out).
+function followUpFromDelivery(deliveryDate) {
+  if (!deliveryDate) return '';
+  const d = new Date(deliveryDate + 'T00:00:00');
+  if (isNaN(d.getTime())) return '';
+  d.setDate(d.getDate() - 2);
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
 
 function App() {
   const [screen,        setScreen]       = useState('loading');
@@ -1176,10 +1244,10 @@ function App() {
     if (sent > 0) { showToast(sent+' pending order'+(sent>1?'s':'')+' synced ✓'); try { loadOrders(); } catch {} }
   }
 
-  async function doUpdateWON(orderNo, internalNo, won) {
+  async function doUpdateWON(orderNo, internalNo, won, itemIndexes) {
     setLoading(true);
     try {
-      const res = await apiPost({ action:'updateWON', orderNo, internalNo, won, updatedBy: user?.name });
+      const res = await apiPost({ action:'updateWON', orderNo, internalNo, won, itemIndexes, updatedBy: user?.name });
       if (res.ok) { showToast('WON updated ✓'); loadOrders(); return true; }
       else { showToast(res.error||'Update failed','bad'); return false; }
     } catch(e) { showToast(e.message,'bad'); return false; }
@@ -1752,19 +1820,32 @@ function OrderFormScreen({ctx}) {
     if(!o.customer) return ctx.showToast('Customer name is required','bad');
     if(!o.phone)    return ctx.showToast('Phone number is required','bad');
     if(!o.email)    return ctx.showToast('E-mail is required','bad');
+    if(!o.floor)    return ctx.showToast('Floor is required','bad');
+    if(!o.landmark) return ctx.showToast('Landmark is required','bad');
     if(!o.liftAvailable) return ctx.showToast('Select whether a lift is available','bad');
+    if(String(o.liftAvailable).toLowerCase().startsWith('y') && !o.liftType) return ctx.showToast('Select the lift type','bad');
+    // Contact details required when the billing & delivery addresses differ
+    const addrDiffer = (o.billing||'').trim() && (o.delivery||'').trim() && (o.billing||'').trim()!==(o.delivery||'').trim();
+    if(addrDiffer && (!o.contactPersonName||!o.contactNumber)) return ctx.showToast('Contact Person Name & Number are required (billing & delivery addresses differ)','bad');
     if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item','bad');
-    // Mandatory customer-profiling fields
-    if(!o.dob)          return ctx.showToast('Date of Birth is required','bad');
-    if(!o.anniversary)  return ctx.showToast('Marriage Anniversary is required','bad');
+    // Mandatory customer-profiling fields (DOB & anniversary are now optional)
     if(!o.awareness)    return ctx.showToast('Select the Lead Source','bad');
     if(!o.purchasePattern||o.purchasePattern.length===0) return ctx.showToast('Select the purchase pattern','bad');
     if(!o.purchasingFor) return ctx.showToast('Select what they are purchasing for','bad');
     // Sofa measurements are mandatory only when a sofa is in the order
     if(hasSofa && (!o.sofaWidth||!o.sofaHeight||!o.sofaDepth)) return ctx.showToast('Enter Sofa width, height & depth (mandatory for sofas)','bad');
     // Lead Source is now the awareness dropdown — keep the OPS "Source" column in sync
-    const saved = await doSaveOrder({...o,salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||''});
+    const saved = await doSaveOrder({...o,salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)});
     if(saved) { setOrder(saved); nav('pdf'); }
+  }
+
+  // Save whatever has been filled so far (no strict validation) so the order
+  // lands in history and any teammate can reopen and continue it later.
+  async function handleSaveDraft() {
+    if(!o.customer) return ctx.showToast('Enter at least the customer name to save a draft','bad');
+    if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item to save a draft','bad');
+    const saved = await doSaveOrder({...o,salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)});
+    if(saved) { setOrder(saved); ctx.showToast('Draft saved — you can reopen it from Orders','ok'); }
   }
 
   return (
@@ -1773,8 +1854,8 @@ function OrderFormScreen({ctx}) {
         <div style={{display:'flex',alignItems:'center',gap:10}}>
           <button onClick={back} style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
           <div>
-            <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>New order</div>
-            <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono}}>DRAFT{o.no?' · '+o.no:''}</div>
+            <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>{o.no?'Edit order':'New order'}</div>
+            <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono}}>{o.no?o.no:'DRAFT'}</div>
           </div>
         </div>
         <Pill tone={o.no?'ok':'warn'} size="sm">{o.no?'SAVED':'UNSAVED'}</Pill>
@@ -1794,8 +1875,8 @@ function OrderFormScreen({ctx}) {
             {AWARENESS.map(a=><option key={a}>{a}</option>)}
           </select>
         </div>
-        <Field label="Date of Birth" value={o.dob} onChange={v=>setF('dob',v)} type="date" mono required/>
-        <Field label="Marriage Anniversary" value={o.anniversary} onChange={v=>setF('anniversary',v)} type="date" mono required/>
+        <Field label="Date of Birth" value={o.dob} onChange={v=>setF('dob',v)} type="date" mono hint="Optional"/>
+        <Field label="Marriage Anniversary" value={o.anniversary} onChange={v=>setF('anniversary',v)} type="date" mono hint="Optional"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:8}}>Purchase Pattern <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
@@ -1818,6 +1899,8 @@ function OrderFormScreen({ctx}) {
         <SectionHead n="02" label="Address"/>
         <Field label="Billing Address" value={o.billing} onChange={v=>setF('billing',v)} multiline required/>
         <Field label="Delivery Address" value={o.delivery} onChange={v=>setF('delivery',v)} multiline action="SAME AS BILLING" onAction={()=>setF('delivery',o.billing)}/>
+        <Field label="Floor" value={o.floor} onChange={v=>setF('floor',v)} required hint="Mandatory"/>
+        <Field label="Landmark" value={o.landmark} onChange={v=>setF('landmark',v)} required hint="Mandatory"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Lift available? <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <select value={o.liftAvailable} onChange={e=>setF('liftAvailable',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.liftAvailable?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
@@ -1826,6 +1909,32 @@ function OrderFormScreen({ctx}) {
             <option>No</option>
           </select>
         </div>
+        {String(o.liftAvailable||'').toLowerCase().startsWith('y') && (
+          <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+            <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:8}}>Lift type <span style={{color:T.bad,marginLeft:3}}>*</span></div>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+              {LIFT_TYPES.map(lt=>{ const on=o.liftType===lt; return (
+                <label key={lt} style={{display:'inline-flex',alignItems:'center',gap:6,padding:'6px 12px',borderRadius:99,cursor:'pointer',border:`1px solid ${on?T.green:T.line}`,background:on?T.greenSoft:'#fff'}}>
+                  <input type="checkbox" checked={on} onChange={()=>setF('liftType',on?'':lt)} style={{width:14,height:14,accentColor:T.green,cursor:'pointer'}}/>
+                  <span style={{fontSize:12,fontWeight:600,color:on?T.green:T.ink3}}>{lt}</span>
+                </label>
+              );})}
+            </div>
+          </div>
+        )}
+        {/* Contact details — for orders bought on behalf of someone else.
+            Mandatory when the billing address differs from the delivery address. */}
+        {(()=>{ const diff = (o.billing||'').trim() && (o.delivery||'').trim() && (o.billing||'').trim()!==(o.delivery||'').trim(); return (
+          <>
+            <SectionHead n="02b" label={`Contact Details${diff?' · required':' · optional'}`}/>
+            <div style={{padding:'8px 14px',background:diff?T.warnSoft:T.paper2,borderBottom:`1px solid ${T.line}`,fontSize:11,color:diff?T.warn:T.ink4,fontWeight:600}}>
+              For orders purchased for someone else. {diff?'Required — billing & delivery addresses differ.':'Optional.'}
+            </div>
+            <Field label="Contact Person Name" value={o.contactPersonName} onChange={v=>setF('contactPersonName',v)} required={diff}/>
+            <Field label="Contact Number" value={o.contactNumber} onChange={v=>setF('contactNumber',v)} mono type="tel" required={diff}/>
+            <Field label="Remark" value={o.contactRemark} onChange={v=>setF('contactRemark',v)} multiline/>
+          </>
+        );})()}
 
         <SectionHead n="03" label="Site Measurements"/>
         {hasSofa && (
@@ -1892,12 +2001,20 @@ function OrderFormScreen({ctx}) {
                   {/* Scheme flags — saved to CRM "Disc Allowed"; NOT printed on the PDF */}
                   <div style={{display:'flex',gap:8,marginTop:8,alignItems:'center',flexWrap:'wrap'}}>
                     <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>SCHEME</span>
-                    {[['ageing','Ageing'],['sweetner','Sweetner']].map(([k,lbl])=>(
+                    {[['ageing','Ageing'],['sweetner','Sweetner'],['other','Other']].map(([k,lbl])=>(
                       <label key={k} style={{display:'inline-flex',alignItems:'center',gap:5,padding:'3px 9px',borderRadius:99,cursor:'pointer',border:`1px solid ${it[k]?T.green:T.line}`,background:it[k]?T.greenSoft:'#fff'}}>
                         <input type="checkbox" checked={!!it[k]} onChange={()=>toggleScheme(i,k)} style={{width:14,height:14,accentColor:T.green,cursor:'pointer'}}/>
                         <span style={{fontSize:11,fontWeight:600,color:it[k]?T.green:T.ink3}}>{lbl}</span>
                       </label>
                     ))}
+                    {it.other&&(
+                      <input
+                        value={it.schemeCode||''}
+                        onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,schemeCode:v}:x)}));}}
+                        placeholder="Scheme code"
+                        style={{width:120,border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 8px',fontFamily:T.mono,fontSize:12,color:T.ink}}
+                      />
+                    )}
                   </div>
                 </div>
                 <div style={{textAlign:'right',flexShrink:0}}>
@@ -1916,7 +2033,7 @@ function OrderFormScreen({ctx}) {
         <SectionHead n="05" label="Commercials"/>
         <Field label="Discount Code" value={o.discountCode} onChange={v=>setF('discountCode',v)} mono hint="e.g. 11% or 11%+5%"/>
         <Field label="Additional Order Discount %" value={o.orderDiscount} onChange={v=>setF('orderDiscount',v.replace(/[^\d.]/g,''))} mono type="number" hint="Extra discount on the whole order (on top of per-item discounts). Shown on the PDF."/>
-        <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setF('plannedDly',v)} mono required type="date"/>
+        <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setOrder(prev=>({...prev,plannedDly:v,followUp:followUpFromDelivery(v)||prev.followUp}))} mono required type="date" hint="Follow-up auto-set to 2 days before this date"/>
         <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
         <SectionHead n="06" label="Payment"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
@@ -1926,7 +2043,8 @@ function OrderFormScreen({ctx}) {
             <option>Cash</option>
             <option>UPI (GPay / PhonePe / Paytm)</option>
             <option>IDBI QR</option>
-            <option>Debit / Credit Card</option>
+            <option>Credit Card</option>
+            <option>Debit Card</option>
             <option>Cheque</option>
             <option>NEFT / RTGS / Bank Transfer</option>
             <option>Bajaj Finance EMI</option>
@@ -1934,8 +2052,25 @@ function OrderFormScreen({ctx}) {
           </select>
         </div>
         <Field label="Earnest Amount" value={o.earnest} onChange={v=>setF('earnest',v)} mono type="number" required/>
-        <Field label="Receipt No. & Date" value={o.receiptNo} onChange={v=>setF('receiptNo',v)} mono/>
-        <Field label="Follow-up Date" value={o.followUp} onChange={v=>setF('followUp',v)} mono type="date" hint="Reminder at 10:00 AM"/>
+        {/* Money receipt no + date — updatable up to 3 times */}
+        {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:''}; const setMR=(field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:''},{no:'',date:''},{no:'',date:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; }); return (
+          <div key={i} style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
+            <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
+              <Field label={`Money Receipt No ${i+1}`} value={mr.no} onChange={v=>setMR('no',v)} mono/>
+            </div>
+            <div style={{flex:1}}>
+              <Field label={`Date ${i+1}`} value={mr.date} onChange={v=>setMR('date',v)} mono type="date"/>
+            </div>
+          </div>
+        );})}
+        <Field label="Follow-up Date" value={o.followUp} onChange={v=>setF('followUp',v)} mono type="date" hint="Auto-set to 2 days before planned delivery · reminder at 10:00 AM"/>
+        <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Delivery Status</div>
+          <select value={o.deliveryStatus||'Pending'} onChange={e=>setF('deliveryStatus',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+            {DELIVERY_STATUSES.map(s=><option key={s}>{s}</option>)}
+          </select>
+          <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Order is Completed only when "Installation Done".</div>
+        </div>
         <SectionHead n="07" label="Internal"/>
         <Field label="Salesperson" value={o.salesExec||user?.name||''} onChange={v=>setF('salesExec',v)} mono/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
@@ -1966,8 +2101,9 @@ function OrderFormScreen({ctx}) {
         </div>
       </div>
       <div style={{display:'flex',gap:8,padding:'10px 14px',background:'#fff',borderTop:`1px solid ${T.line}`,flexShrink:0}}>
-        <Btn onClick={()=>{ if((o.items&&o.items.length)&&!window.confirm('Discard this order and its items?'))return; try{localStorage.removeItem('4s_draft');}catch{} setOrder(BLANK_ORDER()); nav('home'); }}>Discard</Btn>
-        <Btn primary full onClick={handleSave}>Save & Generate PDF →</Btn>
+        <Btn onClick={()=>{ if((o.items&&o.items.length)&&!window.confirm('Discard changes to this order?'))return; try{localStorage.removeItem('4s_draft');}catch{} setOrder(BLANK_ORDER()); nav('home'); }}>Discard</Btn>
+        <Btn onClick={handleSaveDraft}>Save Draft</Btn>
+        <Btn primary full onClick={handleSave}>Save & PDF →</Btn>
       </div>
     </div>
   );
@@ -1993,9 +2129,12 @@ function PDFPreviewScreen({ctx}) {
     }
   },[o.no]);
 
-  function downloadPDF() {
-    const doc = generatePDF(o);
-    doc.save('Order-'+(o.no||'draft').replace('/','‑')+'.pdf');
+  const safeNo = (o.no||'draft').replace('/','‑');
+  function downloadCustomer() {
+    generatePDF(o, 'customer').save('Order-'+safeNo+'-Customer.pdf');
+  }
+  function downloadSales() {
+    generatePDF(o, 'sales').save('Order-'+safeNo+'-Sales.pdf');
   }
 
   function whatsapp() {
@@ -2070,10 +2209,15 @@ function PDFPreviewScreen({ctx}) {
         </div>}
         <div style={{height:16}}/>
       </div>
-      <div style={{display:'flex',gap:8,padding:'10px 14px 16px',background:T.ink2,borderTop:'1px solid rgba(255,255,255,.08)',flexShrink:0}}>
-        <button onClick={whatsapp} style={{flex:2,height:48,borderRadius:6,background:'#25d366',border:'none',color:'#fff',fontWeight:700,fontFamily:T.sans,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:7,cursor:'pointer'}}>{Icon.whatsapp()}WhatsApp</button>
-        <button onClick={downloadPDF} style={{flex:1,height:48,borderRadius:6,background:'rgba(255,255,255,.08)',border:'1px solid rgba(255,255,255,.15)',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',gap:6,cursor:'pointer',fontSize:12,fontWeight:600,fontFamily:T.sans}}>{Icon.download('#fff',16)}PDF</button>
-        <button onClick={()=>nav('home')} style={{flex:1,height:48,borderRadius:6,background:'#fff',border:'none',color:T.ink,fontWeight:700,fontFamily:T.sans,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>Done</button>
+      <div style={{display:'flex',flexDirection:'column',gap:8,padding:'10px 14px 16px',background:T.ink2,borderTop:'1px solid rgba(255,255,255,.08)',flexShrink:0}}>
+        <div style={{display:'flex',gap:8}}>
+          <button onClick={downloadCustomer} style={{flex:1,height:46,borderRadius:6,background:T.green,border:'none',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',gap:6,cursor:'pointer',fontSize:13,fontWeight:700,fontFamily:T.sans}}>{Icon.download('#fff',16)}Customer PDF</button>
+          <button onClick={downloadSales} style={{flex:1,height:46,borderRadius:6,background:'rgba(255,255,255,.08)',border:'1px solid rgba(255,255,255,.15)',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',gap:6,cursor:'pointer',fontSize:13,fontWeight:600,fontFamily:T.sans}}>{Icon.download('#fff',16)}Sales PDF</button>
+        </div>
+        <div style={{display:'flex',gap:8}}>
+          <button onClick={whatsapp} style={{flex:2,height:46,borderRadius:6,background:'#25d366',border:'none',color:'#fff',fontWeight:700,fontFamily:T.sans,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:7,cursor:'pointer'}}>{Icon.whatsapp()}WhatsApp</button>
+          <button onClick={()=>nav('home')} style={{flex:1,height:46,borderRadius:6,background:'#fff',border:'none',color:T.ink,fontWeight:700,fontFamily:T.sans,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>Done</button>
+        </div>
       </div>
     </div>
   );
@@ -2084,17 +2228,27 @@ function HistoryScreen({ctx}) {
   const {orders,nav,loadOrders} = ctx;
   const [tab,setTab] = useState('all');
   const [wonOrder,setWonOrder] = useState(null);
+  const [query,setQuery] = useState('');
+  const [salesFilter,setSalesFilter] = useState('');
   useEffect(()=>{ loadOrders(); },[]);
   const tabs = [
-    {id:'all',     label:'All',         filter:()=>true},
-    {id:'pending', label:'Pend WON',    filter:o=>!o.won&&o.status!=='draft'},
-    {id:'drafts',  label:'Drafts',      filter:o=>o.status==='draft'},
-    {id:'delivered',label:'Delivered',  filter:o=>o.status==='delivered'},
+    {id:'all',      label:'All',        filter:()=>true},
+    {id:'pending',  label:'Pend WON',   filter:o=>!o.won&&o.status!=='draft'},
+    {id:'delivered',label:'Delivered',  filter:o=>/delivered/i.test(o.deliveryStatus||'')},
+    {id:'completed',label:'Completed',  filter:o=>o.status==='completed'||/installation done/i.test(o.deliveryStatus||'')},
   ];
   const active = tabs.find(t=>t.id===tab)||tabs[0];
-  const shown  = orders.filter(active.filter);
+
+  // Distinct salespersons for the filter dropdown
+  const salespeople = [...new Set(orders.map(o=>(o.salesExec||'').trim()).filter(Boolean))].sort();
+  const q = query.trim().toLowerCase();
+  const matchesQuery = o => !q || String(o.no||'').toLowerCase().includes(q) || String(o.won||'').toLowerCase().includes(q);
+  const matchesSales = o => !salesFilter || (o.salesExec||'').trim()===salesFilter;
+  const shown = orders.filter(active.filter).filter(matchesQuery).filter(matchesSales);
 
   if(wonOrder) return <WONUpdateScreen ctx={ctx} orderOverride={wonOrder} onClose={()=>setWonOrder(null)}/>;
+
+  const openOrder = o => { ctx.setOrder({...BLANK_ORDER(),...o}); nav('order'); };
 
   return (
     <div className="screen">
@@ -2103,7 +2257,23 @@ function HistoryScreen({ctx}) {
           <div><div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>LEDGER · {orders.length} ORDERS</div><div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2}}>Orders</div></div>
           <Btn size="sm" icon={Icon.refresh(T.ink2,14)} onClick={loadOrders}>Refresh</Btn>
         </div>
-        <div style={{padding:'4px 18px 10px',display:'flex',gap:6,overflowX:'auto'}}>
+        {/* Search by Order ID or SO No (WON) */}
+        <div style={{padding:'2px 18px 8px'}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'8px 12px'}}>
+            {Icon.search(T.ink4,16)}
+            <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search by Order ID or SO No (WON)" style={{flex:1,border:'none',outline:'none',fontSize:14,fontFamily:T.sans,color:T.ink,background:'transparent'}}/>
+            {query&&<span onClick={()=>setQuery('')} style={{cursor:'pointer'}}>{Icon.close(T.ink4,14)}</span>}
+          </div>
+        </div>
+        {/* Filter by salesperson */}
+        <div style={{padding:'0 18px 8px',display:'flex',gap:6,overflowX:'auto',alignItems:'center'}}>
+          <span style={{fontSize:11,color:T.ink4,fontWeight:700,flexShrink:0}}>SALES</span>
+          <span onClick={()=>setSalesFilter('')} style={{padding:'5px 10px',borderRadius:99,background:!salesFilter?T.green:'#fff',color:!salesFilter?'#fff':T.ink2,border:`1px solid ${!salesFilter?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0}}>All</span>
+          {salespeople.map(sp=>(
+            <span key={sp} onClick={()=>setSalesFilter(sp)} style={{padding:'5px 10px',borderRadius:99,background:salesFilter===sp?T.green:'#fff',color:salesFilter===sp?'#fff':T.ink2,border:`1px solid ${salesFilter===sp?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>{sp}</span>
+          ))}
+        </div>
+        <div style={{padding:'0 18px 10px',display:'flex',gap:6,overflowX:'auto'}}>
           {tabs.map(t=>{
             const n = orders.filter(t.filter).length;
             return <span key={t.id} onClick={()=>setTab(t.id)} style={{padding:'6px 11px',borderRadius:99,background:t.id===tab?T.ink:'#fff',color:t.id===tab?'#fff':T.ink2,border:`1px solid ${t.id===tab?T.ink:T.line}`,fontSize:12,fontWeight:600,display:'inline-flex',gap:5,alignItems:'center',cursor:'pointer',flexShrink:0}}>{t.label}<span style={{fontFamily:T.mono,opacity:.7,fontSize:11}}>{n}</span></span>;
@@ -2112,24 +2282,26 @@ function HistoryScreen({ctx}) {
       </div>
       <div className="scroll">
         {shown.map(o=>(
-          <div key={o.no} style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`,padding:'12px 18px',display:'grid',gridTemplateColumns:'1fr auto',gap:10,cursor:'pointer'}} onClick={()=>{ctx.setOrder(o);nav('pdf');}}>
+          <div key={o.no} style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`,padding:'12px 18px',display:'grid',gridTemplateColumns:'1fr auto',gap:10,cursor:'pointer'}} onClick={()=>openOrder(o)}>
             <div style={{minWidth:0}}>
-              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3,flexWrap:'wrap'}}>
                 <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
-                {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:<span onClick={e=>{e.stopPropagation();setWonOrder(o);}} style={{display:'inline-flex',alignItems:'center',height:16,padding:'0 6px',borderRadius:4,background:T.warnSoft,color:T.warn,border:'1px solid #e6cc95',fontSize:10,fontWeight:700,cursor:'pointer'}}>+ ADD WON</span>}
+                {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:null}
+                <span onClick={e=>{e.stopPropagation();setWonOrder(o);}} style={{display:'inline-flex',alignItems:'center',height:16,padding:'0 6px',borderRadius:4,background:T.warnSoft,color:T.warn,border:'1px solid #e6cc95',fontSize:10,fontWeight:700,cursor:'pointer'}}>{o.won?'+ SO':'+ ADD SO'}</span>
               </div>
               <div style={{fontSize:14,fontWeight:700,color:T.ink}}>{o.customer}</div>
-              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.salesExec} · {o.status.toUpperCase()}</div>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.salesExec} · {(o.deliveryStatus||o.status||'').toUpperCase()}</div>
             </div>
             <div style={{textAlign:'right'}}>
-              <div style={{fontSize:16,fontFamily:T.mono,fontWeight:700,color:T.ink,letterSpacing:-0.4}}>₹{o.amt.toLocaleString('en-IN')}</div>
+              <div style={{fontSize:16,fontFamily:T.mono,fontWeight:700,color:T.ink,letterSpacing:-0.4}}>₹{(o.amt||0).toLocaleString('en-IN')}</div>
               <div style={{display:'flex',gap:6,marginTop:6,justifyContent:'flex-end'}}>
+                <span onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...o});nav('pdf');}} style={{width:28,height:24,borderRadius:4,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,13)}</span>
                 <span onClick={e=>{e.stopPropagation();const phone=(o.phone||'').replace(/\D/g,'');if(phone)window.open('https://wa.me/91'+phone);}} style={{width:28,height:24,borderRadius:4,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',13)}</span>
               </div>
             </div>
           </div>
         ))}
-        {shown.length===0&&<div style={{padding:32,textAlign:'center',fontSize:13,color:T.ink4}}>No orders in this tab.</div>}
+        {shown.length===0&&<div style={{padding:32,textAlign:'center',fontSize:13,color:T.ink4}}>No orders match.</div>}
         <div style={{height:24}}/>
       </div>
       <BottomNav screen="history" nav={nav}/>
@@ -2141,37 +2313,69 @@ function HistoryScreen({ctx}) {
 function WONUpdateScreen({ctx,orderOverride,onClose}) {
   const o = orderOverride || ctx.order;
   const {nav,doUpdateWON} = ctx;
-  const [won,setWon] = useState(o.won||'');
+  const [won,setWon] = useState('');
+  const items = o.items || [];
+  // Pre-select the items that don't yet carry a SO/WON.
+  const [sel,setSel] = useState(()=>items.map(it=>!String(it.won||'').trim()));
+  const toggle = i => setSel(prev=>prev.map((v,j)=>j===i?!v:v));
+  const anySel = sel.some(Boolean);
+
   async function submit() {
-    if(!won||won.length<6) return ctx.showToast('Enter a valid WON number','bad');
-    const ok = await doUpdateWON(o.no, o.internalNo, won.toUpperCase().startsWith('WON')?won.toUpperCase():'WON'+won);
+    if(!won||won.length<6) return ctx.showToast('Enter a valid SO / WON number','bad');
+    if(items.length && !anySel) return ctx.showToast('Select at least one item for this SO No','bad');
+    const wonFmt = won.toUpperCase().startsWith('WON')?won.toUpperCase():'WON'+won.toUpperCase();
+    // When every item is selected (or the order has no reconstructed items) send
+    // no index list → apply to the whole order.
+    const idxs = items.length && !sel.every(Boolean) ? sel.map((v,i)=>v?i:-1).filter(i=>i>=0) : null;
+    const ok = await doUpdateWON(o.no, o.internalNo, wonFmt, idxs);
     if(ok) { if(onClose) onClose(); else nav('history'); }
   }
   return (
     <div className="screen">
       <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 14px 14px',flexShrink:0}}>
         <button onClick={()=>onClose?onClose():nav('history')} style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
-        <div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4}}>Update WON / SO</div>
+        <div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4}}>Update SO No / WON</div>
       </div>
       <div className="scroll" style={{padding:'0 18px'}}>
         <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:14,marginBottom:14}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:4}}>
             <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
-            <Pill tone="warn" size="sm">PENDING WON</Pill>
+            {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:<Pill tone="warn" size="sm">PENDING SO</Pill>}
           </div>
           <div style={{fontSize:16,fontWeight:700}}>{o.customer}</div>
           <div style={{fontSize:11,color:T.ink4,marginTop:2,fontFamily:T.mono}}>{o.date} · ₹{(o.amt||0).toLocaleString('en-IN')}</div>
         </div>
         <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1,marginBottom:8}}>GODREJ SO / WON NUMBER</div>
-        <div style={{background:'#fff',border:`2px solid ${T.green}`,borderRadius:8,padding:'14px 16px',marginBottom:12}}>
+        <div style={{background:'#fff',border:`2px solid ${T.green}`,borderRadius:8,padding:'14px 16px',marginBottom:14}}>
           <input value={won} onChange={e=>setWon(e.target.value)} placeholder="WON036031" autoCapitalize="characters" style={{width:'100%',border:'none',outline:'none',fontFamily:T.mono,fontSize:24,fontWeight:700,letterSpacing:1.5,color:T.ink,background:'transparent'}}/>
           <div style={{fontSize:11,color:T.ink4,marginTop:4}}>From Godrej confirmation email</div>
         </div>
+        {items.length>0&&(
+          <>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:8}}>
+              <span style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1}}>APPLY TO ITEMS</span>
+              <span onClick={()=>setSel(items.map(()=>!sel.every(Boolean)))} style={{fontSize:11,color:T.green,fontWeight:700,cursor:'pointer'}}>{sel.every(Boolean)?'Clear all':'Select all'}</span>
+            </div>
+            <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,overflow:'hidden',marginBottom:16}}>
+              {items.map((it,i)=>(
+                <label key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 12px',borderBottom:i<items.length-1?`1px solid ${T.line}`:'none',cursor:'pointer'}}>
+                  <input type="checkbox" checked={!!sel[i]} onChange={()=>toggle(i)} style={{width:16,height:16,accentColor:T.green,cursor:'pointer'}}/>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:13,fontWeight:600,color:T.ink}}>{it.name||it.code||('Item '+(i+1))}</div>
+                    <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:1}}>{it.code} · ×{it.qty}{it.won?' · SO '+it.won:''}</div>
+                  </div>
+                  {it.won?<Pill tone="ok" mono size="sm">{it.won}</Pill>:null}
+                </label>
+              ))}
+            </div>
+          </>
+        )}
         <div style={{padding:12,background:T.greenSoft,border:`1px solid ${T.greenLine}`,borderRadius:6,display:'flex',gap:10,marginBottom:20}}>
           {Icon.bolt(T.green,14)}
-          <div style={{fontSize:11.5,color:T.ink2,lineHeight:1.5}}><b style={{color:T.green}}>This updates:</b> the saved PDF, customer QR copy, the Orders sheet, and the Change-log sheet.</div>
+          <div style={{fontSize:11.5,color:T.ink2,lineHeight:1.5}}><b style={{color:T.green}}>Multiple SO numbers:</b> select only the items this SO No covers. Run this again with another SO No for the remaining items.</div>
         </div>
-        <Btn primary full size="lg" onClick={submit}>Update & re-issue PDF</Btn>
+        <Btn primary full size="lg" onClick={submit}>Update SO No</Btn>
+        <div style={{height:20}}/>
       </div>
     </div>
   );
