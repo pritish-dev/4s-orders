@@ -886,7 +886,11 @@ function handleOrders(p) {
     if (!no && !ph) continue;
     var key = no + '|' + ph;
     if (!map[key]) {
-      var disc = sval(r, cOrdDisc).replace('%', '');
+      // Order discount: a legacy "40%" cell may have been stored as 0.40 — scale
+      // any 0<x<1 fraction back to a whole-number percent.
+      var odNum = parseFloat(sval(r, cOrdDisc).replace('%', '')) || 0;
+      if (odNum > 0 && odNum < 1) odNum = odNum * 100;
+      var disc = odNum ? String(odNum) : '';
       map[key] = {
         no: no,
         internalNo: cIntNo >= 0 ? Number(r[cIntNo]) || 0 : 0,
@@ -951,6 +955,7 @@ function handleOrders(p) {
     var qty  = cIQty >= 0 ? Number(r[cIQty]) || 0 : 0;
     var mrp  = cIMrp >= 0 ? Number(r[cIMrp]) || 0 : 0;
     var discPct = parseFloat(sval(r, cIDisc).replace('%', '')) || 0;
+    if (discPct > 0 && discPct < 1) discPct = discPct * 100;   // legacy "40%" stored as 0.40
     var unitPrice = Math.round(mrp * (1 - discPct / 100));
     var schemeStr = sval(r, cISchm);
     var otherMatch = schemeStr.match(/Other\s*:?\s*([^,]*)/i);
@@ -1336,8 +1341,11 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['CONTACT PERSON NAME', 'CONTACT PERSON'], o.contactPersonName || '');
     put(['CONTACT PERSON NUMBER', 'CONTACT PERSON CONTACT NUMBER'], o.contactNumber || '');
     put(['CONTACT REMARK', 'CONTACT REMARKS'], o.contactRemark || '');
-    put(['ORDER DISCOUNT %', 'ADDITIONAL ORDER DISCOUNT %', 'ORDER DISCOUNT'], o.orderDiscount ? (o.orderDiscount + '%') : '');
-    put(['ITEM DISCOUNT %', 'PER ITEM DISCOUNT %', 'ITEM DISC %'], (parseFloat(it.disc) || 0) ? (parseFloat(it.disc) + '%') : '');
+    // Write discounts as plain whole-number percents (40, not "40%"): a "%"
+    // string makes Google Sheets store the underlying fraction (0.40), which
+    // then reads back as 0.4% and mis-scales the discount on reopen.
+    put(['ORDER DISCOUNT %', 'ADDITIONAL ORDER DISCOUNT %', 'ORDER DISCOUNT'], (parseFloat(o.orderDiscount) || 0) || '');
+    put(['ITEM DISCOUNT %', 'PER ITEM DISCOUNT %', 'ITEM DISC %'], (parseFloat(it.disc) || 0) || '');
     put(['PAYMENT MODE'], o.paymentMode || '');
     put(['FOLLOW-UP DATE', 'FOLLOW UP DATE', 'FOLLOWUP DATE'], o.followUp || '');
     put(['SPECIFIC INSTRUCTION', 'INSTALLATION NOTE', 'INSTALL NOTE'], o.installNote || '');

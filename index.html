@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '25';
+  var V = '26';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -881,6 +881,32 @@ function generatePDF(order, copyType) {
         doc.text('on Google — we value your feedback!', qx+qs+3, qy+qs/2+3.5);
       } catch(e) {}
     }
+    // Sales copy: the review-QR area is free, so list every scheme applied here
+    // (with the scheme code spelled out when "Other" is selected).
+    if (!isCustomer) {
+      const schemeRows = [];
+      (order.items||[]).forEach(it => {
+        const s = [];
+        if (it.ageing)   s.push('Ageing');
+        if (it.sweetner) s.push('Sweetner');
+        if (it.other)    s.push(it.schemeCode ? ('Other: ' + it.schemeCode) : 'Other');
+        if (s.length) schemeRows.push('• ' + (it.name || it.code || 'Item') + ' — ' + s.join(', '));
+      });
+      const sy = order.gstNumber ? y+19 : y+11;
+      doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...DRED);
+      doc.text('Schemes Applied', ml+2, sy);
+      if (schemeRows.length) {
+        doc.setFont('helvetica','normal'); doc.setFontSize(6.3); doc.setTextColor(...INK);
+        let ly = sy+4; const maxY = y+tsH-2;
+        for (let si=0; si<schemeRows.length && ly<=maxY; si++) {
+          const lines = doc.splitTextToSize(schemeRows[si], tsLW-4);
+          for (let li=0; li<lines.length && ly<=maxY; li++) { doc.text(lines[li], ml+2, ly); ly += 3.2; }
+        }
+      } else {
+        doc.setFont('helvetica','normal'); doc.setFontSize(6.3); doc.setTextColor(...GR);
+        doc.text('None', ml+2, sy+4);
+      }
+    }
     const vSp = tsRX+tsRW*0.54;
     vln(vSp,y,y+tsH);
     const rs = tsH/fRows.length;
@@ -1048,6 +1074,28 @@ function availabilityTier(it) {
 }
 // Round half up: .5 and above → next integer, below .5 → previous integer.
 function rnd(n) { return Math.floor((Number(n) || 0) + 0.5); }
+
+// A saved order re-read from the sheet can carry a discount that Google Sheets
+// stored as a fraction (writing the string "40%" makes Sheets keep 0.40).
+// Normalize any 0<x<1 percent back to whole-number percent, and recompute each
+// item's unit price / line total so a reopened order matches what was entered.
+function normalizeLoadedOrder(o) {
+  if (!o) return o;
+  const fixPct = v => {
+    const n = parseFloat(v);
+    if (!isFinite(n) || n <= 0) return (v == null ? '' : v);
+    if (n > 0 && n < 1) return String(Math.round(n * 10000) / 100);   // 0.4 → 40, 0.075 → 7.5
+    return String(n);
+  };
+  const items = (o.items || []).map(it => {
+    const disc = fixPct(it.disc);
+    const mrp  = Number(it.mrp) || Number(it.cpl) || 0;
+    const qty  = Number(it.qty) || 0;
+    const up   = mrp > 0 ? Math.round(mrp * (1 - (parseFloat(disc) || 0) / 100)) : (Number(it.unitPrice) || 0);
+    return { ...it, disc, unitPrice: up, total: up * qty };
+  });
+  return { ...o, orderDiscount: fixPct(o.orderDiscount), items };
+}
 
 // Follow-up date = 2 days before the planned delivery date (yyyy-mm-dd in, out).
 function followUpFromDelivery(deliveryDate) {
@@ -1788,11 +1836,13 @@ function SearchScreen({ctx}) {
                   {/* Tags row: ITEM_GROUP category + item code + sheet + OOS */}
                   <div style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap',marginBottom:4}}>
                     {it.item && <Pill tone="neutral" size="sm" style={{fontWeight:600}}>{it.item}</Pill>}
-                    {it.code && <span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:600}}>{it.code}</span>}
+                    {/* Always show the correct code to order — the Alt code replaces
+                        the old one for discontinued "change of code" items. */}
+                    {(it.altCode||it.code) && <span style={{fontFamily:T.mono,fontSize:10,color:it.altCode?T.green:T.ink4,fontWeight:700}}>{it.altCode||it.code}</span>}
                     <Pill tone="neutral" size="sm">{(it.sheet||it.cat||'').toUpperCase()}</Pill>
                     {oos && <Pill tone="bad" size="sm">OUT OF STOCK</Pill>}
                     {it.discontinued && <Pill tone="bad" size="sm">DISCONTINUED{it.discSince?' since '+it.discSince:''}</Pill>}
-                    {it.altCode && <Pill tone="warn" size="sm">USE CODE {it.altCode}</Pill>}
+                    {it.altCode && <Pill tone="warn" size="sm">REPLACES {it.code}</Pill>}
                   </div>
                   {/* Extra info (e.g. mattress thickness) */}
                   {it.extra && <div style={{fontSize:10,color:T.ink4,marginBottom:4}}>{it.extra}</div>}
@@ -2321,7 +2371,7 @@ function HistoryScreen({ctx}) {
 
   if(wonOrder) return <WONUpdateScreen ctx={ctx} orderOverride={wonOrder} onClose={()=>setWonOrder(null)}/>;
 
-  const openOrder = o => { ctx.setOrder({...BLANK_ORDER(),...o}); nav('order'); };
+  const openOrder = o => { ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)}); nav('order'); };
 
   return (
     <div className="screen">
@@ -2372,7 +2422,7 @@ function HistoryScreen({ctx}) {
                   style={{padding:'4px 6px',borderRadius:4,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:11,fontWeight:600,cursor:'pointer',WebkitAppearance:'none',appearance:'none',maxWidth:130}}>
                   {DELIVERY_STATUSES.map(s=><option key={s} value={s}>{s}</option>)}
                 </select>
-                <span onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...o});nav('pdf');}} style={{width:28,height:24,borderRadius:4,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,13)}</span>
+                <span onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)});nav('pdf');}} style={{width:28,height:24,borderRadius:4,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,13)}</span>
                 <span onClick={e=>{e.stopPropagation();const phone=(o.phone||'').replace(/\D/g,'');if(phone)window.open('https://wa.me/91'+phone);}} style={{width:28,height:24,borderRadius:4,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',13)}</span>
               </div>
             </div>
