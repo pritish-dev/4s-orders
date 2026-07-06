@@ -765,8 +765,6 @@ function generatePDF(order, copyType) {
       measParts.push('Sofa (W x H x D): ' + [order.sofaWidth,order.sofaHeight,order.sofaDepth].map(v=>v||'-').join(' x '));
     if (order.wardrobeLength||order.wardrobeWidth||order.wardrobeHeight)
       measParts.push('Wardrobe (L x W x H): ' + [order.wardrobeLength,order.wardrobeWidth,order.wardrobeHeight].map(v=>v||'-').join(' x '));
-    if (order.liftHeight||order.liftWidth)
-      measParts.push('Lift (H x W): ' + [order.liftHeight,order.liftWidth].map(v=>v||'-').join(' x '));
     if (order.staircaseWidth||order.staircaseLandingHeight)
       measParts.push('Staircase (W / Landing H): ' + [order.staircaseWidth,order.staircaseLandingHeight].map(v=>v||'-').join(' / '));
     if (order.entryDoorWidth||order.entryDoorHeight)
@@ -1043,7 +1041,7 @@ const BLANK_ORDER = () => ({
   // item is ordered + printed on both PDF copies)
   sofaWidth:'', sofaHeight:'', sofaDepth:'',
   wardrobeLength:'', wardrobeWidth:'', wardrobeHeight:'',
-  liftHeight:'', liftWidth:'', staircaseWidth:'', staircaseLandingHeight:'',
+  staircaseWidth:'', staircaseLandingHeight:'',
   entryDoorWidth:'', entryDoorHeight:'',
 });
 
@@ -1969,17 +1967,12 @@ function OrderFormScreen({ctx}) {
     if(!o.awareness)    return ctx.showToast('Select the Lead Source','bad');
     if(!o.purchasePattern||o.purchasePattern.length===0) return ctx.showToast('Select the purchase pattern','bad');
     if(!o.purchasingFor) return ctx.showToast('Select what they are purchasing for','bad');
-    // Sofa measurements are mandatory only when a sofa is in the order
+    // Sofa: sofa dims + entry-door site measurement are mandatory
     if(hasSofa && (!o.sofaWidth||!o.sofaHeight||!o.sofaDepth)) return ctx.showToast('Enter Sofa width, height & depth (mandatory for sofas)','bad');
-    // Modular-wardrobe measurements are mandatory when a Kalista / Kreation X2 / X3 is in the order
+    if(hasSofa && (!o.entryDoorWidth||!o.entryDoorHeight)) return ctx.showToast('Enter Entry Door width & height (required for sofa orders)','bad');
+    // Modular wardrobe (Kalista / Kreation X2 / X3): wardrobe dims + site (staircase) measurement are mandatory
     if(hasWardrobe && (!o.wardrobeLength||!o.wardrobeWidth||!o.wardrobeHeight)) return ctx.showToast('Enter Wardrobe length, width & height (mandatory for modular wardrobes)','bad');
-    // Site-access measurements are a must for modular wardrobe / sofa orders
-    if(hasWardrobe||hasSofa){
-      if(!o.entryDoorWidth||!o.entryDoorHeight) return ctx.showToast('Enter Entry Door width & height (required for modular wardrobe / sofa)','bad');
-      const liftYes = String(o.liftAvailable||'').toLowerCase().startsWith('y');
-      if(liftYes && (!o.liftHeight||!o.liftWidth)) return ctx.showToast('Enter Lift height & width (required for modular wardrobe / sofa)','bad');
-      if(!liftYes && (!o.staircaseWidth||!o.staircaseLandingHeight)) return ctx.showToast('Enter Staircase width & landing height (required when no lift)','bad');
-    }
+    if(hasWardrobe && (!o.staircaseWidth||!o.staircaseLandingHeight)) return ctx.showToast('Enter Staircase width & landing height (site measurement required for modular wardrobes)','bad');
     // Lead Source is now the awareness dropdown — keep the OPS "Source" column in sync
     const saved = await doSaveOrder({...o,salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)});
     if(saved) { setOrder(saved); nav('pdf'); }
@@ -2094,25 +2087,18 @@ function OrderFormScreen({ctx}) {
         )}
         {hasWardrobe && (
           <>
-            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Modular wardrobe in order — length, width & height are mandatory (printed on the PDF)</div>
+            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Modular wardrobe in order — wardrobe length/width/height & the site (staircase) measurement are mandatory (printed on the PDF)</div>
             <Field label="Wardrobe Length" value={o.wardrobeLength} onChange={v=>setF('wardrobeLength',v)} mono required hint="e.g. 72 in / 183 cm"/>
             <Field label="Wardrobe Width" value={o.wardrobeWidth} onChange={v=>setF('wardrobeWidth',v)} mono required/>
             <Field label="Wardrobe Height" value={o.wardrobeHeight} onChange={v=>setF('wardrobeHeight',v)} mono required/>
           </>
         )}
-        {(hasWardrobe||hasSofa) && (
-          <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Site-access measurements below are mandatory for this order (printed on the PDF)</div>
-        )}
-        <Field label="Lift — Height" value={o.liftHeight} onChange={v=>setF('liftHeight',v)} mono required={(hasWardrobe||hasSofa)&&String(o.liftAvailable||'').toLowerCase().startsWith('y')} hint="Information required from customer"/>
-        <Field label="Lift — Width" value={o.liftWidth} onChange={v=>setF('liftWidth',v)} mono required={(hasWardrobe||hasSofa)&&String(o.liftAvailable||'').toLowerCase().startsWith('y')}/>
-        {String(o.liftAvailable||'').toLowerCase().startsWith('n') && (
-          <>
-            <Field label="Staircase Width" value={o.staircaseWidth} onChange={v=>setF('staircaseWidth',v)} mono required={hasWardrobe||hasSofa} hint="Needed when lift is not available"/>
-            <Field label="Staircase Landing Height" value={o.staircaseLandingHeight} onChange={v=>setF('staircaseLandingHeight',v)} mono required={hasWardrobe||hasSofa}/>
-          </>
-        )}
-        <Field label="Entry Door Width" value={o.entryDoorWidth} onChange={v=>setF('entryDoorWidth',v)} mono required={hasWardrobe||hasSofa}/>
-        <Field label="Entry Door Height" value={o.entryDoorHeight} onChange={v=>setF('entryDoorHeight',v)} mono required={hasWardrobe||hasSofa}/>
+        {/* Site (staircase) measurement — mandatory for modular wardrobes */}
+        <Field label="Staircase Width" value={o.staircaseWidth} onChange={v=>setF('staircaseWidth',v)} mono required={hasWardrobe} hint={hasWardrobe?'Site measurement — mandatory for modular wardrobes':undefined}/>
+        <Field label="Staircase Landing Height" value={o.staircaseLandingHeight} onChange={v=>setF('staircaseLandingHeight',v)} mono required={hasWardrobe}/>
+        {/* Entry-door measurement — mandatory only for sofa orders */}
+        <Field label="Entry Door Width" value={o.entryDoorWidth} onChange={v=>setF('entryDoorWidth',v)} mono required={hasSofa} hint={hasSofa?'Mandatory for sofa orders':undefined}/>
+        <Field label="Entry Door Height" value={o.entryDoorHeight} onChange={v=>setF('entryDoorHeight',v)} mono required={hasSofa}/>
 
         <SectionHead n="04" label={`Items · ${(o.items||[]).length}`} action="+ ADD ITEM" onAction={()=>nav('search')}/>
         <div style={{background:'#fff'}}>

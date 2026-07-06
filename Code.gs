@@ -839,7 +839,6 @@ function handleOrders(p) {
   var cPurpose = colOf(['PURCHASING FOR','PURCHASING FOR:']);
   var cSofaW   = colOf(['SOFA WIDTH']), cSofaH = colOf(['SOFA HEIGHT']), cSofaD = colOf(['SOFA DEPTH']);
   var cWardL   = colOf(['WARDROBE LENGTH']), cWardW = colOf(['WARDROBE WIDTH']), cWardH = colOf(['WARDROBE HEIGHT']);
-  var cLiftH   = colOf(['LIFT HEIGHT']), cLiftW = colOf(['LIFT WIDTH']);
   var cStairW  = colOf(['STAIRCASE WIDTH','STAIR CASE WIDTH']);
   var cStairL  = colOf(['STAIRCASE LANDING HEIGHT','STAIR CASE LANDING HEIGHT']);
   var cDoorW   = colOf(['CUSTOMER HOUSE ENTRY DOOR WIDTH','ENTRY DOOR WIDTH']);
@@ -917,7 +916,6 @@ function handleOrders(p) {
         purchasingFor: sval(r, cPurpose),
         sofaWidth: sval(r, cSofaW), sofaHeight: sval(r, cSofaH), sofaDepth: sval(r, cSofaD),
         wardrobeLength: sval(r, cWardL), wardrobeWidth: sval(r, cWardW), wardrobeHeight: sval(r, cWardH),
-        liftHeight: sval(r, cLiftH), liftWidth: sval(r, cLiftW),
         staircaseWidth: sval(r, cStairW), staircaseLandingHeight: sval(r, cStairL),
         entryDoorWidth: sval(r, cDoorW), entryDoorHeight: sval(r, cDoorH),
         plannedDly: sval(r, cPlanned),
@@ -1090,7 +1088,6 @@ var CRM_APP_COLUMNS = [
   ['PURCHASING FOR', 'PURCHASING FOR:'],
   ['SOFA WIDTH'], ['SOFA HEIGHT'], ['SOFA DEPTH'],
   ['WARDROBE LENGTH'], ['WARDROBE WIDTH'], ['WARDROBE HEIGHT'],
-  ['LIFT HEIGHT'], ['LIFT WIDTH'],
   ['STAIRCASE WIDTH', 'STAIR CASE WIDTH'],
   ['STAIRCASE LANDING HEIGHT', 'STAIR CASE LANDING HEIGHT'],
   ['CUSTOMER HOUSE ENTRY DOOR WIDTH', 'ENTRY DOOR WIDTH'],
@@ -1330,8 +1327,6 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['WARDROBE LENGTH'], o.wardrobeLength || '');
     put(['WARDROBE WIDTH'], o.wardrobeWidth || '');
     put(['WARDROBE HEIGHT'], o.wardrobeHeight || '');
-    put(['LIFT HEIGHT'], o.liftHeight || '');
-    put(['LIFT WIDTH'], o.liftWidth || '');
     put(['STAIRCASE WIDTH', 'STAIR CASE WIDTH'], o.staircaseWidth || '');
     put(['STAIRCASE LANDING HEIGHT', 'STAIR CASE LANDING HEIGHT'], o.staircaseLandingHeight || '');
     put(['CUSTOMER HOUSE ENTRY DOOR WIDTH', 'ENTRY DOOR WIDTH'], o.entryDoorWidth || '');
