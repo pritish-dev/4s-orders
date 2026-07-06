@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '27';
+  var V = '28';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -2877,9 +2877,23 @@ ReactDOM.createRoot(document.getElementById('root')).render(
      ════════════════════════════════════════════════════════ -->
 <script>
 if ('serviceWorker' in navigator) {
+  // Reload once when a new service worker takes control, so the page always
+  // ends up running the freshest deployed code (guarded against reload loops).
+  let _swRefreshing = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (_swRefreshing) return;
+    _swRefreshing = true;
+    window.location.reload();
+  });
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js')
-      .then(reg => console.log('SW registered:', reg.scope))
+    // updateViaCache:'none' → the browser bypasses its HTTP cache when checking
+    // sw.js, so a new worker (and thus new code) is detected immediately.
+    navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+      .then(reg => {
+        console.log('SW registered:', reg.scope);
+        try { reg.update(); } catch (e) {}                 // check for a new SW now
+        setInterval(() => { try { reg.update(); } catch (e) {} }, 60 * 60 * 1000); // and hourly
+      })
       .catch(err => console.warn('SW registration failed:', err));
   });
 }
