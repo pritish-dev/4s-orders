@@ -1,0 +1,7 @@
+# Only the Apps Script backend is pushed to the Apps Script project.
+# Everything else (the PWA frontend, images, jsx mockups, docs) is ignored so
+# clasp never uploads index.html etc. as Apps Script HTML files.
+**/**
+
+!Code.gs
+!appsscript.json
