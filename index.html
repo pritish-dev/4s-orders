@@ -414,6 +414,7 @@ const Icon = {
   edit: (c=T.green,s=14) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M4 20h4l11-11-4-4L4 16v4z" stroke={c} strokeWidth="2" strokeLinejoin="round"/></svg>,
   close: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke={c} strokeWidth="2" strokeLinecap="round"/></svg>,
   cloud: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M7 18a4 4 0 010-8 6 6 0 0111.7 1.5A4 4 0 0118 18H7z" stroke={c} strokeWidth="2"/></svg>,
+  trash: (c='currentColor',s=14) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2m-9 0l1 13a1 1 0 001 1h6a1 1 0 001-1l1-13" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>,
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -1408,6 +1409,21 @@ function App() {
     finally { setLoading(false); }
   }
 
+  // Admin-only: permanently delete an order (all its rows) from the CRM sheet.
+  // The backend re-checks that the requesting user is an admin before deleting.
+  async function doDeleteOrder(orderNo, internalNo) {
+    if (!hasManagerAccess(user) || normRole(user?.role) !== 'admin') {
+      showToast('Only an admin can delete orders','bad'); return false;
+    }
+    setLoading(true);
+    try {
+      const res = await apiPost({ action:'deleteOrder', orderNo, internalNo, by: user?.code, updatedBy: user?.name });
+      if (res.ok) { showToast('Order '+(orderNo||'')+' deleted ✓'); loadOrders(); return true; }
+      else { showToast(res.error||'Delete failed','bad'); return false; }
+    } catch(e) { showToast(e.message,'bad'); return false; }
+    finally { setLoading(false); }
+  }
+
   function doSignOut() {
     localStorage.removeItem('4s_user');
     setUser(null);
@@ -1416,7 +1432,7 @@ function App() {
     nav('login');
   }
 
-  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doSignOut, syncStock, syncPriceList, loadOrders };
+  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doDeleteOrder, doSignOut, syncStock, syncPriceList, loadOrders };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -2401,7 +2417,8 @@ function PDFPreviewScreen({ctx}) {
 
 // ─── Order History ───────────────────────────────────────────
 function HistoryScreen({ctx}) {
-  const {orders,nav,loadOrders,doUpdateDelivery} = ctx;
+  const {orders,nav,loadOrders,doUpdateDelivery,doDeleteOrder,user} = ctx;
+  const isAdmin = normRole(user?.role) === 'admin';
   const [tab,setTab] = useState('all');
   const [wonOrder,setWonOrder] = useState(null);
   const [query,setQuery] = useState('');
@@ -2429,6 +2446,12 @@ function HistoryScreen({ctx}) {
   if(wonOrder) return <WONUpdateScreen ctx={ctx} orderOverride={wonOrder} onClose={()=>setWonOrder(null)}/>;
 
   const openOrder = o => { ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)}); nav('order'); };
+
+  async function deleteOrder(o) {
+    if (!isAdmin) return;
+    if (!window.confirm('Permanently delete order '+(o.no||'')+' for '+(o.customer||'this customer')+'? This removes it from the CRM sheet and cannot be undone.')) return;
+    await doDeleteOrder(o.no, o.internalNo);
+  }
 
   return (
     <div className="screen">
@@ -2479,8 +2502,10 @@ function HistoryScreen({ctx}) {
                   style={{padding:'4px 6px',borderRadius:4,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:11,fontWeight:600,cursor:'pointer',WebkitAppearance:'none',appearance:'none',maxWidth:130}}>
                   {DELIVERY_STATUSES.map(s=><option key={s} value={s}>{s}</option>)}
                 </select>
-                <span onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)});nav('pdf');}} style={{width:28,height:24,borderRadius:4,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,13)}</span>
+                <span title="Edit order" onClick={e=>{e.stopPropagation();openOrder(o);}} style={{width:28,height:24,borderRadius:4,background:T.greenSoft,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.edit(T.green,13)}</span>
+                <span title="Order PDF" onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)});nav('pdf');}} style={{width:28,height:24,borderRadius:4,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,13)}</span>
                 <span onClick={e=>{e.stopPropagation();const phone=(o.phone||'').replace(/\D/g,'');if(phone)window.open('https://wa.me/91'+phone);}} style={{width:28,height:24,borderRadius:4,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',13)}</span>
+                {isAdmin&&<span title="Delete order (admin)" onClick={e=>{e.stopPropagation();deleteOrder(o);}} style={{width:28,height:24,borderRadius:4,background:T.badSoft||'#fdecec',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.trash(T.bad,13)}</span>}
               </div>
             </div>
           </div>

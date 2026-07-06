@@ -116,6 +116,7 @@ function doPost(e) {
       case 'saveOrder':       result = handleSaveOrder(body.order);   break;
       case 'updateWON':       result = handleUpdateWON(body);         break;
       case 'updateDelivery':  result = handleUpdateDelivery(body);    break;
+      case 'deleteOrder':     result = handleDeleteOrder(body);       break;
       default:                result = { ok: false, error: 'Unknown action: ' + body.action };
     }
   } catch(err) {
@@ -1468,6 +1469,104 @@ function handleUpdateDelivery(body) {
   if (!updated) return { ok: false, error: 'Order not found: ' + orderNo };
   _appendLog(updatedBy, orderNo, 'UPDATE_DELIVERY', 'Delivery: ' + status);
   return { ok: true, rows: updated };
+}
+
+// ─── DELETE ORDER (admin only) ────────────────────────────────────────────────
+// Removes every CRM row belonging to an order. Guarded server-side: the calling
+// user's role is looked up from the same creds/staff sheets used for login, and
+// the delete only proceeds when that role is 'admin'.
+function handleDeleteOrder(body) {
+  var orderNo    = String(body.orderNo || '').trim();
+  var internalNo = Number(body.internalNo || 0);
+  var by         = String(body.by || body.updatedBy || '').trim();
+
+  if (_lookupRole(by) !== 'admin') {
+    return { ok: false, error: 'Only an admin can delete orders.' };
+  }
+  if (!orderNo && !internalNo) return { ok: false, error: 'Order identifier is required.' };
+
+  var sh;
+  try { sh = _openCRMSheet(); }
+  catch (e) { return { ok: false, error: e.message }; }
+
+  var C     = _crmCols(sh);
+  var colOf = C.colOf;
+  var ncol  = C.header.length;
+
+  var cOrderNo = colOf(CRM_H.ORDER_NO);
+  var cIntNo   = colOf(CRM_H.INT_NO);
+
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return { ok: false, error: 'Order not found: ' + orderNo };
+  var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
+
+  // Collect matching sheet rows, then delete bottom-up so indexes stay valid.
+  var rows = [];
+  for (var i = 0; i < data.length; i++) {
+    var matchOrder = cOrderNo >= 0 && orderNo    && String(data[i][cOrderNo] || '').trim() === orderNo;
+    var matchInt   = cIntNo   >= 0 && internalNo && Number(data[i][cIntNo]) === internalNo;
+    if (matchOrder || matchInt) rows.push(i + 2);
+  }
+  if (!rows.length) return { ok: false, error: 'Order not found: ' + orderNo };
+  for (var j = rows.length - 1; j >= 0; j--) sh.deleteRow(rows[j]);
+
+  _appendLog(by, orderNo, 'DELETE_ORDER', 'Deleted ' + rows.length + ' row(s)');
+  return { ok: true, rows: rows.length };
+}
+
+// Look up a user's role by username from the same sheets login uses, WITHOUT a
+// password (used to authorize server-side actions). Returns a normalised role
+// ('sales' | 'manager' | 'admin'); defaults to 'sales' when not found.
+function _lookupRole(username) {
+  username = String(username || '').toLowerCase().trim();
+  if (!username) return 'sales';
+
+  function scanByHeaders(sh) {
+    var rows = sh.getDataRange().getValues();
+    if (rows.length < 2) return null;
+    var hdr   = rows[0].map(function(c){ return String(c || '').toLowerCase().trim(); });
+    var cUser = _hdrIdx(hdr, ['username', 'user name', 'user']);
+    var cRole = _hdrIdx(hdr, ['role', 'user role', 'access', 'access level', 'designation']);
+    if (cUser < 0) cUser = 1;
+    for (var i = 1; i < rows.length; i++) {
+      if (String(rows[i][cUser] || '').toLowerCase().trim() === username) {
+        var roleVal = (cRole >= 0 && cRole < rows[i].length) ? String(rows[i][cRole] || '').trim() : '';
+        return _normRole(roleVal);
+      }
+    }
+    return null;
+  }
+
+  try {
+    var opsSS = _openOPS();
+    if (opsSS) {
+      var credsSh = opsSS.getSheetByName('APP_ORDERING_CREDS');
+      if (credsSh) { var r = scanByHeaders(credsSh); if (r !== null) return r; }
+      var staffSh = opsSS.getSheetByName('Staff');
+      if (staffSh) {
+        var rowsS = staffSh.getDataRange().getValues().slice(1);
+        for (var i = 0; i < rowsS.length; i++) {
+          if (String(rowsS[i][COL_USR.USERNAME] || '').toLowerCase().trim() === username) {
+            return _normRole(rowsS[i][COL_USR.ROLE]);
+          }
+        }
+      }
+    }
+  } catch (e) {}
+
+  try {
+    var masterStaff = _getSheet('Staff');
+    if (masterStaff) {
+      var rowsM = masterStaff.getDataRange().getValues().slice(1);
+      for (var k = 0; k < rowsM.length; k++) {
+        if (String(rowsM[k][COL_USR.USERNAME] || '').toLowerCase().trim() === username) {
+          return _normRole(rowsM[k][COL_USR.ROLE]);
+        }
+      }
+    }
+  } catch (e) {}
+
+  return 'sales';
 }
 
 // ─── CHANGE LOG ───────────────────────────────────────────────────────────────
