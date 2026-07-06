@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '23';
+  var V = '24';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -1019,6 +1019,18 @@ function modularFamilyOf(it) {
   for (const f of MODULAR_FAMILIES) if (f.test(hay)) return f;
   return null;
 }
+// A "Made To Order" item — the price list tags it (ITEM_GROUP / category / tab)
+// with "MTO". Such items are produced on order and carry no ready stock.
+function isMTOItem(it) {
+  return /(^|[^A-Z])MTO([^A-Z]|$)/i.test([it.item, it.cat, it.sheet].filter(Boolean).join(' '));
+}
+// Availability tier for ordering the item list:
+//   0 = in stock (non-MTO), 1 = out of stock (non-MTO), 2 = made-to-order.
+function availabilityTier(it) {
+  if (isMTOItem(it)) return 2;
+  const total = (it.stock || []).reduce((s, x) => s + (x.q || 0), 0);
+  return total > 0 ? 0 : 1;
+}
 // Round half up: .5 and above → next integer, below .5 → previous integer.
 function rnd(n) { return Math.floor((Number(n) || 0) + 0.5); }
 
@@ -1574,7 +1586,13 @@ function SearchScreen({ctx}) {
 
   const bycat = cat === 'all' ? allItems : allItems.filter(i => i.cat === cat);
 
-  const {results: filtered, mode: searchMode} = fuzzySearch(bycat, q);
+  const {results: rawResults, mode: searchMode} = fuzzySearch(bycat, q);
+  // Show in-stock items first, then out-of-stock, then Made-To-Order. Stable
+  // within each tier so search relevance / browse order is preserved.
+  const filtered = rawResults
+    .map((it, i) => ({ it, i }))
+    .sort((a, b) => (availabilityTier(a.it) - availabilityTier(b.it)) || (a.i - b.i))
+    .map(x => x.it);
 
   function handleInput(e) { setQ(e.target.value); }
 
@@ -1596,7 +1614,7 @@ function SearchScreen({ctx}) {
         unitPrice, total:unitPrice, disc,
         ageing:false, sweetner:false,
         discontinued:!!item.discontinued, discSince:item.discSince||'',
-        branch:(item.stock||[])[0]?.b||'KB',
+        branch:((item.stock||[]).filter(s=>s.q>0)[0]||{}).b||'',
         inStock:(item.stock||[]).reduce((s,x)=>s+x.q,0),
       }];
     }
@@ -1739,9 +1757,12 @@ function SearchScreen({ctx}) {
         )}
 
         {filtered.map((it,fi)=>{
-          const stockTotal = (it.stock||[]).reduce((s,x)=>s+x.q,0);
+          // Only warehouses that actually have availability are shown.
+          const availStock = (it.stock||[]).filter(s=>s.q>0);
+          const stockTotal = availStock.reduce((s,x)=>s+x.q,0);
           const hasStock   = (it.stock||[]).length > 0;
-          const oos        = hasStock && stockTotal === 0;
+          const mto        = isMTOItem(it);
+          const oos        = hasStock && stockTotal === 0 && !mto;
           const cpl = Number(it.cpl) || Number(it.mrp) || 0;
           return (
             <div key={(it.code||it.name||'')+'|'+(it.sheet||'')+'|'+fi} style={{padding:'12px 18px',borderBottom:`1px solid ${T.line}`}}>
@@ -1760,11 +1781,11 @@ function SearchScreen({ctx}) {
                   </div>
                   {/* Extra info (e.g. mattress thickness) */}
                   {it.extra && <div style={{fontSize:10,color:T.ink4,marginBottom:4}}>{it.extra}</div>}
-                  {/* Stock chips */}
+                  {/* Stock chips — only warehouses that have stock available */}
                   <div style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap'}}>
-                    {hasStock
-                      ? it.stock.map(s=><StockChip key={s.b} branch={s.b} count={s.q} low={s.q>0&&s.q<3}/>)
-                      : <span style={{fontSize:10,color:T.ink4}}>Sync stock to see availability</span>}
+                    {availStock.length>0
+                      ? availStock.map(s=><StockChip key={s.b} branch={s.b} count={s.q} low={s.q<3}/>)
+                      : <span style={{fontSize:10,color:T.ink4}}>{mto?'Made to order':(hasStock?'No stock available':'Sync stock to see availability')}</span>}
                   </div>
                 </div>
                 {/* Price + Add */}
@@ -2000,8 +2021,8 @@ function OrderFormScreen({ctx}) {
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:3,flexWrap:'wrap'}}>
                     <span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:600}}>{it.code}</span>
-                    <StockChip branch={it.branch||'KB'} count={it.inStock||0}/>
-                    {(it.inStock===0||it.inStock===undefined)&&<Pill tone="warn" size="sm">OOS</Pill>}
+                    {it.inStock>0 && <StockChip branch={it.branch||'STOCK'} count={it.inStock} low={it.inStock<3}/>}
+                    {(!it.inStock)&&<Pill tone="warn" size="sm">OOS</Pill>}
                     {it.discontinued&&<Pill tone="bad" size="sm">DISCONTINUED{it.discSince?' since '+it.discSince:''}</Pill>}
                   </div>
                   <div style={{fontSize:13,fontWeight:600,lineHeight:1.3}}>{it.name}</div>

@@ -314,9 +314,12 @@ function _md5(input) {
 
 // ─── STOCK ─────────────────────────────────────────────────────────────────────
 // Reads OPS sheet → "Stock" tab.
-// Expected columns (header row 1):
-//   Code | Name | Category | CPL | MRP | KB_Qty | B2CB_Qty | PTA_Qty | CTC_Qty
-// Column positions are detected from the header; positional fallback if headers differ.
+// Current sheet format (ONE row per warehouse × item):
+//   Fetched On | Date & Time | Warehouse code | Item code | Item Description | Free Stock | Qty Available For Commitment
+// Rows are grouped by Item code; each distinct Warehouse code becomes one stock
+// chip. Only the warehouses that actually appear for an item are returned — no
+// fixed/placeholder branches. The surfaced quantity is "Qty Available For
+// Commitment" (what can be sold), falling back to Free Stock if that's absent.
 function handleStock() {
   var sh = null;
   var opsSS = _openOPS();
@@ -333,52 +336,47 @@ function handleStock() {
   var rows = sh.getDataRange().getValues();
   if (rows.length < 2) return { ok: true, items: [], syncedAt: new Date().toISOString() };
 
-  // Auto-detect columns from header row
+  // Auto-detect columns from the header row
   var hdr = rows[0].map(function(c){ return String(c||'').toUpperCase().trim(); });
-  var cCode = _hdrIdx(hdr, ['CODE', 'ITEM CODE', 'LN CODE', 'ITEM_CODE']);
-  var cName = _hdrIdx(hdr, ['NAME', 'ITEM NAME', 'DESCRIPTION', 'LN DESCRIPTION']);
-  var cCat  = _hdrIdx(hdr, ['CATEGORY', 'CAT', 'TYPE']);
-  var cCPL  = _hdrIdx(hdr, ['CPL', 'BASIC PRICE', 'CONSUMER BASIC']);
-  var cMRP  = _hdrIdx(hdr, ['MRP', 'PRICE', 'SELLING PRICE']);
-  var cKB   = _hdrIdx(hdr, ['KB_QTY', 'KB', 'KB QTY']);
-  var cB2CB = _hdrIdx(hdr, ['B2CB_QTY', 'B2CB', 'B2CB QTY']);
-  var cPTA  = _hdrIdx(hdr, ['PTA_QTY', 'PTA', 'PTA QTY']);
-  var cCTC  = _hdrIdx(hdr, ['CTC_QTY', 'CTC', 'CTC QTY']);
+  var cWh    = _hdrIdx(hdr, ['WAREHOUSE CODE', 'WAREHOUSE', 'WH CODE', 'WH']);
+  var cCode  = _hdrIdx(hdr, ['ITEM CODE', 'CODE', 'ITEM_CODE', 'LN CODE']);
+  var cName  = _hdrIdx(hdr, ['ITEM DESCRIPTION', 'DESCRIPTION', 'ITEM NAME', 'NAME']);
+  var cAvail = _hdrIdx(hdr, ['QTY AVAILABLE FOR COMMITMENT', 'QTY AVAILABLE', 'AVAILABLE FOR COMMITMENT', 'AVAILABLE QTY', 'AVAILABLE']);
+  var cFree  = _hdrIdx(hdr, ['FREE STOCK', 'FREESTOCK']);
+  var cFetch = _hdrIdx(hdr, ['FETCHED ON', 'DATE & TIME', 'DATE AND TIME']);
 
-  // Positional defaults
-  if (cCode < 0) cCode = 0;
-  if (cName < 0) cName = 1;
-  if (cCat  < 0) cCat  = 2;
-  if (cCPL  < 0) cCPL  = 3;
-  if (cMRP  < 0) cMRP  = 4;
-  if (cKB   < 0) cKB   = 5;
-  if (cB2CB < 0) cB2CB = 6;
-  if (cPTA  < 0) cPTA  = 7;
-  if (cCTC  < 0) cCTC  = 8;
+  // Positional fallback matching the documented column order
+  if (cWh    < 0) cWh    = 2;
+  if (cCode  < 0) cCode  = 3;
+  if (cName  < 0) cName  = 4;
+  if (cFree  < 0) cFree  = 5;
+  if (cAvail < 0) cAvail = 6;
 
-  var BRANCHES = ['KB', 'B2CB', 'PTA', 'CTC'];
-  var bCols    = [cKB, cB2CB, cPTA, cCTC];
-  var syncedAt = new Date().toISOString();
-  // Optional sync-timestamp in J1 (col 9)
-  if (rows[0][9]) { var d = new Date(rows[0][9]); if (!isNaN(d)) syncedAt = d.toISOString(); }
+  // Quantity to surface: available-for-commitment, else free stock.
+  var cQty = cAvail >= 0 ? cAvail : cFree;
 
-  var items = [];
+  var byCode = {}, order = [], syncedAt = null;
   for (var i = 1; i < rows.length; i++) {
     var r    = rows[i];
     var code = String(r[cCode] || '').toUpperCase().trim();
+    if (!code) continue;
+    var wh   = String(r[cWh]   || '').toUpperCase().trim();
     var name = String(r[cName] || '').trim();
-    if (!code && !name) continue;
+    var qty  = parseInt(String(r[cQty] != null ? r[cQty] : 0).replace(/[^\d-]/g, ''), 10) || 0;
 
-    var cpl  = _numVal(r[cCPL]);
-    var mrp  = _numVal(r[cMRP]) || cpl;
-    var cat  = String(r[cCat]  || '').trim();
-    var stock = BRANCHES.map(function(b, bi){
-      return { b: b, q: parseInt(String(r[bCols[bi]] || 0).replace(/[^\d]/g,''), 10) || 0 };
-    });
+    if (cFetch >= 0 && !syncedAt) { var d = new Date(r[cFetch]); if (!isNaN(d.getTime())) syncedAt = d.toISOString(); }
 
-    items.push({ code: code, name: name, cat: cat, mrp: mrp, cpl: cpl, stock: stock });
+    if (!byCode[code]) { byCode[code] = { code: code, name: name, mrp: 0, cpl: 0, stock: [], _wh: {} }; order.push(code); }
+    var it = byCode[code];
+    if (name && !it.name) it.name = name;
+    if (wh) {
+      if (it._wh[wh] === undefined) { it._wh[wh] = it.stock.length; it.stock.push({ b: wh, q: qty }); }
+      else { it.stock[it._wh[wh]].q += qty; }   // same warehouse listed twice → sum
+    }
   }
-  return { ok: true, items: items, syncedAt: syncedAt };
+
+  var items = order.map(function(code){ var it = byCode[code]; delete it._wh; return it; });
+  return { ok: true, items: items, syncedAt: syncedAt || new Date().toISOString() };
 }
 
 // ─── PRICE LIST ───────────────────────────────────────────────────────────────
@@ -1044,6 +1042,108 @@ var CRM_H = {
   DELIVERY: ['DELIVERY REMARKS(DELIVERED/PENDING)', 'DELIVERY REMARKS', 'DELIVERY STATUS'],
 };
 
+// Every column the app writes to the CRM tab, as [canonical, ...aliases] groups.
+// _ensureCrmColumns() appends the canonical name for any group whose columns are
+// all absent, so no field captured in the app is ever dropped on save. This
+// MUST stay in sync with the put() calls in _buildOrderRows.
+var CRM_APP_COLUMNS = [
+  ['SL NO.', 'SL NO'],
+  ['INTERNAL ODER NO', 'INTERNAL ORDER NO'],
+  ['ORDER DATE'],
+  ['ORDER NO', 'ORDER NO.'],
+  ['GODREJ SO NO', 'GODREJ SO NO.', 'GODREJ SO NUMBER', 'WON', 'WON NO', 'WON NUMBER'],
+  ['ITEM CODE', 'CODE'],
+  ['CUSTOMER NAME'],
+  ['CONTACT NUMBER', 'PHONE', 'CONTACT NO'],
+  ['EMAIL ADDRESS'],
+  ['CATEGORY'],
+  ['PRODUCT NAME'],
+  ['CATEGORY TYPE'],
+  ['MRP/UNIT(AS PER PRICE LIST )', 'MRP/UNIT(AS PER PRICE LIST)', 'MRP/UNIT'],
+  ['MRP'],
+  ['CPL'],
+  ['ORDER UNIT PRICE=(AFTER DISC + TAX)', 'ORDER UNIT PRICE'],
+  ['QTY'],
+  ['GROSS ORDER VALUE(MRP)'],
+  ['ORDER AMOUNT (WITH TAX AND AFTER DISC )', 'ORDER AMOUNT (WITH TAX AND AFTER DISC)'],
+  ['DISC ALLOWED'],
+  ['DISCOUNT GIVEN'],
+  ['CROSS CHECK GROSS AMT (Order Value Without Tax)', 'CROSS CHECK GROSS AMT'],
+  ['CUSTOMER DELIVERY DATE (TO BE)'],
+  ['SALES PERSON'],
+  ['ADV RECEIVED'],
+  ['REFERENCE ORDER NO.', 'REFERENCE ORDER NO'],
+  ['DELIVERY REMARKS(DELIVERED/PENDING)', 'DELIVERY REMARKS'],
+  ['POSTED BY'],
+  ['PINELAB / BAJAJ', 'PINELAB/BAJAJ'],
+  ['DATE OF BIRTH', 'DOB'],
+  ['MARRIAGE ANNIVERSARY', 'MARRIAGE ANNIVERSARY DATE', 'ANNIVERSARY'],
+  ['HOW DID THEY COME TO KNOW ABOUT OUR SHOWROOM?', 'HOW DID THEY COME TO KNOW ABOUT OUR SHOWROOM', 'SOURCE OF AWARENESS'],
+  ['PURCHASE PATTERN'],
+  ['PURCHASING FOR', 'PURCHASING FOR:'],
+  ['SOFA WIDTH'], ['SOFA HEIGHT'], ['SOFA DEPTH'],
+  ['LIFT HEIGHT'], ['LIFT WIDTH'],
+  ['STAIRCASE WIDTH', 'STAIR CASE WIDTH'],
+  ['STAIRCASE LANDING HEIGHT', 'STAIR CASE LANDING HEIGHT'],
+  ['CUSTOMER HOUSE ENTRY DOOR WIDTH', 'ENTRY DOOR WIDTH'],
+  ['CUSTOMER HOUSE ENTRY DOOR HEIGHT', 'ENTRY DOOR HEIGHT'],
+  ['ORDER TYPE', 'B2C/B2B', 'ORDER CATEGORY'],
+  ['LEAD SOURCE'],
+  ['CUSTOMER GST NO', 'CUSTOMER GSTIN', 'GST NO', 'GSTIN'],
+  ['ALT PHONE', 'ALTERNATE PHONE', 'ALT CONTACT NUMBER', 'ALTERNATE CONTACT NUMBER'],
+  ['BILLING ADDRESS'],
+  ['DELIVERY ADDRESS'],
+  ['FLOOR'],
+  ['LANDMARK'],
+  ['LIFT AVAILABLE', 'LIFT AVAILABLE?'],
+  ['LIFT TYPE'],
+  ['CONTACT PERSON NAME', 'CONTACT PERSON'],
+  ['CONTACT PERSON NUMBER', 'CONTACT PERSON CONTACT NUMBER'],
+  ['CONTACT REMARK', 'CONTACT REMARKS'],
+  ['ORDER DISCOUNT %', 'ADDITIONAL ORDER DISCOUNT %', 'ORDER DISCOUNT'],
+  ['ITEM DISCOUNT %', 'PER ITEM DISCOUNT %', 'ITEM DISC %'],
+  ['PAYMENT MODE'],
+  ['FOLLOW-UP DATE', 'FOLLOW UP DATE', 'FOLLOWUP DATE'],
+  ['SPECIFIC INSTRUCTION', 'INSTALLATION NOTE', 'INSTALL NOTE'],
+  ['MONEY RECEIPT NO 1', 'MONEY RECEIPT NO', 'RECEIPT NO', 'RECEIPT NO.', 'RECEIPT NO & DATE'],
+  ['MONEY RECEIPT DATE 1', 'MONEY RECEIPT DATE', 'RECEIPT DATE'],
+  ['MONEY RECEIPT NO 2'],
+  ['MONEY RECEIPT DATE 2'],
+  ['MONEY RECEIPT NO 3'],
+  ['MONEY RECEIPT DATE 3'],
+  ['DELIVERY STATUS'],
+  ['ORDER FORM RECEIPT NO', 'ORDER FORM RECEIPT NO.', 'ORDER FORM RECEIPT'],
+];
+
+// Appends any missing CRM columns (by header name) to the end of the header row
+// so every app field has a home. Returns the list of column names that were added.
+function _ensureCrmColumns(sh) {
+  var lastCol = Math.max(1, sh.getLastColumn());
+  var header  = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+  var have = {};
+  for (var c = 0; c < header.length; c++) { var k = _crmKey(header[c]); if (k) have[k] = true; }
+
+  var toAdd = [];
+  for (var i = 0; i < CRM_APP_COLUMNS.length; i++) {
+    var group = CRM_APP_COLUMNS[i], exists = false;
+    for (var j = 0; j < group.length; j++) { if (have[_crmKey(group[j])]) { exists = true; break; } }
+    if (!exists) { toAdd.push(group[0]); have[_crmKey(group[0])] = true; }
+  }
+  if (toAdd.length) {
+    sh.getRange(1, header.length + 1, 1, toAdd.length).setValues([toAdd]);
+    try { sh.getRange(1, 1, 1, header.length + toAdd.length).setFontWeight('bold'); } catch (e) {}
+  }
+  return toAdd;
+}
+
+// Run manually from the Apps Script editor to backfill all app columns at once.
+function ensureCrmColumns() {
+  var sh = _openCRMSheet();
+  var added = _ensureCrmColumns(sh);
+  Logger.log(added.length ? ('Added columns: ' + added.join(' | ')) : 'All app columns already present.');
+  return added;
+}
+
 // Parse a "dd.mm.yy" / "dd.mm.yyyy" ORDER DATE string → Date (or null).
 function _parseCrmDate(s) {
   s = String(s || '').trim();
@@ -1071,6 +1171,10 @@ function _writeOrderToCRM(o) {
   var sh;
   try { sh = _openCRMSheet(); }
   catch (e) { return { ok: false, error: e.message }; }
+
+  // Make sure every column the app captures exists before writing (adds any
+  // missing ones to the sheet), so no field is silently dropped.
+  try { _ensureCrmColumns(sh); } catch (e) {}
 
   var C      = _crmCols(sh);
   var colOf  = C.colOf;
