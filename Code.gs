@@ -1196,30 +1196,35 @@ function _writeOrderToCRM(o) {
   var lastRow = sh.getLastRow();
   var data    = lastRow >= 2 ? sh.getRange(2, 1, lastRow - 1, ncol).getValues() : [];
 
-  var phoneDigits    = String(o.phone || '').replace(/\D/g, '');
   var incomingOrder  = String(o.no || '').trim();
+  var incomingInt    = Number(o.internalNo) || 0;
 
-  // Find existing rows for this order (only when the client already has an
-  // order number — a brand-new order has none, so nothing matches).
+  // Find this order's existing rows so a re-save REPLACES them instead of adding
+  // duplicates. Match by the stable INTERNAL order number first, then by ORDER
+  // NO — never by phone, so editing the customer's phone still updates the same
+  // order rather than creating a new entry.
   var matchRows = [], existingWon = '', existingDate = '';
-  if (incomingOrder && cOrderNo >= 0) {
+  if ((incomingInt || incomingOrder) && (cIntNo >= 0 || cOrderNo >= 0)) {
     for (var i = 0; i < data.length; i++) {
-      if (String(data[i][cOrderNo] || '').trim() !== incomingOrder) continue;
-      if (phoneDigits && cPhone >= 0 &&
-          String(data[i][cPhone] || '').replace(/\D/g, '') !== phoneDigits) continue;
+      var rowInt   = cIntNo   >= 0 ? Number(data[i][cIntNo]) || 0 : 0;
+      var rowOrder = cOrderNo >= 0 ? String(data[i][cOrderNo] || '').trim() : '';
+      var intMatch   = incomingInt   && rowInt   === incomingInt;
+      var orderMatch = incomingOrder && rowOrder === incomingOrder;
+      if (!intMatch && !orderMatch) continue;
       matchRows.push(i);
       if (cWon  >= 0 && !existingWon)  existingWon  = String(data[i][cWon]  || '').trim();
       if (cDate >= 0 && !existingDate) existingDate = String(data[i][cDate] || '').trim();
     }
   }
 
-  // Order number: keep the existing one, else assign the next internal number.
-  var internalNo, orderNo;
-  if (incomingOrder) {
-    orderNo    = incomingOrder;
-    internalNo = Number(o.internalNo) ||
-                 (matchRows.length && cIntNo >= 0 ? Number(data[matchRows[0]][cIntNo]) || 0 : 0);
+  // Identity: reuse the matched rows' internal number / order number so the order
+  // keeps the same identifiers across edits; only a brand-new order gets fresh ones.
+  var matchedOrderNo = '', matchedInt = 0;
+  if (matchRows.length) {
+    if (cOrderNo >= 0) matchedOrderNo = String(data[matchRows[0]][cOrderNo] || '').trim();
+    if (cIntNo   >= 0) matchedInt     = Number(data[matchRows[0]][cIntNo]) || 0;
   }
+  var internalNo = incomingInt || matchedInt || 0;
   if (!internalNo) {
     var maxInt = 0;
     if (cIntNo >= 0) for (var j = 0; j < data.length; j++) {
@@ -1227,6 +1232,7 @@ function _writeOrderToCRM(o) {
     }
     internalNo = maxInt + 1;
   }
+  var orderNo = incomingOrder || matchedOrderNo || '';
   if (!orderNo) {
     var receiptNo = String(o.receiptNo || '').trim();
     orderNo = receiptNo ? (internalNo + '/' + receiptNo) : String(internalNo);
