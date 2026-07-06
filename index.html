@@ -543,13 +543,17 @@ function customerCopyItems(items) {
     if (!fam) { out.push(it); return; }
     if (groupIndex[fam.key] === undefined) {
       groupIndex[fam.key] = out.length;
-      out.push({ code:'', name:fam.label, qty:0, mrp:0, disc:'', unitPrice:0, total:0, _group:true, _grossMrp:0 });
+      out.push({ code:'', name:fam.label, qty:0, mrp:0, disc:'', unitPrice:0, total:0, _group:true, _grossMrp:0, _children:[] });
     }
     const g = out[groupIndex[fam.key]];
     const qty = Number(it.qty) || 0;
     g.qty       += qty;
     g.total     += Number(it.total) || 0;
     g._grossMrp += (Number(it.mrp) || Number(it.cpl) || 0) * qty;   // gross (pre-discount) price
+    // Keep each underlying item (code + name + qty) so the customer copy can
+    // still list them under the family heading, even though the family is
+    // priced as a single line.
+    g._children.push({ code: it.code || '', name: it.name || it.item || '', qty: qty });
   });
   // For each collapsed family, show on one line: the total price in the MRP
   // column, the overall (average) discount % in the Disc column, and the net
@@ -803,32 +807,59 @@ function generatePDF(order, copyType) {
     return y + thH;
   }
 
+  // Row height. A collapsed modular family lists its child items under the
+  // family heading, so it grows with the number of children (customer copy).
+  const childLineH = 3.5;
+  function rowHeight(it) {
+    if (it && it._group && it._children && it._children.length)
+      return Math.max(rH, 6.2 + it._children.length * childLineH + 1.5);
+    return rH;
+  }
+
   // ── ONE ITEM ROW ──────────────────────────────────────────
   function drawItemRow(y, it, idx) {
-    if(idx%2===1){ doc.setFillColor(252,252,252); doc.rect(ml,y,cw,rH,'F'); }
-    brd(ml,y,cw,rH);
-    Object.values(tC).forEach(c=>vln(c.x+c.w,y,y+rH));
+    const h = rowHeight(it);
+    if(idx%2===1){ doc.setFillColor(252,252,252); doc.rect(ml,y,cw,h,'F'); }
+    brd(ml,y,cw,h);
+    Object.values(tC).forEach(c=>vln(c.x+c.w,y,y+h));
     doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...INK);
     doc.text(fit1(it.code||'',tC.code.w-2,7), tC.code.x+tC.code.w/2, y+7, {align:'center'});
     doc.text(String(it.qty), tC.qty.x+tC.qty.w/2, y+7, {align:'center'});
-    doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-    const nm = doc.splitTextToSize(it.name||'', tC.desc.w-2);
-    doc.text(nm[0]||'', tC.desc.x+1.5, y+4.5);
-    // Sales copy: list every scheme applied to this item (Ageing / Sweetner /
-    // Other), with the scheme code spelled out when "Other" is selected.
-    let schemeLine = '';
-    if (!isCustomer) {
-      const sch = [];
-      if (it.ageing)   sch.push('Ageing');
-      if (it.sweetner) sch.push('Sweetner');
-      if (it.other)    sch.push(it.schemeCode ? ('Other: ' + it.schemeCode) : 'Other');
-      if (sch.length)  schemeLine = 'Scheme: ' + sch.join(', ');
-    }
-    if (schemeLine) {
-      doc.setFont('helvetica','bold'); doc.setFontSize(6.2); doc.setTextColor(30,90,160);
-      doc.text(fit1(schemeLine, tC.desc.w-2, 6.2), tC.desc.x+1.5, y+9);
-    } else if (nm[1]) {
-      doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...GR); doc.text(nm[1], tC.desc.x+1.5, y+9);
+    if (it._group && it._children && it._children.length) {
+      // Family heading, then every underlying item + its code listed below it.
+      doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+      doc.text(fit1(it.name||'', tC.desc.w-2, 7.5), tC.desc.x+1.5, y+4.5);
+      let ly = y + 8.2;
+      doc.setFont('helvetica','normal'); doc.setFontSize(6.3); doc.setTextColor(...GR);
+      it._children.forEach(ch => {
+        const parts = [];
+        if (ch.code) parts.push(ch.code);
+        if (ch.name) parts.push(ch.name);
+        let line = parts.join(' - ');
+        if (ch.qty > 1) line += '  (' + ch.qty + ' nos)';
+        doc.text(fit1(line, tC.desc.w-3, 6.3), tC.desc.x+2.5, ly);
+        ly += childLineH;
+      });
+    } else {
+      doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+      const nm = doc.splitTextToSize(it.name||'', tC.desc.w-2);
+      doc.text(nm[0]||'', tC.desc.x+1.5, y+4.5);
+      // Sales copy: list every scheme applied to this item (Ageing / Sweetner /
+      // Other), with the scheme code spelled out when "Other" is selected.
+      let schemeLine = '';
+      if (!isCustomer) {
+        const sch = [];
+        if (it.ageing)   sch.push('Ageing');
+        if (it.sweetner) sch.push('Sweetner');
+        if (it.other)    sch.push(it.schemeCode ? ('Other: ' + it.schemeCode) : 'Other');
+        if (sch.length)  schemeLine = 'Scheme: ' + sch.join(', ');
+      }
+      if (schemeLine) {
+        doc.setFont('helvetica','bold'); doc.setFontSize(6.2); doc.setTextColor(30,90,160);
+        doc.text(fit1(schemeLine, tC.desc.w-2, 6.2), tC.desc.x+1.5, y+9);
+      } else if (nm[1]) {
+        doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...GR); doc.text(nm[1], tC.desc.x+1.5, y+9);
+      }
     }
     // MRP — the (possibly edited) list price per unit
     const mrpV = it.mrp||it.cpl||0;
@@ -844,7 +875,7 @@ function generatePDF(order, copyType) {
     rval(tC.cpl.x+tC.cpl.w-1.5, y+7, cplV>0?cplV.toLocaleString('en-IN'):'—');
     doc.setFont('helvetica','bold'); doc.setTextColor(...INK);
     rval(tC.tot.x+tC.tot.w-1.5, y+7, (it.total||0).toLocaleString('en-IN'));
-    return y + rH;
+    return y + h;
   }
 
   // ── TOTALS + RECEIPT + SIGNATURE (final page only) ────────
@@ -984,7 +1015,7 @@ function generatePDF(order, copyType) {
 
   const items = isCustomer ? customerCopyItems(order.items) : (order.items || []);
   for (let i = 0; i < items.length; i++) {
-    if (y + rH > itemAreaBottom) {           // no room for another row → new page
+    if (y + rowHeight(items[i]) > itemAreaBottom) {   // no room for this row → new page
       drawFooter();
       doc.addPage(); pageNo++;
       y = 6;
