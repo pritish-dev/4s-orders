@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '28';
+  var V = '29';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -728,9 +728,10 @@ function generatePDF(order, copyType) {
     doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
     const delvText = [order.delivery||order.billing||'',
       order.floor    ? 'Floor: '    + order.floor    : '',
-      order.landmark ? 'Landmark: ' + order.landmark : '']
+      order.landmark ? 'Landmark: ' + order.landmark : '',
+      order.liftAvailable ? 'Lift: ' + order.liftAvailable : '']
       .filter(Boolean).join('\n');
-    doc.splitTextToSize(delvText,hw-3).slice(0,4).forEach((ln,i)=>doc.text(ln,dx+1,y+8+i*4));
+    doc.splitTextToSize(delvText,hw-3).slice(0,6).forEach((ln,i)=>doc.text(ln,dx+1,y+8+i*4));
     hln(dx,y+27,dx+hw);
     lbl(dx+1,y+30.5,'E-Mail :'); val(dx+14,y+30.5, fit1(order.email||'',hw-16), 7.5);
     hln(dx,y+33,dx+hw);
@@ -1052,7 +1053,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const BLANK_ORDER = () => ({
   no:'', customer:'', phone:'', alt:'', email:'',
   gstNumber:'',
-  billing:'', delivery:'', floor:'', landmark:'', liftAvailable:'', liftType:'',
+  billing:'', delivery:'', floor:'', landmark:'', liftAvailable:'',
   // Contact details (for orders purchased on behalf of someone else) —
   // mandatory when the billing address differs from the delivery address.
   contactPersonName:'', contactNumber:'', contactRemark:'',
@@ -1079,8 +1080,6 @@ const BLANK_ORDER = () => ({
 
 // Delivery-status options. The order is only "Completed" once installation is done.
 const DELIVERY_STATUSES = ['Pending', 'Scheduled for Delivery', 'Delivered', 'Installation Done'];
-// Lift types — one is required when a lift is available.
-const LIFT_TYPES = ['Standard Lift', 'Goods Lift', 'Service Lift'];
 // Godrej modular product families. On the CUSTOMER copy of the PDF, every item
 // belonging to one family is collapsed into a single line (family name + the
 // summed line total). The SALES copy stays fully itemised.
@@ -1967,8 +1966,16 @@ function SearchScreen({ctx}) {
 
 // ─── Order Form ──────────────────────────────────────────────
 function OrderFormScreen({ctx}) {
-  const {order,setOrder,nav,back,user,doSaveOrder} = ctx;
+  const {order,setOrder,nav,back,user,doSaveOrder,doDeleteOrder} = ctx;
   const o = order;
+  // Admins can permanently delete an already-saved order straight from the edit screen.
+  const isAdmin = normRole(user?.role) === 'admin';
+  async function handleDelete() {
+    if(!isAdmin || !o.no) return;
+    if(!window.confirm('Permanently delete order '+(o.no||'')+' for '+(o.customer||'this customer')+'? This removes it from the CRM sheet and cannot be undone.')) return;
+    const ok = await doDeleteOrder(o.no, o.internalNo);
+    if(ok){ setOrder(BLANK_ORDER()); nav('history'); }
+  }
   const setF = (k,v) => setOrder(prev=>({...prev,[k]:v}));
   const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, balance} = orderTotals(o);
 
@@ -2005,7 +2012,6 @@ function OrderFormScreen({ctx}) {
     if(!o.floor)    return ctx.showToast('Floor is required','bad');
     if(!o.landmark) return ctx.showToast('Landmark is required','bad');
     if(!o.liftAvailable) return ctx.showToast('Select whether a lift is available','bad');
-    if(String(o.liftAvailable).toLowerCase().startsWith('y') && !o.liftType) return ctx.showToast('Select the lift type','bad');
     // Contact details required when the billing & delivery addresses differ
     const addrDiffer = (o.billing||'').trim() && (o.delivery||'').trim() && (o.billing||'').trim()!==(o.delivery||'').trim();
     if(addrDiffer && (!o.contactPersonName||!o.contactNumber)) return ctx.showToast('Contact Person Name & Number are required (billing & delivery addresses differ)','bad');
@@ -2045,7 +2051,10 @@ function OrderFormScreen({ctx}) {
             <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono}}>{o.no?o.no:'DRAFT'}</div>
           </div>
         </div>
-        <Pill tone={o.no?'ok':'warn'} size="sm">{o.no?'SAVED':'UNSAVED'}</Pill>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          {isAdmin&&o.no&&<button onClick={handleDelete} title="Delete order (admin)" style={{display:'inline-flex',alignItems:'center',gap:5,height:30,padding:'0 10px',borderRadius:6,background:T.badSoft||'#fdecec',border:`1px solid ${T.bad}`,color:T.bad,fontSize:12,fontWeight:700,cursor:'pointer'}}>{Icon.trash(T.bad,14)}Delete</button>}
+          <Pill tone={o.no?'ok':'warn'} size="sm">{o.no?'SAVED':'UNSAVED'}</Pill>
+        </div>
       </div>
       <StockRibbon syncedAt={ctx.syncedAt}/>
       <div className="scroll">
@@ -2096,19 +2105,6 @@ function OrderFormScreen({ctx}) {
             <option>No</option>
           </select>
         </div>
-        {String(o.liftAvailable||'').toLowerCase().startsWith('y') && (
-          <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
-            <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:8}}>Lift type <span style={{color:T.bad,marginLeft:3}}>*</span></div>
-            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-              {LIFT_TYPES.map(lt=>{ const on=o.liftType===lt; return (
-                <label key={lt} style={{display:'inline-flex',alignItems:'center',gap:6,padding:'6px 12px',borderRadius:99,cursor:'pointer',border:`1px solid ${on?T.green:T.line}`,background:on?T.greenSoft:'#fff'}}>
-                  <input type="checkbox" checked={on} onChange={()=>setF('liftType',on?'':lt)} style={{width:14,height:14,accentColor:T.green,cursor:'pointer'}}/>
-                  <span style={{fontSize:12,fontWeight:600,color:on?T.green:T.ink3}}>{lt}</span>
-                </label>
-              );})}
-            </div>
-          </div>
-        )}
         {/* Contact details — for orders bought on behalf of someone else.
             Mandatory when the billing address differs from the delivery address. */}
         {(()=>{ const diff = (o.billing||'').trim() && (o.delivery||'').trim() && (o.billing||'').trim()!==(o.delivery||'').trim(); return (

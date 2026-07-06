@@ -829,7 +829,6 @@ function handleOrders(p) {
   var cFloor   = colOf(['FLOOR']);
   var cLandmk  = colOf(['LANDMARK']);
   var cLiftAv  = colOf(['LIFT AVAILABLE','LIFT AVAILABLE?']);
-  var cLiftTy  = colOf(['LIFT TYPE']);
   var cCPName  = colOf(['CONTACT PERSON NAME','CONTACT PERSON']);
   var cCPNum   = colOf(['CONTACT PERSON NUMBER','CONTACT PERSON CONTACT NUMBER']);
   var cCPRem   = colOf(['CONTACT REMARK','CONTACT REMARKS']);
@@ -906,7 +905,6 @@ function handleOrders(p) {
         floor: sval(r, cFloor),
         landmark: sval(r, cLandmk),
         liftAvailable: sval(r, cLiftAv),
-        liftType: sval(r, cLiftTy),
         contactPersonName: sval(r, cCPName),
         contactNumber: sval(r, cCPNum),
         contactRemark: sval(r, cCPRem),
@@ -1102,7 +1100,6 @@ var CRM_APP_COLUMNS = [
   ['FLOOR'],
   ['LANDMARK'],
   ['LIFT AVAILABLE', 'LIFT AVAILABLE?'],
-  ['LIFT TYPE'],
   ['CONTACT PERSON NAME', 'CONTACT PERSON'],
   ['CONTACT PERSON NUMBER', 'CONTACT PERSON CONTACT NUMBER'],
   ['CONTACT REMARK', 'CONTACT REMARKS'],
@@ -1344,7 +1341,6 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['FLOOR'], o.floor || '');
     put(['LANDMARK'], o.landmark || '');
     put(['LIFT AVAILABLE', 'LIFT AVAILABLE?'], o.liftAvailable || '');
-    put(['LIFT TYPE'], o.liftType || '');
     // Contact details (order bought on behalf of someone else)
     put(['CONTACT PERSON NAME', 'CONTACT PERSON'], o.contactPersonName || '');
     put(['CONTACT PERSON NUMBER', 'CONTACT PERSON CONTACT NUMBER'], o.contactNumber || '');
