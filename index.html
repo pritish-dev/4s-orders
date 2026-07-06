@@ -31,11 +31,17 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '19';
+  var V = '20';
   if (localStorage.getItem('4s_code_v') !== V) {
-    localStorage.setItem('4s_code_v', V);
-    // Clear ALL local storage (stale caches) then unregister SW and hard reload
+    // Preserve user config / session / unsynced work across the cache-busting
+    // wipe. Only re-syncable caches (items, orders) are dropped.
+    var KEEP = ['4s_api_url','4s_review_url','4s_user','4s_queue','4s_draft'];
+    var saved = {};
+    for (var ki = 0; ki < KEEP.length; ki++) {
+      try { var kv = localStorage.getItem(KEEP[ki]); if (kv !== null) saved[KEEP[ki]] = kv; } catch(e) {}
+    }
     try { localStorage.clear(); } catch(e) {}
+    for (var kk in saved) { try { localStorage.setItem(kk, saved[kk]); } catch(e) {} }
     localStorage.setItem('4s_code_v', V); // re-set after clear
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistrations().then(function(regs){
