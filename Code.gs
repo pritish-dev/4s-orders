@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v23';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v24';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -113,9 +113,10 @@ function doPost(e) {
   var result;
   try {
     switch (body.action || '') {
-      case 'saveOrder':  result = handleSaveOrder(body.order); break;
-      case 'updateWON':  result = handleUpdateWON(body);       break;
-      default:           result = { ok: false, error: 'Unknown action: ' + body.action };
+      case 'saveOrder':       result = handleSaveOrder(body.order);   break;
+      case 'updateWON':       result = handleUpdateWON(body);         break;
+      case 'updateDelivery':  result = handleUpdateDelivery(body);    break;
+      default:                result = { ok: false, error: 'Unknown action: ' + body.action };
     }
   } catch(err) {
     result = { ok: false, error: err.message };
@@ -853,7 +854,7 @@ function handleOrders(p) {
   var cFollow  = colOf(['FOLLOW-UP DATE','FOLLOW UP DATE','FOLLOWUP DATE']);
   var cOrdType = colOf(['ORDER TYPE','B2C/B2B','ORDER CATEGORY']);
   var cPoRef   = colOf(['REFERENCE ORDER NO.','REFERENCE ORDER NO']);
-  var cDelvSt  = colOf(['DELIVERY STATUS','DELIVERY REMARKS(DELIVERED/PENDING)','DELIVERY REMARKS']);
+  var cDelvSt  = colOf(CRM_H.DELIVERY);
   var cMr1n=colOf(['MONEY RECEIPT NO 1','MONEY RECEIPT NO','RECEIPT NO','RECEIPT NO.','RECEIPT NO & DATE']);
   var cMr1d=colOf(['MONEY RECEIPT DATE 1','MONEY RECEIPT DATE','RECEIPT DATE']);
   var cMr2n=colOf(['MONEY RECEIPT NO 2']), cMr2d=colOf(['MONEY RECEIPT DATE 2']);
@@ -945,6 +946,8 @@ function handleOrders(p) {
 
     var rowWon = sval(r, cWon);
     if (rowWon && m.wons.indexOf(rowWon) === -1) m.wons.push(rowWon);
+    var rowDelv = sval(r, cDelvSt);
+    if (rowDelv) m.deliveryStatus = rowDelv;
 
     // Reconstruct this line's item (in sheet order).
     var qty  = cIQty >= 0 ? Number(r[cIQty]) || 0 : 0;
@@ -1038,6 +1041,7 @@ var CRM_H = {
   CUSTOMER: ['CUSTOMER NAME'],
   SALES:    ['SALES PERSON'],
   AMOUNT:   ['ORDER AMOUNT (WITH TAX AND AFTER DISC )', 'ORDER AMOUNT (WITH TAX AND AFTER DISC)'],
+  DELIVERY: ['DELIVERY REMARKS(DELIVERED/PENDING)', 'DELIVERY REMARKS', 'DELIVERY STATUS'],
 };
 
 // Parse a "dd.mm.yy" / "dd.mm.yyyy" ORDER DATE string → Date (or null).
@@ -1303,6 +1307,47 @@ function handleUpdateWON(body) {
   }
   if (!updated) return { ok: false, error: 'No matching items to update for order: ' + orderNo };
   _appendLog(updatedBy, orderNo, 'UPDATE_WON', 'WON: ' + won + (itemIndexes ? ' items:' + itemIndexes.join(',') : ''));
+  return { ok: true, rows: updated };
+}
+
+// ─── UPDATE DELIVERY STATUS ────────────────────────────────────────────────────
+// Sets the "DELIVERY REMARKS(DELIVERED/PENDING)" column for every row of an order.
+// Called by the salesperson once an order has physically been delivered.
+function handleUpdateDelivery(body) {
+  var orderNo    = String(body.orderNo    || '').trim();
+  var internalNo = Number(body.internalNo || 0);
+  var status     = String(body.deliveryStatus || body.status || '').trim();
+  var updatedBy  = String(body.updatedBy  || '');
+  if (!status) return { ok: false, error: 'Delivery status is required.' };
+
+  var sh;
+  try { sh = _openCRMSheet(); }
+  catch (e) { return { ok: false, error: e.message }; }
+
+  var C     = _crmCols(sh);
+  var colOf = C.colOf;
+  var ncol  = C.header.length;
+
+  var cOrderNo = colOf(CRM_H.ORDER_NO);
+  var cIntNo   = colOf(CRM_H.INT_NO);
+  var cDeliv   = colOf(CRM_H.DELIVERY);
+  if (cDeliv < 0) return { ok: false, error: 'No "Delivery Remarks" column found in the CRM sheet.' };
+
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return { ok: false, error: 'Order not found: ' + orderNo };
+  var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
+
+  var updated = 0;
+  for (var i = 0; i < data.length; i++) {
+    var matchOrder = cOrderNo >= 0 && orderNo    && String(data[i][cOrderNo] || '').trim() === orderNo;
+    var matchInt   = cIntNo   >= 0 && internalNo && Number(data[i][cIntNo]) === internalNo;
+    if (matchOrder || matchInt) {
+      sh.getRange(i + 2, cDeliv + 1).setValue(status);
+      updated++;
+    }
+  }
+  if (!updated) return { ok: false, error: 'Order not found: ' + orderNo };
+  _appendLog(updatedBy, orderNo, 'UPDATE_DELIVERY', 'Delivery: ' + status);
   return { ok: true, rows: updated };
 }
 

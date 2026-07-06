@@ -31,11 +31,17 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '19';
+  var V = '22';
   if (localStorage.getItem('4s_code_v') !== V) {
-    localStorage.setItem('4s_code_v', V);
-    // Clear ALL local storage (stale caches) then unregister SW and hard reload
+    // Preserve user config / session / unsynced work across the cache-busting
+    // wipe. Only re-syncable caches (items, orders) are dropped.
+    var KEEP = ['4s_api_url','4s_review_url','4s_user','4s_queue','4s_draft'];
+    var saved = {};
+    for (var ki = 0; ki < KEEP.length; ki++) {
+      try { var kv = localStorage.getItem(KEEP[ki]); if (kv !== null) saved[KEEP[ki]] = kv; } catch(e) {}
+    }
     try { localStorage.clear(); } catch(e) {}
+    for (var kk in saved) { try { localStorage.setItem(kk, saved[kk]); } catch(e) {} }
     localStorage.setItem('4s_code_v', V); // re-set after clear
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistrations().then(function(regs){
@@ -1254,6 +1260,16 @@ function App() {
     finally { setLoading(false); }
   }
 
+  async function doUpdateDelivery(orderNo, internalNo, deliveryStatus) {
+    setLoading(true);
+    try {
+      const res = await apiPost({ action:'updateDelivery', orderNo, internalNo, deliveryStatus, updatedBy: user?.name });
+      if (res.ok) { showToast('Delivery status updated ✓'); loadOrders(); return true; }
+      else { showToast(res.error||'Update failed','bad'); return false; }
+    } catch(e) { showToast(e.message,'bad'); return false; }
+    finally { setLoading(false); }
+  }
+
   function doSignOut() {
     localStorage.removeItem('4s_user');
     setUser(null);
@@ -1262,7 +1278,7 @@ function App() {
     nav('login');
   }
 
-  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, back, doLogin, doSaveOrder, doUpdateWON, doSignOut, syncStock, syncPriceList, loadOrders };
+  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doSignOut, syncStock, syncPriceList, loadOrders };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -1851,8 +1867,9 @@ function OrderFormScreen({ctx}) {
   return (
     <div className="screen">
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,flexShrink:0}}>
-        <div style={{display:'flex',alignItems:'center',gap:10}}>
-          <button onClick={back} style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <button onClick={back} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.home(T.ink2,18)}</button>
           <div>
             <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>{o.no?'Edit order':'New order'}</div>
             <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono}}>{o.no?o.no:'DRAFT'}</div>
@@ -2111,7 +2128,7 @@ function OrderFormScreen({ctx}) {
 
 // ─── PDF Preview ─────────────────────────────────────────────
 function PDFPreviewScreen({ctx}) {
-  const {order,nav} = ctx;
+  const {order,nav,back} = ctx;
   const o = order;
   const {itemsSubtotal, orderDiscPct, orderDiscAmt, cgst, sgst, total} = orderTotals(o);
   const qrRef = useRef(null);
@@ -2146,8 +2163,9 @@ function PDFPreviewScreen({ctx}) {
   return (
     <div className="screen" style={{background:T.ink2}}>
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px 12px',color:'#fff',flexShrink:0}}>
-        <div style={{display:'flex',alignItems:'center',gap:10}}>
-          <button onClick={()=>nav('order')} style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.08)',border:'1px solid rgba(255,255,255,.15)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back('#fff')}</button>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <button onClick={back} title="Back" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.08)',border:'1px solid rgba(255,255,255,.15)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back('#fff')}</button>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.08)',border:'1px solid rgba(255,255,255,.15)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.home('#fff',18)}</button>
           <div>
             <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>Order PDF</div>
             <div style={{fontSize:10,color:'rgba(255,255,255,.55)',fontFamily:T.mono}}>{o.no||'Draft'} · {new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}</div>
@@ -2225,7 +2243,7 @@ function PDFPreviewScreen({ctx}) {
 
 // ─── Order History ───────────────────────────────────────────
 function HistoryScreen({ctx}) {
-  const {orders,nav,loadOrders} = ctx;
+  const {orders,nav,loadOrders,doUpdateDelivery} = ctx;
   const [tab,setTab] = useState('all');
   const [wonOrder,setWonOrder] = useState(null);
   const [query,setQuery] = useState('');
@@ -2234,17 +2252,21 @@ function HistoryScreen({ctx}) {
   const tabs = [
     {id:'all',      label:'All',        filter:()=>true},
     {id:'pending',  label:'Pend WON',   filter:o=>!o.won&&o.status!=='draft'},
-    {id:'delivered',label:'Delivered',  filter:o=>/delivered/i.test(o.deliveryStatus||'')},
+    {id:'delivered',label:'Delivered',  filter:o=>/deliver/i.test(o.deliveryStatus||'')},
     {id:'completed',label:'Completed',  filter:o=>o.status==='completed'||/installation done/i.test(o.deliveryStatus||'')},
   ];
   const active = tabs.find(t=>t.id===tab)||tabs[0];
 
   // Distinct salespersons for the filter dropdown
-  const salespeople = [...new Set(orders.map(o=>(o.salesExec||'').trim()).filter(Boolean))].sort();
+  const salespeople = [...new Set(orders.map(o=>(o.salesExec||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
   const q = query.trim().toLowerCase();
   const matchesQuery = o => !q || String(o.no||'').toLowerCase().includes(q) || String(o.won||'').toLowerCase().includes(q);
-  const matchesSales = o => !salesFilter || (o.salesExec||'').trim()===salesFilter;
+  const matchesSales = o => !salesFilter || (o.salesExec||'').trim().toLowerCase()===salesFilter.toLowerCase();
   const shown = orders.filter(active.filter).filter(matchesQuery).filter(matchesSales);
+
+  async function changeDelivery(o, val){
+    if(val && val!==(o.deliveryStatus||'Pending')) await doUpdateDelivery(o.no, o.internalNo, val);
+  }
 
   if(wonOrder) return <WONUpdateScreen ctx={ctx} orderOverride={wonOrder} onClose={()=>setWonOrder(null)}/>;
 
@@ -2290,11 +2312,15 @@ function HistoryScreen({ctx}) {
                 <span onClick={e=>{e.stopPropagation();setWonOrder(o);}} style={{display:'inline-flex',alignItems:'center',height:16,padding:'0 6px',borderRadius:4,background:T.warnSoft,color:T.warn,border:'1px solid #e6cc95',fontSize:10,fontWeight:700,cursor:'pointer'}}>{o.won?'+ SO':'+ ADD SO'}</span>
               </div>
               <div style={{fontSize:14,fontWeight:700,color:T.ink}}>{o.customer}</div>
-              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.salesExec} · {(o.deliveryStatus||o.status||'').toUpperCase()}</div>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.salesExec}</div>
             </div>
             <div style={{textAlign:'right'}}>
               <div style={{fontSize:16,fontFamily:T.mono,fontWeight:700,color:T.ink,letterSpacing:-0.4}}>₹{(o.amt||0).toLocaleString('en-IN')}</div>
-              <div style={{display:'flex',gap:6,marginTop:6,justifyContent:'flex-end'}}>
+              <div style={{display:'flex',gap:6,marginTop:6,justifyContent:'flex-end',alignItems:'center'}}>
+                <select value={o.deliveryStatus||'Pending'} onClick={e=>e.stopPropagation()} onChange={e=>{e.stopPropagation();changeDelivery(o,e.target.value);}}
+                  style={{padding:'4px 6px',borderRadius:4,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:11,fontWeight:600,cursor:'pointer',WebkitAppearance:'none',appearance:'none',maxWidth:130}}>
+                  {DELIVERY_STATUSES.map(s=><option key={s} value={s}>{s}</option>)}
+                </select>
                 <span onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...o});nav('pdf');}} style={{width:28,height:24,borderRadius:4,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,13)}</span>
                 <span onClick={e=>{e.stopPropagation();const phone=(o.phone||'').replace(/\D/g,'');if(phone)window.open('https://wa.me/91'+phone);}} style={{width:28,height:24,borderRadius:4,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',13)}</span>
               </div>
@@ -2332,8 +2358,9 @@ function WONUpdateScreen({ctx,orderOverride,onClose}) {
   }
   return (
     <div className="screen">
-      <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 14px 14px',flexShrink:0}}>
-        <button onClick={()=>onClose?onClose():nav('history')} style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+      <div style={{display:'flex',alignItems:'center',gap:8,padding:'10px 14px 14px',flexShrink:0}}>
+        <button onClick={()=>onClose?onClose():nav('history')} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+        <button onClick={()=>{ if(onClose) onClose(); nav('home'); }} title="Home" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.home(T.ink2,18)}</button>
         <div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4}}>Update SO No / WON</div>
       </div>
       <div className="scroll" style={{padding:'0 18px'}}>
