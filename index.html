@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '20';
+  var V = '21';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -1786,8 +1786,9 @@ function OrderFormScreen({ctx}) {
   return (
     <div className="screen">
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,flexShrink:0}}>
-        <div style={{display:'flex',alignItems:'center',gap:10}}>
-          <button onClick={back} style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <button onClick={back} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.home(T.ink2,18)}</button>
           <div>
             <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>New order</div>
             <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono}}>DRAFT{o.no?' · '+o.no:''}</div>
@@ -1991,7 +1992,7 @@ function OrderFormScreen({ctx}) {
 
 // ─── PDF Preview ─────────────────────────────────────────────
 function PDFPreviewScreen({ctx}) {
-  const {order,nav} = ctx;
+  const {order,nav,back} = ctx;
   const o = order;
   const {itemsSubtotal, orderDiscPct, orderDiscAmt, cgst, sgst, total} = orderTotals(o);
   const qrRef = useRef(null);
@@ -2023,8 +2024,9 @@ function PDFPreviewScreen({ctx}) {
   return (
     <div className="screen" style={{background:T.ink2}}>
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px 12px',color:'#fff',flexShrink:0}}>
-        <div style={{display:'flex',alignItems:'center',gap:10}}>
-          <button onClick={()=>nav('order')} style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.08)',border:'1px solid rgba(255,255,255,.15)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back('#fff')}</button>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <button onClick={back} title="Back" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.08)',border:'1px solid rgba(255,255,255,.15)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back('#fff')}</button>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.08)',border:'1px solid rgba(255,255,255,.15)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.home('#fff',18)}</button>
           <div>
             <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>Order PDF</div>
             <div style={{fontSize:10,color:'rgba(255,255,255,.55)',fontFamily:T.mono}}>{o.no||'Draft'} · {new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}</div>
@@ -2190,8 +2192,9 @@ function WONUpdateScreen({ctx,orderOverride,onClose}) {
   }
   return (
     <div className="screen">
-      <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 14px 14px',flexShrink:0}}>
-        <button onClick={()=>onClose?onClose():nav('history')} style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+      <div style={{display:'flex',alignItems:'center',gap:8,padding:'10px 14px 14px',flexShrink:0}}>
+        <button onClick={()=>onClose?onClose():nav('history')} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+        <button onClick={()=>{ if(onClose) onClose(); nav('home'); }} title="Home" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.home(T.ink2,18)}</button>
         <div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4}}>Update WON / SO</div>
       </div>
       <div className="scroll" style={{padding:'0 18px'}}>
