@@ -718,7 +718,7 @@ function generatePDF(order, copyType) {
     doc.text(fit1(order.customer||'',hw-3,9), ml+1, y+16);
     hln(ml,y+33,ml+hw);
     doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-    doc.splitTextToSize(order.billing||'',hw-3).slice(0,3).forEach((ln,i)=>doc.text(ln,ml+1,y+21+i*4));
+    doc.splitTextToSize(order.billing||order.delivery||'',hw-3).slice(0,3).forEach((ln,i)=>doc.text(ln,ml+1,y+21+i*4));
     hln(ml,y+38,ml+hw);
     lbl(ml+1,y+36,'Ph. :'); val(ml+9,y+36, fit1(order.phone||'',hw-11), 7.5);
     hln(ml,y+43,ml+hw);
@@ -2080,14 +2080,15 @@ function OrderFormScreen({ctx}) {
     if(!o.customer) return ctx.showToast('Customer name is required','bad');
     if(!o.phone)    return ctx.showToast('Phone number is required','bad');
     if(!o.email)    return ctx.showToast('E-mail is required','bad');
+    if(!o.delivery) return ctx.showToast('Delivery address is required','bad');
     if(!o.floor)    return ctx.showToast('Floor is required','bad');
-    if(!o.landmark) return ctx.showToast('Landmark is required','bad');
+    if(!o.landmark) return ctx.showToast('Nearest landmark is required','bad');
     if(!o.liftAvailable) return ctx.showToast('Select whether a lift is available','bad');
     // Lift type is mandatory when a lift is available — at least one must be picked.
     if(o.liftAvailable==='Yes' && (!Array.isArray(o.liftTypes)||o.liftTypes.length===0)) return ctx.showToast('Select the lift type (Standard / Goods / Service)','bad');
-    // Contact details required when the billing & delivery addresses differ
+    // Delivery contact person required when the billing & delivery addresses differ
     const addrDiffer = (o.billing||'').trim() && (o.delivery||'').trim() && (o.billing||'').trim()!==(o.delivery||'').trim();
-    if(addrDiffer && (!o.contactPersonName||!o.contactNumber)) return ctx.showToast('Contact Person Name & Number are required (billing & delivery addresses differ)','bad');
+    if(addrDiffer && (!o.contactPersonName||!o.contactNumber)) return ctx.showToast('Delivery Contact Person Name & Number are required (billing & delivery addresses differ)','bad');
     if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item','bad');
     // Mandatory customer-profiling fields (DOB & anniversary are now optional)
     if(!o.awareness)    return ctx.showToast('Select the Lead Source','bad');
@@ -2189,10 +2190,10 @@ function OrderFormScreen({ctx}) {
         </div>
 
         <SectionHead n="02" label="Address"/>
-        <Field label="Billing Address" value={o.billing} onChange={v=>setF('billing',v)} multiline required/>
-        <Field label="Delivery Address" value={o.delivery} onChange={v=>setF('delivery',v)} multiline action="SAME AS BILLING" onAction={()=>setF('delivery',o.billing)}/>
+        <Field label="Delivery Address" value={o.delivery} onChange={v=>setF('delivery',v)} multiline required/>
         <Field label="Floor" value={o.floor} onChange={v=>setF('floor',v)} required hint="Mandatory"/>
-        <Field label="Landmark" value={o.landmark} onChange={v=>setF('landmark',v)} required hint="Mandatory"/>
+        <Field label="Nearest Landmark" value={o.landmark} onChange={v=>setF('landmark',v)} required hint="Mandatory"/>
+        <Field label="Billing Address" value={o.billing} onChange={v=>setF('billing',v)} multiline action="SAME AS DELIVERY" onAction={()=>setF('billing',o.delivery)} hint="Leave blank or tap SAME AS DELIVERY if identical"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Lift available? <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <select value={o.liftAvailable} onChange={e=>{const v=e.target.value; setOrder(prev=>({...prev,liftAvailable:v,liftTypes: v==='Yes'?(Array.isArray(prev.liftTypes)?prev.liftTypes:[]):[]}));}} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.liftAvailable?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
@@ -2218,12 +2219,12 @@ function OrderFormScreen({ctx}) {
             Mandatory when the billing address differs from the delivery address. */}
         {(()=>{ const diff = (o.billing||'').trim() && (o.delivery||'').trim() && (o.billing||'').trim()!==(o.delivery||'').trim(); return (
           <>
-            <SectionHead n="02b" label={`Contact Details${diff?' · required':' · optional'}`}/>
+            <SectionHead n="02b" label={`Delivery Contact Person${diff?' · required':' · optional'}`}/>
             <div style={{padding:'8px 14px',background:diff?T.warnSoft:T.paper2,borderBottom:`1px solid ${T.line}`,fontSize:11,color:diff?T.warn:T.ink4,fontWeight:600}}>
-              For orders purchased for someone else. {diff?'Required — billing & delivery addresses differ.':'Optional.'}
+              Person to receive the order at the delivery address. {diff?'Required — billing & delivery addresses differ.':'Optional.'}
             </div>
-            <Field label="Contact Person Name" value={o.contactPersonName} onChange={v=>setF('contactPersonName',v)} required={diff}/>
-            <Field label="Contact Number" value={o.contactNumber} onChange={v=>setF('contactNumber',v)} mono type="tel" required={diff}/>
+            <Field label="Delivery Contact Person Name" value={o.contactPersonName} onChange={v=>setF('contactPersonName',v)} required={diff}/>
+            <Field label="Delivery Contact Number" value={o.contactNumber} onChange={v=>setF('contactNumber',v)} mono type="tel" required={diff}/>
             <Field label="Remark" value={o.contactRemark} onChange={v=>setF('contactRemark',v)} multiline/>
           </>
         );})()}
@@ -2513,7 +2514,7 @@ function PDFPreviewScreen({ctx}) {
           </div>
           <div style={{padding:'12px 14px 14px',fontSize:9}}>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:10}}>
-              <div><div style={{color:T.ink4,fontWeight:700,letterSpacing:.6,marginBottom:2}}>BILL TO</div><div style={{fontWeight:700,fontSize:10}}>{o.customer}</div><div style={{color:T.ink3,lineHeight:1.4,whiteSpace:'pre-line',fontSize:9}}>{o.billing}</div><div style={{fontFamily:T.mono,fontSize:9,marginTop:2}}>{o.phone}</div></div>
+              <div><div style={{color:T.ink4,fontWeight:700,letterSpacing:.6,marginBottom:2}}>BILL TO</div><div style={{fontWeight:700,fontSize:10}}>{o.customer}</div><div style={{color:T.ink3,lineHeight:1.4,whiteSpace:'pre-line',fontSize:9}}>{o.billing||o.delivery}</div><div style={{fontFamily:T.mono,fontSize:9,marginTop:2}}>{o.phone}</div></div>
               <div><div style={{color:T.ink4,fontWeight:700,letterSpacing:.6,marginBottom:2}}>DELIVER TO</div><div style={{color:T.ink3,fontSize:9}}>{o.delivery||o.billing}</div><div style={{color:T.ink4,fontWeight:700,letterSpacing:.6,marginTop:6}}>PLANNED DLY</div><div style={{fontFamily:T.mono,fontSize:9}}>{o.plannedDly||'—'}</div></div>
             </div>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:6,padding:'6px 8px',background:T.paper,border:`1px solid ${T.line}`,borderRadius:4,marginBottom:10}}>
