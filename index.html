@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '29';
+  var V = '30';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -2885,9 +2885,9 @@ function SettingsScreen({ctx}) {
                         ⚠ The deployed Apps Script did not report a version. Copy the latest Code.gs → save in Apps Script → Deploy → Manage deployments → Edit → New version.
                       </div>
                     )}
-                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v23' && (
+                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v25' && (
                       <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>
-                        Latest available is v23 — a redeploy is optional but recommended for the newest fixes.
+                        Latest available is v25 — a redeploy is optional but recommended for the newest fixes.
                       </div>
                     )}
                     {debugResult.discontinued && (

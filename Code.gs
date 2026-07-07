@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v24';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v25';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
