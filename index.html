@@ -726,10 +726,11 @@ function generatePDF(order, copyType) {
     const dx = ml+hw;
     lbl(dx+1,y+3.5,'Delivery Address :');
     doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+    const liftTypesTxt = Array.isArray(order.liftTypes) ? order.liftTypes.join(', ') : '';
     const delvText = [order.delivery||order.billing||'',
       order.floor    ? 'Floor: '    + order.floor    : '',
       order.landmark ? 'Landmark: ' + order.landmark : '',
-      order.liftAvailable ? 'Lift: ' + order.liftAvailable : '']
+      order.liftAvailable ? 'Lift: ' + order.liftAvailable + (liftTypesTxt ? ' (' + liftTypesTxt + ')' : '') : '']
       .filter(Boolean).join('\n');
     doc.splitTextToSize(delvText,hw-3).slice(0,6).forEach((ln,i)=>doc.text(ln,dx+1,y+8+i*4));
     hln(dx,y+27,dx+hw);
@@ -769,10 +770,24 @@ function generatePDF(order, copyType) {
     const measParts = [];
     if (order.sofaWidth||order.sofaHeight||order.sofaDepth)
       measParts.push('Sofa (W x H x D): ' + [order.sofaWidth,order.sofaHeight,order.sofaDepth].map(v=>v||'-').join(' x '));
-    if (order.wardrobeLength||order.wardrobeWidth||order.wardrobeHeight)
-      measParts.push('Wardrobe (L x W x H): ' + [order.wardrobeLength,order.wardrobeWidth,order.wardrobeHeight].map(v=>v||'-').join(' x '));
-    if (order.staircaseWidth||order.staircaseLandingHeight)
-      measParts.push('Staircase (W / Landing H): ' + [order.staircaseWidth,order.staircaseLandingHeight].map(v=>v||'-').join(' / '));
+    // Modular-furniture blocks (one per modular wardrobe): dims + its staircase measurement.
+    const pdfWardrobes = (Array.isArray(order.wardrobes) && order.wardrobes.length)
+      ? order.wardrobes
+      : ((order.wardrobeLength||order.wardrobeWidth||order.wardrobeHeight||order.staircaseWidth||order.staircaseLandingHeight)
+          ? [{name:'',length:order.wardrobeLength,width:order.wardrobeWidth,height:order.wardrobeHeight,staircaseWidth:order.staircaseWidth,staircaseLandingHeight:order.staircaseLandingHeight}]
+          : []);
+    pdfWardrobes.forEach((w,wi)=>{
+      const nm = w.name ? ' ' + w.name : '';
+      if (w.length||w.width||w.height)
+        measParts.push('Furniture ' + (wi+1) + nm + ' (L x W x H): ' + [w.length,w.width,w.height].map(v=>v||'-').join(' x '));
+      if (w.staircaseWidth||w.staircaseLandingHeight)
+        measParts.push('Furniture ' + (wi+1) + nm + ' Staircase (W / Landing H): ' + [w.staircaseWidth,w.staircaseLandingHeight].map(v=>v||'-').join(' / '));
+    });
+    // Room blocks (add-as-many-as-needed).
+    (Array.isArray(order.rooms)?order.rooms:[]).forEach((r,ri)=>{
+      if (r.width||r.height||r.depth||r.name)
+        measParts.push((r.name||('Room ' + (ri+1))) + ' (W x H x D): ' + [r.width,r.height,r.depth].map(v=>v||'-').join(' x '));
+    });
     if (order.entryDoorWidth||order.entryDoorHeight)
       measParts.push('Entry Door (W x H): ' + [order.entryDoorWidth,order.entryDoorHeight].map(v=>v||'-').join(' x '));
     if (measParts.length) {
@@ -1054,6 +1069,8 @@ const BLANK_ORDER = () => ({
   no:'', customer:'', phone:'', alt:'', email:'',
   gstNumber:'',
   billing:'', delivery:'', floor:'', landmark:'', liftAvailable:'',
+  // When a lift is available, which lift type(s): Standard / Goods / Service.
+  liftTypes:[],
   // Contact details (for orders purchased on behalf of someone else) —
   // mandatory when the billing address differs from the delivery address.
   contactPersonName:'', contactNumber:'', contactRemark:'',
@@ -1073,6 +1090,15 @@ const BLANK_ORDER = () => ({
   // Site measurements (sofa & modular-wardrobe dims are mandatory when such an
   // item is ordered + printed on both PDF copies)
   sofaWidth:'', sofaHeight:'', sofaDepth:'',
+  // Modular-furniture measurements — one block per modular wardrobe in the order
+  // (Kalista / Kreation X2 / X3). Each block carries the wardrobe dims AND its own
+  // site (staircase) access measurement. The sales person picks how many blocks.
+  // { name, length, width, height, staircaseWidth, staircaseLandingHeight }
+  wardrobes:[],
+  // Room measurements — an add-as-many-as-you-need list. { name, width, height, depth }
+  rooms:[],
+  // Legacy single-block fields (kept so orders saved before the multi-block
+  // upgrade still round-trip; mirrored from wardrobes[0] on save).
   wardrobeLength:'', wardrobeWidth:'', wardrobeHeight:'',
   staircaseWidth:'', staircaseLandingHeight:'',
   entryDoorWidth:'', entryDoorHeight:'',
@@ -1988,9 +2014,48 @@ function OrderFormScreen({ctx}) {
   // Kreation X2 / X3) in the cart makes its measurements mandatory.
   const hasSofa     = (o.items||[]).some(isSofaItem);
   const hasWardrobe = (o.items||[]).some(isWardrobeItem);
+  // Number of modular-wardrobe line items — used to seed the "how many modular
+  // furnitures" picker the first time the block is shown.
+  const wardrobeItemCount = (o.items||[]).filter(isWardrobeItem).length;
   const AWARENESS  = ['Social Media','Whatsapp','Newspaper','Friends & Relatives','Website','Others'];
   const PATTERNS   = ['1st Time','2nd Time','3rd Time','More than 3'];
   const PURCHASING = ['New Home','Renovation','Rented Home','Other'];
+  const LIFT_TYPES = ['Standard Lift','Goods Lift','Service Lift'];
+
+  // ── Multi-block measurement state ──────────────────────────────────────
+  // Normalise older orders (single wardrobe/staircase scalars) into the
+  // wardrobes[] / rooms[] / liftTypes[] arrays the UI now works with.
+  React.useEffect(()=>{
+    setOrder(prev=>{
+      const patch={};
+      if(!Array.isArray(prev.liftTypes)) patch.liftTypes = [];
+      if(!Array.isArray(prev.rooms))     patch.rooms = [];
+      if(!Array.isArray(prev.wardrobes)) {
+        patch.wardrobes = (prev.wardrobeLength||prev.wardrobeWidth||prev.wardrobeHeight||prev.staircaseWidth||prev.staircaseLandingHeight)
+          ? [{name:'',length:prev.wardrobeLength||'',width:prev.wardrobeWidth||'',height:prev.wardrobeHeight||'',staircaseWidth:prev.staircaseWidth||'',staircaseLandingHeight:prev.staircaseLandingHeight||''}]
+          : [];
+      }
+      return Object.keys(patch).length ? {...prev,...patch} : prev;
+    });
+  },[o.no]);
+
+  const liftTypes = Array.isArray(o.liftTypes) ? o.liftTypes : [];
+  const wardrobes = Array.isArray(o.wardrobes) ? o.wardrobes : [];
+  const rooms     = Array.isArray(o.rooms)     ? o.rooms     : [];
+
+  function toggleLiftType(t){ setOrder(prev=>{ const cur=Array.isArray(prev.liftTypes)?prev.liftTypes:[]; return {...prev,liftTypes: cur.includes(t)?cur.filter(x=>x!==t):[...cur,t]}; }); }
+  const BLANK_WARDROBE = ()=>({name:'',length:'',width:'',height:'',staircaseWidth:'',staircaseLandingHeight:''});
+  const BLANK_ROOM     = ()=>({name:'',width:'',height:'',depth:''});
+  function setWardrobeCount(n){ setOrder(prev=>{ const cur=Array.isArray(prev.wardrobes)?prev.wardrobes.map(w=>({...w})):[]; const next=[]; for(let i=0;i<n;i++) next.push(cur[i]||BLANK_WARDROBE()); return {...prev,wardrobes:next}; }); }
+  function setWardrobeField(idx,field,val){ setOrder(prev=>{ const arr=(Array.isArray(prev.wardrobes)?prev.wardrobes:[]).map(w=>({...w})); if(arr[idx]) arr[idx][field]=val; return {...prev,wardrobes:arr}; }); }
+  function addRoom(){ setOrder(prev=>({...prev,rooms:[...(Array.isArray(prev.rooms)?prev.rooms:[]),BLANK_ROOM()]})); }
+  function removeRoom(idx){ setOrder(prev=>({...prev,rooms:(Array.isArray(prev.rooms)?prev.rooms:[]).filter((_,i)=>i!==idx)})); }
+  function setRoomField(idx,field,val){ setOrder(prev=>{ const arr=(Array.isArray(prev.rooms)?prev.rooms:[]).map(r=>({...r})); if(arr[idx]) arr[idx][field]=val; return {...prev,rooms:arr}; }); }
+  // Seed the modular-furniture block from the number of wardrobe items in the
+  // cart the first time it's shown (sales can still change the count).
+  React.useEffect(()=>{
+    if(hasWardrobe && Array.isArray(o.wardrobes) && o.wardrobes.length===0) setWardrobeCount(Math.max(1,wardrobeItemCount));
+  },[hasWardrobe,wardrobeItemCount]);
 
   function removeItem(idx) { setOrder(prev=>({...prev,items:prev.items.filter((_,i)=>i!==idx)})); }
   function toggleScheme(idx,key) { setOrder(prev=>({...prev,items:prev.items.map((it,i)=>i===idx?{...it,[key]:!it[key]}:it)})); }
@@ -2023,12 +2088,29 @@ function OrderFormScreen({ctx}) {
     // Sofa: sofa dims + entry-door site measurement are mandatory
     if(hasSofa && (!o.sofaWidth||!o.sofaHeight||!o.sofaDepth)) return ctx.showToast('Enter Sofa width, height & depth (mandatory for sofas)','bad');
     if(hasSofa && (!o.entryDoorWidth||!o.entryDoorHeight)) return ctx.showToast('Enter Entry Door width & height (required for sofa orders)','bad');
-    // Modular wardrobe (Kalista / Kreation X2 / X3): wardrobe dims + site (staircase) measurement are mandatory
-    if(hasWardrobe && (!o.wardrobeLength||!o.wardrobeWidth||!o.wardrobeHeight)) return ctx.showToast('Enter Wardrobe length, width & height (mandatory for modular wardrobes)','bad');
-    if(hasWardrobe && (!o.staircaseWidth||!o.staircaseLandingHeight)) return ctx.showToast('Enter Staircase width & landing height (site measurement required for modular wardrobes)','bad');
+    // Modular wardrobe (Kalista / Kreation X2 / X3): every furniture block needs
+    // its wardrobe dims + its site (staircase) access measurement.
+    if(hasWardrobe){
+      if(!wardrobes.length) return ctx.showToast('Add at least one modular furniture measurement','bad');
+      for(let i=0;i<wardrobes.length;i++){ const w=wardrobes[i];
+        if(!w.length||!w.width||!w.height) return ctx.showToast(`Enter length, width & height for Modular Furniture ${i+1}`,'bad');
+        if(!w.staircaseWidth||!w.staircaseLandingHeight) return ctx.showToast(`Enter Staircase width & landing height for Modular Furniture ${i+1}`,'bad');
+      }
+    }
     // Lead Source is now the awareness dropdown — keep the OPS "Source" column in sync
-    const saved = await doSaveOrder({...o,salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)});
+    const saved = await doSaveOrder(withMeasurements({...o,salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)}));
     if(saved) { setOrder(saved); nav('pdf'); }
+  }
+
+  // Mirror the first modular-furniture block back onto the legacy scalar fields so
+  // the existing WARDROBE / STAIRCASE sheet columns and any old readers stay populated.
+  function withMeasurements(ord){
+    const ws = Array.isArray(ord.wardrobes)?ord.wardrobes:[];
+    const w0 = ws[0]||{};
+    return {...ord,
+      wardrobeLength:w0.length||'', wardrobeWidth:w0.width||'', wardrobeHeight:w0.height||'',
+      staircaseWidth:w0.staircaseWidth||'', staircaseLandingHeight:w0.staircaseLandingHeight||'',
+    };
   }
 
   // Save whatever has been filled so far (no strict validation) so the order
@@ -2036,7 +2118,7 @@ function OrderFormScreen({ctx}) {
   async function handleSaveDraft() {
     if(!o.customer) return ctx.showToast('Enter at least the customer name to save a draft','bad');
     if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item to save a draft','bad');
-    const saved = await doSaveOrder({...o,salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)});
+    const saved = await doSaveOrder(withMeasurements({...o,salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)}));
     if(saved) { setOrder(saved); ctx.showToast('Draft saved — you can reopen it from Orders','ok'); }
   }
 
@@ -2099,11 +2181,24 @@ function OrderFormScreen({ctx}) {
         <Field label="Landmark" value={o.landmark} onChange={v=>setF('landmark',v)} required hint="Mandatory"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Lift available? <span style={{color:T.bad,marginLeft:3}}>*</span></div>
-          <select value={o.liftAvailable} onChange={e=>setF('liftAvailable',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.liftAvailable?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+          <select value={o.liftAvailable} onChange={e=>{const v=e.target.value; setOrder(prev=>({...prev,liftAvailable:v,liftTypes: v==='Yes'?(Array.isArray(prev.liftTypes)?prev.liftTypes:[]):[]}));}} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.liftAvailable?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
             <option value="">Select an option…</option>
             <option>Yes</option>
             <option>No</option>
           </select>
+          {o.liftAvailable==='Yes' && (
+            <div style={{marginTop:10}}>
+              <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Lift type</div>
+              <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                {LIFT_TYPES.map(t=>{ const on=liftTypes.includes(t); return (
+                  <label key={t} style={{display:'inline-flex',alignItems:'center',gap:5,padding:'5px 11px',borderRadius:99,cursor:'pointer',border:`1px solid ${on?T.green:T.line}`,background:on?T.greenSoft:'#fff'}}>
+                    <input type="checkbox" checked={on} onChange={()=>toggleLiftType(t)} style={{width:14,height:14,accentColor:T.green,cursor:'pointer'}}/>
+                    <span style={{fontSize:12,fontWeight:600,color:on?T.green:T.ink3}}>{t}</span>
+                  </label>
+                );})}
+              </div>
+            </div>
+          )}
         </div>
         {/* Contact details — for orders bought on behalf of someone else.
             Mandatory when the billing address differs from the delivery address. */}
@@ -2128,17 +2223,53 @@ function OrderFormScreen({ctx}) {
             <Field label="Sofa Depth" value={o.sofaDepth} onChange={v=>setF('sofaDepth',v)} mono required/>
           </>
         )}
+        {/* Modular furniture — one measurement block per modular wardrobe
+            (Kalista / Kreation X2 / X3). Sales picks how many; each block has the
+            wardrobe dims + its own site (staircase) access measurement. */}
         {hasWardrobe && (
           <>
-            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Modular wardrobe in order — wardrobe length/width/height & the site (staircase) measurement are mandatory (printed on the PDF)</div>
-            <Field label="Wardrobe Length" value={o.wardrobeLength} onChange={v=>setF('wardrobeLength',v)} mono required hint="e.g. 72 in / 183 cm"/>
-            <Field label="Wardrobe Width" value={o.wardrobeWidth} onChange={v=>setF('wardrobeWidth',v)} mono required/>
-            <Field label="Wardrobe Height" value={o.wardrobeHeight} onChange={v=>setF('wardrobeHeight',v)} mono required/>
+            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Modular wardrobe in order — each furniture's length/width/height & its site (staircase) measurement are mandatory (printed on the PDF)</div>
+            <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+              <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>How many modular furnitures? <span style={{color:T.bad,marginLeft:3}}>*</span></div>
+              <select value={wardrobes.length||1} onChange={e=>setWardrobeCount(Number(e.target.value))} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+                {[1,2,3,4,5,6,7,8].map(n=><option key={n} value={n}>{n}</option>)}
+              </select>
+              <div style={{fontSize:11,color:T.ink4,marginTop:3}}>e.g. Kreation X3 + Kalista → 2 furnitures</div>
+            </div>
+            {wardrobes.map((w,wi)=>(
+              <div key={wi} style={{borderBottom:`1px solid ${T.line}`,background:T.paper2||'#fafafa'}}>
+                <div style={{padding:'8px 14px',fontSize:11,fontWeight:700,color:T.ink2,letterSpacing:0.5,textTransform:'uppercase'}}>Modular Furniture {wi+1}</div>
+                <div style={{background:'#fff'}}>
+                  <Field label="Furniture Name" value={w.name} onChange={v=>setWardrobeField(wi,'name',v)} hint="e.g. Kreation X3, Kalista"/>
+                  <Field label="Wardrobe Length" value={w.length} onChange={v=>setWardrobeField(wi,'length',v)} mono required hint="e.g. 72 in / 183 cm"/>
+                  <Field label="Wardrobe Width" value={w.width} onChange={v=>setWardrobeField(wi,'width',v)} mono required/>
+                  <Field label="Wardrobe Height" value={w.height} onChange={v=>setWardrobeField(wi,'height',v)} mono required/>
+                  <Field label="Staircase Width" value={w.staircaseWidth} onChange={v=>setWardrobeField(wi,'staircaseWidth',v)} mono required hint="Site measurement for this furniture"/>
+                  <Field label="Staircase Landing Height" value={w.staircaseLandingHeight} onChange={v=>setWardrobeField(wi,'staircaseLandingHeight',v)} mono required/>
+                </div>
+              </div>
+            ))}
           </>
         )}
-        {/* Site (staircase) measurement — mandatory for modular wardrobes */}
-        <Field label="Staircase Width" value={o.staircaseWidth} onChange={v=>setF('staircaseWidth',v)} mono required={hasWardrobe} hint={hasWardrobe?'Site measurement — mandatory for modular wardrobes':undefined}/>
-        <Field label="Staircase Landing Height" value={o.staircaseLandingHeight} onChange={v=>setF('staircaseLandingHeight',v)} mono required={hasWardrobe}/>
+        {/* Rooms — add a measurement block per room, as many as needed. */}
+        <SectionHead n="03b" label={`Rooms · ${rooms.length}`} action="+ ADD ROOM" onAction={addRoom}/>
+        {rooms.length===0 && (
+          <div style={{padding:'10px 14px',background:T.paper2||'#fafafa',borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.ink4}}>No rooms added. Tap “+ ADD ROOM” to note a room's measurements — add as many rooms as you need.</div>
+        )}
+        {rooms.map((r,ri)=>(
+          <div key={ri} style={{borderBottom:`1px solid ${T.line}`,background:T.paper2||'#fafafa'}}>
+            <div style={{padding:'8px 14px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <span style={{fontSize:11,fontWeight:700,color:T.ink2,letterSpacing:0.5,textTransform:'uppercase'}}>Room {ri+1}</span>
+              <button onClick={()=>removeRoom(ri)} style={{fontSize:11,color:T.bad,background:'none',border:'none',cursor:'pointer',fontWeight:700}}>REMOVE</button>
+            </div>
+            <div style={{background:'#fff'}}>
+              <Field label="Room Name" value={r.name} onChange={v=>setRoomField(ri,'name',v)} placeholder={`Room ${ri+1}`} hint="e.g. Master Bedroom, Kids Room"/>
+              <Field label="Room Width" value={r.width} onChange={v=>setRoomField(ri,'width',v)} mono/>
+              <Field label="Room Height" value={r.height} onChange={v=>setRoomField(ri,'height',v)} mono/>
+              <Field label="Room Depth" value={r.depth} onChange={v=>setRoomField(ri,'depth',v)} mono/>
+            </div>
+          </div>
+        ))}
         {/* Entry-door measurement — mandatory only for sofa orders */}
         <Field label="Entry Door Width" value={o.entryDoorWidth} onChange={v=>setF('entryDoorWidth',v)} mono required={hasSofa} hint={hasSofa?'Mandatory for sofa orders':undefined}/>
         <Field label="Entry Door Height" value={o.entryDoorHeight} onChange={v=>setF('entryDoorHeight',v)} mono required={hasSofa}/>

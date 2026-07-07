@@ -829,6 +829,7 @@ function handleOrders(p) {
   var cFloor   = colOf(['FLOOR']);
   var cLandmk  = colOf(['LANDMARK']);
   var cLiftAv  = colOf(['LIFT AVAILABLE','LIFT AVAILABLE?']);
+  var cLiftTy  = colOf(['LIFT TYPE','LIFT TYPES']);
   var cCPName  = colOf(['CONTACT PERSON NAME','CONTACT PERSON']);
   var cCPNum   = colOf(['CONTACT PERSON NUMBER','CONTACT PERSON CONTACT NUMBER']);
   var cCPRem   = colOf(['CONTACT REMARK','CONTACT REMARKS']);
@@ -843,6 +844,9 @@ function handleOrders(p) {
   var cStairL  = colOf(['STAIRCASE LANDING HEIGHT','STAIR CASE LANDING HEIGHT']);
   var cDoorW   = colOf(['CUSTOMER HOUSE ENTRY DOOR WIDTH','ENTRY DOOR WIDTH']);
   var cDoorH   = colOf(['CUSTOMER HOUSE ENTRY DOOR HEIGHT','ENTRY DOOR HEIGHT']);
+  // Multi-block measurements — round-tripped as a JSON blob (kept alongside the
+  // legacy single-block WARDROBE / STAIRCASE columns above).
+  var cMeasJson = colOf(['SITE MEASUREMENTS DATA','MEASUREMENTS DATA','MEASUREMENTS JSON']);
   var cPlanned = colOf(['CUSTOMER DELIVERY DATE (TO BE)']);
   var cInstr   = colOf(['SPECIFIC INSTRUCTION','INSTALLATION NOTE','INSTALL NOTE']);
   var cOFRcpt  = colOf(['ORDER FORM RECEIPT NO','ORDER FORM RECEIPT NO.','ORDER FORM RECEIPT']);
@@ -906,6 +910,7 @@ function handleOrders(p) {
         landmark: sval(r, cLandmk),
         liftAvailable: sval(r, cLiftAv),
         contactPersonName: sval(r, cCPName),
+        // liftTypes / wardrobes / rooms are attached after this literal (below).
         contactNumber: sval(r, cCPNum),
         contactRemark: sval(r, cCPRem),
         dob: sval(r, cDob),
@@ -939,6 +944,19 @@ function handleOrders(p) {
         _row: i,
       };
       map[key].receiptNo = map[key].moneyReceipts[0].no;
+      // Multi-block measurements + lift types. Prefer the JSON blob (exact
+      // round-trip); otherwise migrate the legacy single-block scalar columns.
+      var meas = {};
+      if (cMeasJson >= 0) { try { var rawM = sval(r, cMeasJson); if (rawM) meas = JSON.parse(rawM); } catch (e) { meas = {}; } }
+      map[key].liftTypes = Array.isArray(meas.liftTypes) ? meas.liftTypes
+        : (sval(r, cLiftTy) ? sval(r, cLiftTy).split(/\s*,\s*/).filter(String) : []);
+      map[key].rooms = Array.isArray(meas.rooms) ? meas.rooms : [];
+      if (Array.isArray(meas.wardrobes) && meas.wardrobes.length) {
+        map[key].wardrobes = meas.wardrobes;
+      } else {
+        var mw = { name:'', length: sval(r, cWardL), width: sval(r, cWardW), height: sval(r, cWardH), staircaseWidth: sval(r, cStairW), staircaseLandingHeight: sval(r, cStairL) };
+        map[key].wardrobes = (mw.length || mw.width || mw.height || mw.staircaseWidth || mw.staircaseLandingHeight) ? [mw] : [];
+      }
       keys.push(key);
     }
     var m = map[key];
@@ -1329,6 +1347,26 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['STAIRCASE LANDING HEIGHT', 'STAIR CASE LANDING HEIGHT'], o.staircaseLandingHeight || '');
     put(['CUSTOMER HOUSE ENTRY DOOR WIDTH', 'ENTRY DOOR WIDTH'], o.entryDoorWidth || '');
     put(['CUSTOMER HOUSE ENTRY DOOR HEIGHT', 'ENTRY DOOR HEIGHT'], o.entryDoorHeight || '');
+    // ── Multi-block measurements: lift type(s), one measurement block per
+    //    modular furniture, and any number of rooms. Written as a human-readable
+    //    summary + a JSON blob (for exact round-trip on reopen). Add these columns
+    //    to the CRM sheet to capture them; missing columns are skipped.
+    var wbs = Array.isArray(o.wardrobes) ? o.wardrobes : [];
+    var rms = Array.isArray(o.rooms) ? o.rooms : [];
+    var lts = Array.isArray(o.liftTypes) ? o.liftTypes : [];
+    put(['LIFT TYPE', 'LIFT TYPES'], lts.join(', '));
+    var wbSummary = wbs.map(function (w, wi) {
+      var nm = w.name ? (' ' + w.name) : '';
+      return 'Furniture ' + (wi + 1) + nm + ' (LxWxH): ' + [w.length, w.width, w.height].map(function (v) { return v || '-'; }).join(' x ')
+        + '; Staircase (W/Landing H): ' + [w.staircaseWidth, w.staircaseLandingHeight].map(function (v) { return v || '-'; }).join(' / ');
+    }).join('  |  ');
+    put(['MODULAR FURNITURE MEASUREMENTS', 'MODULAR MEASUREMENTS'], wbSummary);
+    var rmSummary = rms.map(function (r2, ri) {
+      return (r2.name || ('Room ' + (ri + 1))) + ' (WxHxD): ' + [r2.width, r2.height, r2.depth].map(function (v) { return v || '-'; }).join(' x ');
+    }).join('  |  ');
+    put(['ROOM MEASUREMENTS', 'ROOMS MEASUREMENTS'], rmSummary);
+    if (wbs.length || rms.length || lts.length)
+      put(['SITE MEASUREMENTS DATA', 'MEASUREMENTS DATA', 'MEASUREMENTS JSON'], JSON.stringify({ wardrobes: wbs, rooms: rms, liftTypes: lts }));
 
     // ── Extra fields captured by the app (write only if the column exists).
     //    Add these headers to the CRM sheet to capture them.
