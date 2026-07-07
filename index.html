@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '30';
+  var V = '31';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -770,24 +770,25 @@ function generatePDF(order, copyType) {
     const measParts = [];
     if (order.sofaWidth||order.sofaHeight||order.sofaDepth)
       measParts.push('Sofa (W x H x D): ' + [order.sofaWidth,order.sofaHeight,order.sofaDepth].map(v=>v||'-').join(' x '));
-    // Modular-furniture blocks (one per modular wardrobe): dims + its staircase measurement.
+    // Modular-furniture blocks (one per modular wardrobe): wardrobe dims.
     const pdfWardrobes = (Array.isArray(order.wardrobes) && order.wardrobes.length)
       ? order.wardrobes
-      : ((order.wardrobeLength||order.wardrobeWidth||order.wardrobeHeight||order.staircaseWidth||order.staircaseLandingHeight)
-          ? [{name:'',length:order.wardrobeLength,width:order.wardrobeWidth,height:order.wardrobeHeight,staircaseWidth:order.staircaseWidth,staircaseLandingHeight:order.staircaseLandingHeight}]
+      : ((order.wardrobeLength||order.wardrobeWidth||order.wardrobeHeight)
+          ? [{name:'',length:order.wardrobeLength,width:order.wardrobeWidth,height:order.wardrobeHeight}]
           : []);
     pdfWardrobes.forEach((w,wi)=>{
       const nm = w.name ? ' ' + w.name : '';
       if (w.length||w.width||w.height)
         measParts.push('Furniture ' + (wi+1) + nm + ' (L x W x H): ' + [w.length,w.width,w.height].map(v=>v||'-').join(' x '));
-      if (w.staircaseWidth||w.staircaseLandingHeight)
-        measParts.push('Furniture ' + (wi+1) + nm + ' Staircase (W / Landing H): ' + [w.staircaseWidth,w.staircaseLandingHeight].map(v=>v||'-').join(' / '));
     });
-    // Room blocks (add-as-many-as-needed).
+    // Room blocks (one per room).
     (Array.isArray(order.rooms)?order.rooms:[]).forEach((r,ri)=>{
       if (r.width||r.height||r.depth||r.name)
         measParts.push((r.name||('Room ' + (ri+1))) + ' (W x H x D): ' + [r.width,r.height,r.depth].map(v=>v||'-').join(' x '));
     });
+    // Staircase — sofa-only, no-lift site measurement.
+    if (order.staircaseLength||order.staircaseWidth||order.staircaseLandingHeight)
+      measParts.push('Staircase (L / W / Landing H): ' + [order.staircaseLength,order.staircaseWidth,order.staircaseLandingHeight].map(v=>v||'-').join(' / '));
     if (order.entryDoorWidth||order.entryDoorHeight)
       measParts.push('Entry Door (W x H): ' + [order.entryDoorWidth,order.entryDoorHeight].map(v=>v||'-').join(' x '));
     if (measParts.length) {
@@ -1091,16 +1092,17 @@ const BLANK_ORDER = () => ({
   // item is ordered + printed on both PDF copies)
   sofaWidth:'', sofaHeight:'', sofaDepth:'',
   // Modular-furniture measurements — one block per modular wardrobe in the order
-  // (Kalista / Kreation X2 / X3). Each block carries the wardrobe dims AND its own
-  // site (staircase) access measurement. The sales person picks how many blocks.
-  // { name, length, width, height, staircaseWidth, staircaseLandingHeight }
+  // (Kalista / Kreation X2 / X3). Each block carries the wardrobe dims. The sales
+  // person picks how many blocks. { name, length, width, height }
   wardrobes:[],
-  // Room measurements — an add-as-many-as-you-need list. { name, width, height, depth }
+  // Room measurements — the sales person picks how many rooms. { name, width, height, depth }
   rooms:[],
-  // Legacy single-block fields (kept so orders saved before the multi-block
-  // upgrade still round-trip; mirrored from wardrobes[0] on save).
+  // Staircase (site-access) measurement — order-level, needed only for a SOFA
+  // when there is NO lift. Length / Width / Landing height.
+  staircaseLength:'', staircaseWidth:'', staircaseLandingHeight:'',
+  // Legacy single-block wardrobe fields (kept so orders saved before the
+  // multi-block upgrade still round-trip; mirrored from wardrobes[0] on save).
   wardrobeLength:'', wardrobeWidth:'', wardrobeHeight:'',
-  staircaseWidth:'', staircaseLandingHeight:'',
   entryDoorWidth:'', entryDoorHeight:'',
 });
 
@@ -2022,17 +2024,21 @@ function OrderFormScreen({ctx}) {
   const PURCHASING = ['New Home','Renovation','Rented Home','Other'];
   const LIFT_TYPES = ['Standard Lift','Goods Lift','Service Lift'];
 
+  // Staircase measurements are only needed for a SOFA when there is NO lift.
+  const needStaircase = hasSofa && o.liftAvailable==='No';
+
   // ── Multi-block measurement state ──────────────────────────────────────
-  // Normalise older orders (single wardrobe/staircase scalars) into the
-  // wardrobes[] / rooms[] / liftTypes[] arrays the UI now works with.
+  // Normalise older orders (single wardrobe scalars) into the wardrobes[] /
+  // rooms[] / liftTypes[] arrays the UI now works with. Staircase stays a set of
+  // order-level scalars (sofa-only, no-lift) — it is no longer per-furniture.
   React.useEffect(()=>{
     setOrder(prev=>{
       const patch={};
       if(!Array.isArray(prev.liftTypes)) patch.liftTypes = [];
       if(!Array.isArray(prev.rooms))     patch.rooms = [];
       if(!Array.isArray(prev.wardrobes)) {
-        patch.wardrobes = (prev.wardrobeLength||prev.wardrobeWidth||prev.wardrobeHeight||prev.staircaseWidth||prev.staircaseLandingHeight)
-          ? [{name:'',length:prev.wardrobeLength||'',width:prev.wardrobeWidth||'',height:prev.wardrobeHeight||'',staircaseWidth:prev.staircaseWidth||'',staircaseLandingHeight:prev.staircaseLandingHeight||''}]
+        patch.wardrobes = (prev.wardrobeLength||prev.wardrobeWidth||prev.wardrobeHeight)
+          ? [{name:'',length:prev.wardrobeLength||'',width:prev.wardrobeWidth||'',height:prev.wardrobeHeight||''}]
           : [];
       }
       return Object.keys(patch).length ? {...prev,...patch} : prev;
@@ -2044,17 +2050,17 @@ function OrderFormScreen({ctx}) {
   const rooms     = Array.isArray(o.rooms)     ? o.rooms     : [];
 
   function toggleLiftType(t){ setOrder(prev=>{ const cur=Array.isArray(prev.liftTypes)?prev.liftTypes:[]; return {...prev,liftTypes: cur.includes(t)?cur.filter(x=>x!==t):[...cur,t]}; }); }
-  const BLANK_WARDROBE = ()=>({name:'',length:'',width:'',height:'',staircaseWidth:'',staircaseLandingHeight:''});
+  const BLANK_WARDROBE = ()=>({name:'',length:'',width:'',height:''});
   const BLANK_ROOM     = ()=>({name:'',width:'',height:'',depth:''});
   function setWardrobeCount(n){ setOrder(prev=>{ const cur=Array.isArray(prev.wardrobes)?prev.wardrobes.map(w=>({...w})):[]; const next=[]; for(let i=0;i<n;i++) next.push(cur[i]||BLANK_WARDROBE()); return {...prev,wardrobes:next}; }); }
   function setWardrobeField(idx,field,val){ setOrder(prev=>{ const arr=(Array.isArray(prev.wardrobes)?prev.wardrobes:[]).map(w=>({...w})); if(arr[idx]) arr[idx][field]=val; return {...prev,wardrobes:arr}; }); }
-  function addRoom(){ setOrder(prev=>({...prev,rooms:[...(Array.isArray(prev.rooms)?prev.rooms:[]),BLANK_ROOM()]})); }
-  function removeRoom(idx){ setOrder(prev=>({...prev,rooms:(Array.isArray(prev.rooms)?prev.rooms:[]).filter((_,i)=>i!==idx)})); }
+  function setRoomCount(n){ setOrder(prev=>{ const cur=Array.isArray(prev.rooms)?prev.rooms.map(r=>({...r})):[]; const next=[]; for(let i=0;i<n;i++) next.push(cur[i]||BLANK_ROOM()); return {...prev,rooms:next}; }); }
   function setRoomField(idx,field,val){ setOrder(prev=>{ const arr=(Array.isArray(prev.rooms)?prev.rooms:[]).map(r=>({...r})); if(arr[idx]) arr[idx][field]=val; return {...prev,rooms:arr}; }); }
-  // Seed the modular-furniture block from the number of wardrobe items in the
-  // cart the first time it's shown (sales can still change the count).
+  // Seed the modular-furniture and room blocks the first time they're shown when
+  // a modular wardrobe is in the cart (sales can still change either count).
   React.useEffect(()=>{
     if(hasWardrobe && Array.isArray(o.wardrobes) && o.wardrobes.length===0) setWardrobeCount(Math.max(1,wardrobeItemCount));
+    if(hasWardrobe && Array.isArray(o.rooms) && o.rooms.length===0) setRoomCount(1);
   },[hasWardrobe,wardrobeItemCount]);
 
   function removeItem(idx) { setOrder(prev=>({...prev,items:prev.items.filter((_,i)=>i!==idx)})); }
@@ -2077,6 +2083,8 @@ function OrderFormScreen({ctx}) {
     if(!o.floor)    return ctx.showToast('Floor is required','bad');
     if(!o.landmark) return ctx.showToast('Landmark is required','bad');
     if(!o.liftAvailable) return ctx.showToast('Select whether a lift is available','bad');
+    // Lift type is mandatory when a lift is available — at least one must be picked.
+    if(o.liftAvailable==='Yes' && (!Array.isArray(o.liftTypes)||o.liftTypes.length===0)) return ctx.showToast('Select the lift type (Standard / Goods / Service)','bad');
     // Contact details required when the billing & delivery addresses differ
     const addrDiffer = (o.billing||'').trim() && (o.delivery||'').trim() && (o.billing||'').trim()!==(o.delivery||'').trim();
     if(addrDiffer && (!o.contactPersonName||!o.contactNumber)) return ctx.showToast('Contact Person Name & Number are required (billing & delivery addresses differ)','bad');
@@ -2088,13 +2096,18 @@ function OrderFormScreen({ctx}) {
     // Sofa: sofa dims + entry-door site measurement are mandatory
     if(hasSofa && (!o.sofaWidth||!o.sofaHeight||!o.sofaDepth)) return ctx.showToast('Enter Sofa width, height & depth (mandatory for sofas)','bad');
     if(hasSofa && (!o.entryDoorWidth||!o.entryDoorHeight)) return ctx.showToast('Enter Entry Door width & height (required for sofa orders)','bad');
-    // Modular wardrobe (Kalista / Kreation X2 / X3): every furniture block needs
-    // its wardrobe dims + its site (staircase) access measurement.
+    // Staircase measurement — required only for a SOFA with NO lift.
+    if(needStaircase && (!o.staircaseLength||!o.staircaseWidth||!o.staircaseLandingHeight)) return ctx.showToast('Enter Staircase length, width & landing height (required for a sofa with no lift)','bad');
+    // Modular wardrobe (Kalista / Kreation X2 / X3): every furniture block needs its
+    // wardrobe dims, and every room block needs its dims — both are mandatory.
     if(hasWardrobe){
       if(!wardrobes.length) return ctx.showToast('Add at least one modular furniture measurement','bad');
       for(let i=0;i<wardrobes.length;i++){ const w=wardrobes[i];
         if(!w.length||!w.width||!w.height) return ctx.showToast(`Enter length, width & height for Modular Furniture ${i+1}`,'bad');
-        if(!w.staircaseWidth||!w.staircaseLandingHeight) return ctx.showToast(`Enter Staircase width & landing height for Modular Furniture ${i+1}`,'bad');
+      }
+      if(!rooms.length) return ctx.showToast('Add at least one room measurement (mandatory for modular furniture)','bad');
+      for(let i=0;i<rooms.length;i++){ const r=rooms[i];
+        if(!r.width||!r.height||!r.depth) return ctx.showToast(`Enter width, height & depth for Room ${i+1}`,'bad');
       }
     }
     // Lead Source is now the awareness dropdown — keep the OPS "Source" column in sync
@@ -2102,14 +2115,14 @@ function OrderFormScreen({ctx}) {
     if(saved) { setOrder(saved); nav('pdf'); }
   }
 
-  // Mirror the first modular-furniture block back onto the legacy scalar fields so
-  // the existing WARDROBE / STAIRCASE sheet columns and any old readers stay populated.
+  // Mirror the first modular-furniture block onto the legacy scalar wardrobe
+  // fields so the existing WARDROBE sheet columns and any old readers stay
+  // populated. Staircase is already order-level, so it needs no mirroring.
   function withMeasurements(ord){
     const ws = Array.isArray(ord.wardrobes)?ord.wardrobes:[];
     const w0 = ws[0]||{};
     return {...ord,
       wardrobeLength:w0.length||'', wardrobeWidth:w0.width||'', wardrobeHeight:w0.height||'',
-      staircaseWidth:w0.staircaseWidth||'', staircaseLandingHeight:w0.staircaseLandingHeight||'',
     };
   }
 
@@ -2188,7 +2201,7 @@ function OrderFormScreen({ctx}) {
           </select>
           {o.liftAvailable==='Yes' && (
             <div style={{marginTop:10}}>
-              <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Lift type</div>
+              <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Lift type <span style={{color:T.bad,marginLeft:3}}>*</span></div>
               <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
                 {LIFT_TYPES.map(t=>{ const on=liftTypes.includes(t); return (
                   <label key={t} style={{display:'inline-flex',alignItems:'center',gap:5,padding:'5px 11px',borderRadius:99,cursor:'pointer',border:`1px solid ${on?T.green:T.line}`,background:on?T.greenSoft:'#fff'}}>
@@ -2224,11 +2237,11 @@ function OrderFormScreen({ctx}) {
           </>
         )}
         {/* Modular furniture — one measurement block per modular wardrobe
-            (Kalista / Kreation X2 / X3). Sales picks how many; each block has the
-            wardrobe dims + its own site (staircase) access measurement. */}
+            (Kalista / Kreation X2 / X3). Sales picks how many; each block carries
+            the wardrobe dims. */}
         {hasWardrobe && (
           <>
-            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Modular wardrobe in order — each furniture's length/width/height & its site (staircase) measurement are mandatory (printed on the PDF)</div>
+            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Modular wardrobe in order — each furniture's length/width/height is mandatory (printed on the PDF)</div>
             <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
               <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>How many modular furnitures? <span style={{color:T.bad,marginLeft:3}}>*</span></div>
               <select value={wardrobes.length||1} onChange={e=>setWardrobeCount(Number(e.target.value))} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
@@ -2244,32 +2257,44 @@ function OrderFormScreen({ctx}) {
                   <Field label="Wardrobe Length" value={w.length} onChange={v=>setWardrobeField(wi,'length',v)} mono required hint="e.g. 72 in / 183 cm"/>
                   <Field label="Wardrobe Width" value={w.width} onChange={v=>setWardrobeField(wi,'width',v)} mono required/>
                   <Field label="Wardrobe Height" value={w.height} onChange={v=>setWardrobeField(wi,'height',v)} mono required/>
-                  <Field label="Staircase Width" value={w.staircaseWidth} onChange={v=>setWardrobeField(wi,'staircaseWidth',v)} mono required hint="Site measurement for this furniture"/>
-                  <Field label="Staircase Landing Height" value={w.staircaseLandingHeight} onChange={v=>setWardrobeField(wi,'staircaseLandingHeight',v)} mono required/>
                 </div>
               </div>
             ))}
           </>
         )}
-        {/* Rooms — add a measurement block per room, as many as needed. */}
-        <SectionHead n="03b" label={`Rooms · ${rooms.length}`} action="+ ADD ROOM" onAction={addRoom}/>
-        {rooms.length===0 && (
-          <div style={{padding:'10px 14px',background:T.paper2||'#fafafa',borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.ink4}}>No rooms added. Tap “+ ADD ROOM” to note a room's measurements — add as many rooms as you need.</div>
+        {/* Rooms — sales picks how many rooms, then notes each room's dims.
+            Mandatory when a modular wardrobe is in the order. */}
+        <SectionHead n="03b" label="Rooms"/>
+        {hasWardrobe && (
+          <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Modular wardrobe in order — room measurements are mandatory (printed on the PDF)</div>
         )}
+        <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>How many rooms?{hasWardrobe&&<span style={{color:T.bad,marginLeft:3}}>*</span>}</div>
+          <select value={rooms.length||(hasWardrobe?1:0)} onChange={e=>setRoomCount(Number(e.target.value))} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+            {(hasWardrobe?[1,2,3,4,5,6,7,8]:[0,1,2,3,4,5,6,7,8]).map(n=><option key={n} value={n}>{n}</option>)}
+          </select>
+          <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Add a measurement block per room.</div>
+        </div>
         {rooms.map((r,ri)=>(
           <div key={ri} style={{borderBottom:`1px solid ${T.line}`,background:T.paper2||'#fafafa'}}>
-            <div style={{padding:'8px 14px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-              <span style={{fontSize:11,fontWeight:700,color:T.ink2,letterSpacing:0.5,textTransform:'uppercase'}}>Room {ri+1}</span>
-              <button onClick={()=>removeRoom(ri)} style={{fontSize:11,color:T.bad,background:'none',border:'none',cursor:'pointer',fontWeight:700}}>REMOVE</button>
-            </div>
+            <div style={{padding:'8px 14px',fontSize:11,fontWeight:700,color:T.ink2,letterSpacing:0.5,textTransform:'uppercase'}}>Room {ri+1}</div>
             <div style={{background:'#fff'}}>
               <Field label="Room Name" value={r.name} onChange={v=>setRoomField(ri,'name',v)} placeholder={`Room ${ri+1}`} hint="e.g. Master Bedroom, Kids Room"/>
-              <Field label="Room Width" value={r.width} onChange={v=>setRoomField(ri,'width',v)} mono/>
-              <Field label="Room Height" value={r.height} onChange={v=>setRoomField(ri,'height',v)} mono/>
-              <Field label="Room Depth" value={r.depth} onChange={v=>setRoomField(ri,'depth',v)} mono/>
+              <Field label="Room Width" value={r.width} onChange={v=>setRoomField(ri,'width',v)} mono required={hasWardrobe}/>
+              <Field label="Room Height" value={r.height} onChange={v=>setRoomField(ri,'height',v)} mono required={hasWardrobe}/>
+              <Field label="Room Depth" value={r.depth} onChange={v=>setRoomField(ri,'depth',v)} mono required={hasWardrobe}/>
             </div>
           </div>
         ))}
+        {/* Staircase — only for a SOFA with NO lift (skip if there's a lift or no sofa). */}
+        {needStaircase && (
+          <>
+            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Sofa with no lift — staircase length, width & landing height are mandatory (printed on the PDF)</div>
+            <Field label="Staircase Length" value={o.staircaseLength} onChange={v=>setF('staircaseLength',v)} mono required/>
+            <Field label="Staircase Width" value={o.staircaseWidth} onChange={v=>setF('staircaseWidth',v)} mono required/>
+            <Field label="Staircase Landing Height" value={o.staircaseLandingHeight} onChange={v=>setF('staircaseLandingHeight',v)} mono required/>
+          </>
+        )}
         {/* Entry-door measurement — mandatory only for sofa orders */}
         <Field label="Entry Door Width" value={o.entryDoorWidth} onChange={v=>setF('entryDoorWidth',v)} mono required={hasSofa} hint={hasSofa?'Mandatory for sofa orders':undefined}/>
         <Field label="Entry Door Height" value={o.entryDoorHeight} onChange={v=>setF('entryDoorHeight',v)} mono required={hasSofa}/>
@@ -2885,9 +2910,9 @@ function SettingsScreen({ctx}) {
                         ⚠ The deployed Apps Script did not report a version. Copy the latest Code.gs → save in Apps Script → Deploy → Manage deployments → Edit → New version.
                       </div>
                     )}
-                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v25' && (
+                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v26' && (
                       <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>
-                        Latest available is v25 — a redeploy is optional but recommended for the newest fixes.
+                        Latest available is v26 — a redeploy is optional but recommended for the newest fixes.
                       </div>
                     )}
                     {debugResult.discontinued && (
