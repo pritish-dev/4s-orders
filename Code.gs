@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v26';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v27';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -840,9 +840,11 @@ function handleOrders(p) {
   var cPurpose = colOf(['PURCHASING FOR','PURCHASING FOR:']);
   var cSofaW   = colOf(['SOFA WIDTH']), cSofaH = colOf(['SOFA HEIGHT']), cSofaD = colOf(['SOFA DEPTH']);
   var cWardL   = colOf(['WARDROBE LENGTH']), cWardW = colOf(['WARDROBE WIDTH']), cWardH = colOf(['WARDROBE HEIGHT']);
-  var cStairLen= colOf(['STAIRCASE LENGTH','STAIR CASE LENGTH']);
   var cStairW  = colOf(['STAIRCASE WIDTH','STAIR CASE WIDTH']);
-  var cStairL  = colOf(['STAIRCASE LANDING HEIGHT','STAIR CASE LANDING HEIGHT']);
+  // Landing area (sofa, no-lift): length / width / depth.
+  var cLandL   = colOf(['LANDING AREA LENGTH','LANDING LENGTH']);
+  var cLandW   = colOf(['LANDING AREA WIDTH','LANDING WIDTH']);
+  var cLandD   = colOf(['LANDING AREA DEPTH','LANDING DEPTH']);
   var cDoorW   = colOf(['CUSTOMER HOUSE ENTRY DOOR WIDTH','ENTRY DOOR WIDTH']);
   var cDoorH   = colOf(['CUSTOMER HOUSE ENTRY DOOR HEIGHT','ENTRY DOOR HEIGHT']);
   // Multi-block measurements — round-tripped as a JSON blob (kept alongside the
@@ -936,7 +938,7 @@ function handleOrders(p) {
         purchasingFor: sval(r, cPurpose),
         sofaWidth: sval(r, cSofaW), sofaHeight: sval(r, cSofaH), sofaDepth: sval(r, cSofaD),
         wardrobeLength: sval(r, cWardL), wardrobeWidth: sval(r, cWardW), wardrobeHeight: sval(r, cWardH),
-        staircaseLength: sval(r, cStairLen), staircaseWidth: sval(r, cStairW), staircaseLandingHeight: sval(r, cStairL),
+        staircaseWidth: sval(r, cStairW), landingLength: sval(r, cLandL), landingWidth: sval(r, cLandW), landingDepth: sval(r, cLandD),
         entryDoorWidth: sval(r, cDoorW), entryDoorHeight: sval(r, cDoorH),
         plannedDly: dstr(r, cPlanned),
         installNote: sval(r, cInstr),
@@ -973,11 +975,13 @@ function handleOrders(p) {
         var mw = { name:'', length: sval(r, cWardL), width: sval(r, cWardW), height: sval(r, cWardH) };
         map[key].wardrobes = (mw.length || mw.width || mw.height) ? [mw] : [];
       }
-      // Staircase is order-level (sofa-only, no-lift). Prefer the JSON blob.
+      // Staircase is order-level (sofa-only, no-lift): staircase width + landing
+      // area L/W/D. Prefer the JSON blob.
       if (meas.staircase && typeof meas.staircase === 'object') {
-        map[key].staircaseLength = meas.staircase.length || map[key].staircaseLength || '';
         map[key].staircaseWidth = meas.staircase.width || map[key].staircaseWidth || '';
-        map[key].staircaseLandingHeight = meas.staircase.landingHeight || map[key].staircaseLandingHeight || '';
+        map[key].landingLength = meas.staircase.landingLength || map[key].landingLength || '';
+        map[key].landingWidth = meas.staircase.landingWidth || map[key].landingWidth || '';
+        map[key].landingDepth = meas.staircase.landingDepth || map[key].landingDepth || '';
       }
       keys.push(key);
     }
@@ -1127,9 +1131,10 @@ var CRM_APP_COLUMNS = [
   ['PURCHASING FOR', 'PURCHASING FOR:'],
   ['SOFA WIDTH'], ['SOFA HEIGHT'], ['SOFA DEPTH'],
   ['WARDROBE LENGTH'], ['WARDROBE WIDTH'], ['WARDROBE HEIGHT'],
-  ['STAIRCASE LENGTH', 'STAIR CASE LENGTH'],
   ['STAIRCASE WIDTH', 'STAIR CASE WIDTH'],
-  ['STAIRCASE LANDING HEIGHT', 'STAIR CASE LANDING HEIGHT'],
+  ['LANDING AREA LENGTH', 'LANDING LENGTH'],
+  ['LANDING AREA WIDTH', 'LANDING WIDTH'],
+  ['LANDING AREA DEPTH', 'LANDING DEPTH'],
   ['CUSTOMER HOUSE ENTRY DOOR WIDTH', 'ENTRY DOOR WIDTH'],
   ['CUSTOMER HOUSE ENTRY DOOR HEIGHT', 'ENTRY DOOR HEIGHT'],
   // Multi-block measurements: lift type(s), per-furniture & per-room summaries,
@@ -1372,10 +1377,12 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['WARDROBE LENGTH'], o.wardrobeLength || '');
     put(['WARDROBE WIDTH'], o.wardrobeWidth || '');
     put(['WARDROBE HEIGHT'], o.wardrobeHeight || '');
-    // Staircase — order-level (needed for a sofa with no lift). Length / Width / Landing H.
-    put(['STAIRCASE LENGTH', 'STAIR CASE LENGTH'], o.staircaseLength || '');
+    // Staircase — order-level (needed for a sofa with no lift): staircase width +
+    // the landing area's length / width / depth. All values in cm.
     put(['STAIRCASE WIDTH', 'STAIR CASE WIDTH'], o.staircaseWidth || '');
-    put(['STAIRCASE LANDING HEIGHT', 'STAIR CASE LANDING HEIGHT'], o.staircaseLandingHeight || '');
+    put(['LANDING AREA LENGTH', 'LANDING LENGTH'], o.landingLength || '');
+    put(['LANDING AREA WIDTH', 'LANDING WIDTH'], o.landingWidth || '');
+    put(['LANDING AREA DEPTH', 'LANDING DEPTH'], o.landingDepth || '');
     put(['CUSTOMER HOUSE ENTRY DOOR WIDTH', 'ENTRY DOOR WIDTH'], o.entryDoorWidth || '');
     put(['CUSTOMER HOUSE ENTRY DOOR HEIGHT', 'ENTRY DOOR HEIGHT'], o.entryDoorHeight || '');
     // ── Multi-block measurements: lift type(s), one measurement block per
@@ -1395,8 +1402,8 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
       return (r2.name || ('Room ' + (ri + 1))) + ' (WxHxD): ' + [r2.width, r2.height, r2.depth].map(function (v) { return v || '-'; }).join(' x ');
     }).join('  |  ');
     put(['ROOM MEASUREMENTS', 'ROOMS MEASUREMENTS'], rmSummary);
-    if (wbs.length || rms.length || lts.length || o.staircaseLength || o.staircaseWidth || o.staircaseLandingHeight)
-      put(['SITE MEASUREMENTS DATA', 'MEASUREMENTS DATA', 'MEASUREMENTS JSON'], JSON.stringify({ wardrobes: wbs, rooms: rms, liftTypes: lts, staircase: { length: o.staircaseLength || '', width: o.staircaseWidth || '', landingHeight: o.staircaseLandingHeight || '' } }));
+    if (wbs.length || rms.length || lts.length || o.staircaseWidth || o.landingLength || o.landingWidth || o.landingDepth)
+      put(['SITE MEASUREMENTS DATA', 'MEASUREMENTS DATA', 'MEASUREMENTS JSON'], JSON.stringify({ wardrobes: wbs, rooms: rms, liftTypes: lts, staircase: { width: o.staircaseWidth || '', landingLength: o.landingLength || '', landingWidth: o.landingWidth || '', landingDepth: o.landingDepth || '' } }));
 
     // ── Extra fields captured by the app (write only if the column exists).
     //    Add these headers to the CRM sheet to capture them.

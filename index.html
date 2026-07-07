@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '32';
+  var V = '33';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -367,6 +367,15 @@ function fuzzySearch(allItems, query) {
 //   • orderDiscount is an extra order-wide discount, entered as a %.
 //   • GST = CGST 9% + SGST 9% on the taxable (after-discount) value.
 // ═══════════════════════════════════════════════════════════
+// ── Field-format validators ───────────────────────────────────────────────
+// Email: a basic but strict-enough shape (name@domain.tld).
+function isValidEmail(v) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim()); }
+// Indian mobile: 10 digits starting 6-9, optionally with +91 / 0 prefix.
+function isValidPhone(v) {
+  const d = String(v || '').replace(/[\s\-()]/g, '').replace(/^(\+?91|0)/, '');
+  return /^[6-9]\d{9}$/.test(d);
+}
+
 function orderTotals(o) {
   const items         = o.items || [];
   const itemsSubtotal = items.reduce((s, i) => s + (i.total || 0), 0);
@@ -454,19 +463,22 @@ function Btn({children,primary,danger,ghost,full,size='md',icon,onClick,disabled
   return <button type={type} onClick={onClick} disabled={disabled} style={{height:h,padding:'0 16px',borderRadius:6,background:bg,color:fg,border:`1px solid ${bd}`,fontFamily:T.sans,fontWeight:600,fontSize:fs,letterSpacing:-0.1,width:full?'100%':undefined,cursor:disabled?'not-allowed':'pointer',display:'inline-flex',alignItems:'center',justifyContent:'center',gap:8,flexShrink:0,opacity:disabled?.5:1}}>{icon}{children}</button>;
 }
 
-function Field({label,value,onChange,mono,hint,required,action,onAction,multiline,type='text',placeholder,readOnly}) {
+function Field({label,value,onChange,mono,hint,required,action,onAction,multiline,type='text',placeholder,readOnly,error}) {
   const [focused,setFocused] = React.useState(false);
-  const style = {fontSize:15,fontFamily:mono?T.mono:T.sans,color:T.ink,fontWeight:mono?500:400,lineHeight:'22px',background:'transparent',border:'none',outline:'none',width:'100%',resize:'none',padding:0};
+  const style = {fontSize:15,fontFamily:mono?T.mono:T.sans,color:error?T.bad:T.ink,fontWeight:mono?500:400,lineHeight:'22px',background:'transparent',border:'none',outline:'none',width:'100%',resize:'none',padding:0};
+  const borderCol = error ? T.bad : (focused ? T.green : T.line);
   return (
-    <div style={{borderBottom:`1px solid ${focused?T.green:T.line}`,padding:'11px 14px',background:'#fff',transition:'border-color .15s'}}>
+    <div style={{borderBottom:`1px solid ${borderCol}`,padding:'11px 14px',background:'#fff',transition:'border-color .15s'}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:3}}>
-        <span style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',fontFamily:T.sans}}>{label}{required&&<span style={{color:T.bad,marginLeft:3}}>*</span>}</span>
+        <span style={{fontSize:10,fontWeight:700,color:error?T.bad:T.ink4,letterSpacing:0.8,textTransform:'uppercase',fontFamily:T.sans}}>{label}{required&&<span style={{color:T.bad,marginLeft:3}}>*</span>}</span>
         {action&&<span onClick={onAction} style={{fontSize:11,color:T.green,fontWeight:600,fontFamily:T.sans,cursor:'pointer'}}>{action}</span>}
       </div>
       {multiline
         ? <textarea value={value} onChange={e=>onChange&&onChange(e.target.value)} rows={3} placeholder={placeholder||'Tap to fill'} readOnly={readOnly} style={{...style,lineHeight:'20px',fontSize:14}} onFocus={()=>setFocused(true)} onBlur={()=>setFocused(false)}/>
         : <input type={type} value={value} onChange={e=>onChange&&onChange(e.target.value)} placeholder={placeholder||'Tap to fill'} readOnly={readOnly} style={style} onFocus={()=>setFocused(true)} onBlur={()=>setFocused(false)}/>}
-      {hint&&<div style={{fontSize:11,color:T.ink4,marginTop:3}}>{hint}</div>}
+      {error
+        ? <div style={{fontSize:11,color:T.bad,marginTop:3,fontWeight:600}}>{error}</div>
+        : (hint&&<div style={{fontSize:11,color:T.ink4,marginTop:3}}>{hint}</div>)}
     </div>
   );
 }
@@ -767,9 +779,9 @@ function generatePDF(order, copyType) {
     // Site measurements row — printed on BOTH the customer and sales copies.
     // Sofa and modular-wardrobe (Kalista / Kreation X2 / X3) dims are mandatory
     // when such an item is ordered; plus any other site-access measurements.
-    const measParts = [];
+    const measParts = [];   // all values in cm
     if (order.sofaWidth||order.sofaHeight||order.sofaDepth)
-      measParts.push('Sofa (W x H x D): ' + [order.sofaWidth,order.sofaHeight,order.sofaDepth].map(v=>v||'-').join(' x '));
+      measParts.push('Sofa (W x H x D, cm): ' + [order.sofaWidth,order.sofaHeight,order.sofaDepth].map(v=>v||'-').join(' x '));
     // Modular-furniture blocks (one per modular wardrobe): wardrobe dims.
     const pdfWardrobes = (Array.isArray(order.wardrobes) && order.wardrobes.length)
       ? order.wardrobes
@@ -779,18 +791,18 @@ function generatePDF(order, copyType) {
     pdfWardrobes.forEach((w,wi)=>{
       const nm = w.name ? ' ' + w.name : '';
       if (w.length||w.width||w.height)
-        measParts.push('Furniture ' + (wi+1) + nm + ' (L x W x H): ' + [w.length,w.width,w.height].map(v=>v||'-').join(' x '));
+        measParts.push('Furniture ' + (wi+1) + nm + ' (L x W x H, cm): ' + [w.length,w.width,w.height].map(v=>v||'-').join(' x '));
     });
     // Room blocks (one per room).
     (Array.isArray(order.rooms)?order.rooms:[]).forEach((r,ri)=>{
       if (r.width||r.height||r.depth||r.name)
-        measParts.push((r.name||('Room ' + (ri+1))) + ' (W x H x D): ' + [r.width,r.height,r.depth].map(v=>v||'-').join(' x '));
+        measParts.push((r.name||('Room ' + (ri+1))) + ' (W x H x D, cm): ' + [r.width,r.height,r.depth].map(v=>v||'-').join(' x '));
     });
-    // Staircase — sofa-only, no-lift site measurement.
-    if (order.staircaseLength||order.staircaseWidth||order.staircaseLandingHeight)
-      measParts.push('Staircase (L / W / Landing H): ' + [order.staircaseLength,order.staircaseWidth,order.staircaseLandingHeight].map(v=>v||'-').join(' / '));
+    // Staircase — sofa-only, no-lift site measurement: staircase width + landing area L x W x D.
+    if (order.staircaseWidth||order.landingLength||order.landingWidth||order.landingDepth)
+      measParts.push('Staircase W (cm): ' + (order.staircaseWidth||'-') + ' | Landing Area (L x W x D, cm): ' + [order.landingLength,order.landingWidth,order.landingDepth].map(v=>v||'-').join(' x '));
     if (order.entryDoorWidth||order.entryDoorHeight)
-      measParts.push('Entry Door (W x H): ' + [order.entryDoorWidth,order.entryDoorHeight].map(v=>v||'-').join(' x '));
+      measParts.push('Entry Door (W x H, cm): ' + [order.entryDoorWidth,order.entryDoorHeight].map(v=>v||'-').join(' x '));
     if (measParts.length) {
       doc.setFontSize(7);
       const mLines = doc.splitTextToSize(measParts.join('     |     '), cw-32);
@@ -1098,8 +1110,8 @@ const BLANK_ORDER = () => ({
   // Room measurements — the sales person picks how many rooms. { name, width, height, depth }
   rooms:[],
   // Staircase (site-access) measurement — order-level, needed only for a SOFA
-  // when there is NO lift. Length / Width / Landing height.
-  staircaseLength:'', staircaseWidth:'', staircaseLandingHeight:'',
+  // when there is NO lift. Staircase width + the landing area's L x W x D. All cm.
+  staircaseWidth:'', landingLength:'', landingWidth:'', landingDepth:'',
   // Legacy single-block wardrobe fields (kept so orders saved before the
   // multi-block upgrade still round-trip; mirrored from wardrobes[0] on save).
   wardrobeLength:'', wardrobeWidth:'', wardrobeHeight:'',
@@ -2079,7 +2091,10 @@ function OrderFormScreen({ctx}) {
   async function handleSave() {
     if(!o.customer) return ctx.showToast('Customer name is required','bad');
     if(!o.phone)    return ctx.showToast('Phone number is required','bad');
+    if(!isValidPhone(o.phone)) return ctx.showToast('Enter a valid 10-digit mobile number','bad');
+    if(o.alt && !isValidPhone(o.alt)) return ctx.showToast('Alt. phone is not a valid mobile number','bad');
     if(!o.email)    return ctx.showToast('E-mail is required','bad');
+    if(!isValidEmail(o.email)) return ctx.showToast('Enter a valid email address','bad');
     if(!o.delivery) return ctx.showToast('Delivery address is required','bad');
     if(!o.floor)    return ctx.showToast('Floor is required','bad');
     if(!o.landmark) return ctx.showToast('Nearest landmark is required','bad');
@@ -2089,6 +2104,7 @@ function OrderFormScreen({ctx}) {
     // Delivery contact person required when the billing & delivery addresses differ
     const addrDiffer = (o.billing||'').trim() && (o.delivery||'').trim() && (o.billing||'').trim()!==(o.delivery||'').trim();
     if(addrDiffer && (!o.contactPersonName||!o.contactNumber)) return ctx.showToast('Delivery Contact Person Name & Number are required (billing & delivery addresses differ)','bad');
+    if(o.contactNumber && !isValidPhone(o.contactNumber)) return ctx.showToast('Contact number is not a valid mobile number','bad');
     if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item','bad');
     // Mandatory customer-profiling fields (DOB & anniversary are now optional)
     if(!o.awareness)    return ctx.showToast('Select the Lead Source','bad');
@@ -2097,8 +2113,9 @@ function OrderFormScreen({ctx}) {
     // Sofa: sofa dims + entry-door site measurement are mandatory
     if(hasSofa && (!o.sofaWidth||!o.sofaHeight||!o.sofaDepth)) return ctx.showToast('Enter Sofa width, height & depth (mandatory for sofas)','bad');
     if(hasSofa && (!o.entryDoorWidth||!o.entryDoorHeight)) return ctx.showToast('Enter Entry Door width & height (required for sofa orders)','bad');
-    // Staircase measurement — required only for a SOFA with NO lift.
-    if(needStaircase && (!o.staircaseLength||!o.staircaseWidth||!o.staircaseLandingHeight)) return ctx.showToast('Enter Staircase length, width & landing height (required for a sofa with no lift)','bad');
+    // Staircase measurement — required only for a SOFA with NO lift:
+    // staircase width + the landing area's length / width / depth.
+    if(needStaircase && (!o.staircaseWidth||!o.landingLength||!o.landingWidth||!o.landingDepth)) return ctx.showToast('Enter Staircase width & the landing area length/width/depth (required for a sofa with no lift)','bad');
     // Modular wardrobe (Kalista / Kreation X2 / X3): every furniture block needs its
     // wardrobe dims, and every room block needs its dims — both are mandatory.
     if(hasWardrobe){
@@ -2157,9 +2174,9 @@ function OrderFormScreen({ctx}) {
       <div className="scroll">
         <SectionHead n="01" label="Customer"/>
         <Field label="Customer Name" value={o.customer} onChange={v=>setF('customer',v)} required/>
-        <Field label="Phone" value={o.phone} onChange={v=>setF('phone',v)} mono required type="tel" action="CALL" onAction={()=>o.phone&&window.open('tel:'+o.phone)}/>
-        <Field label="Alt. Phone" value={o.alt} onChange={v=>setF('alt',v)} mono type="tel"/>
-        <Field label="E-mail" value={o.email} onChange={v=>setF('email',v)} type="email" required hint="Mandatory · digital copy is sent here"/>
+        <Field label="Phone" value={o.phone} onChange={v=>setF('phone',v)} mono required type="tel" action="CALL" onAction={()=>o.phone&&window.open('tel:'+o.phone)} error={o.phone&&!isValidPhone(o.phone)?'Enter a valid 10-digit mobile number':undefined}/>
+        <Field label="Alt. Phone" value={o.alt} onChange={v=>setF('alt',v)} mono type="tel" error={o.alt&&!isValidPhone(o.alt)?'Enter a valid 10-digit mobile number':undefined}/>
+        <Field label="E-mail" value={o.email} onChange={v=>setF('email',v)} type="email" required hint="Mandatory · digital copy is sent here" error={o.email&&!isValidEmail(o.email)?'Enter a valid email address':undefined}/>
         <Field label="Customer GST No." value={o.gstNumber} onChange={v=>setF('gstNumber',v.toUpperCase())} mono hint="Fill only if the customer wants a GST bill · printed on the PDF"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Lead Source <span style={{color:T.bad,marginLeft:3}}>*</span></div>
@@ -2224,18 +2241,19 @@ function OrderFormScreen({ctx}) {
               Person to receive the order at the delivery address. {diff?'Required — billing & delivery addresses differ.':'Optional.'}
             </div>
             <Field label="Delivery Contact Person Name" value={o.contactPersonName} onChange={v=>setF('contactPersonName',v)} required={diff}/>
-            <Field label="Delivery Contact Number" value={o.contactNumber} onChange={v=>setF('contactNumber',v)} mono type="tel" required={diff}/>
+            <Field label="Delivery Contact Number" value={o.contactNumber} onChange={v=>setF('contactNumber',v)} mono type="tel" required={diff} error={o.contactNumber&&!isValidPhone(o.contactNumber)?'Enter a valid 10-digit mobile number':undefined}/>
             <Field label="Remark" value={o.contactRemark} onChange={v=>setF('contactRemark',v)} multiline/>
           </>
         );})()}
 
         <SectionHead n="03" label="Site Measurements"/>
+        <div style={{padding:'6px 14px',background:T.paper2||'#fafafa',borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.ink4,fontWeight:600}}>All measurements are in centimetres (cm).</div>
         {hasSofa && (
           <>
             <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Sofa in order — width, height & depth are mandatory (printed on the PDF)</div>
-            <Field label="Sofa Width" value={o.sofaWidth} onChange={v=>setF('sofaWidth',v)} mono required hint="e.g. 84 in / 213 cm"/>
-            <Field label="Sofa Height" value={o.sofaHeight} onChange={v=>setF('sofaHeight',v)} mono required/>
-            <Field label="Sofa Depth" value={o.sofaDepth} onChange={v=>setF('sofaDepth',v)} mono required/>
+            <Field label="Sofa Width (cm)" value={o.sofaWidth} onChange={v=>setF('sofaWidth',v)} mono required hint="e.g. 213"/>
+            <Field label="Sofa Height (cm)" value={o.sofaHeight} onChange={v=>setF('sofaHeight',v)} mono required/>
+            <Field label="Sofa Depth (cm)" value={o.sofaDepth} onChange={v=>setF('sofaDepth',v)} mono required/>
           </>
         )}
         {/* Modular furniture — one measurement block per modular wardrobe
@@ -2256,9 +2274,9 @@ function OrderFormScreen({ctx}) {
                 <div style={{padding:'8px 14px',fontSize:11,fontWeight:700,color:T.ink2,letterSpacing:0.5,textTransform:'uppercase'}}>Modular Furniture {wi+1}</div>
                 <div style={{background:'#fff'}}>
                   <Field label="Furniture Name" value={w.name} onChange={v=>setWardrobeField(wi,'name',v)} hint="e.g. Kreation X3, Kalista"/>
-                  <Field label="Wardrobe Length" value={w.length} onChange={v=>setWardrobeField(wi,'length',v)} mono required hint="e.g. 72 in / 183 cm"/>
-                  <Field label="Wardrobe Width" value={w.width} onChange={v=>setWardrobeField(wi,'width',v)} mono required/>
-                  <Field label="Wardrobe Height" value={w.height} onChange={v=>setWardrobeField(wi,'height',v)} mono required/>
+                  <Field label="Wardrobe Length (cm)" value={w.length} onChange={v=>setWardrobeField(wi,'length',v)} mono required hint="e.g. 183"/>
+                  <Field label="Wardrobe Width (cm)" value={w.width} onChange={v=>setWardrobeField(wi,'width',v)} mono required/>
+                  <Field label="Wardrobe Height (cm)" value={w.height} onChange={v=>setWardrobeField(wi,'height',v)} mono required/>
                 </div>
               </div>
             ))}
@@ -2282,24 +2300,26 @@ function OrderFormScreen({ctx}) {
             <div style={{padding:'8px 14px',fontSize:11,fontWeight:700,color:T.ink2,letterSpacing:0.5,textTransform:'uppercase'}}>Room {ri+1}</div>
             <div style={{background:'#fff'}}>
               <Field label="Room Name" value={r.name} onChange={v=>setRoomField(ri,'name',v)} placeholder={`Room ${ri+1}`} required={hasWardrobe} hint="e.g. Master Bedroom, Kids Room"/>
-              <Field label="Room Width" value={r.width} onChange={v=>setRoomField(ri,'width',v)} mono required={hasWardrobe}/>
-              <Field label="Room Height" value={r.height} onChange={v=>setRoomField(ri,'height',v)} mono required={hasWardrobe}/>
-              <Field label="Room Depth" value={r.depth} onChange={v=>setRoomField(ri,'depth',v)} mono required={hasWardrobe}/>
+              <Field label="Room Width (cm)" value={r.width} onChange={v=>setRoomField(ri,'width',v)} mono required={hasWardrobe}/>
+              <Field label="Room Height (cm)" value={r.height} onChange={v=>setRoomField(ri,'height',v)} mono required={hasWardrobe}/>
+              <Field label="Room Depth (cm)" value={r.depth} onChange={v=>setRoomField(ri,'depth',v)} mono required={hasWardrobe}/>
             </div>
           </div>
         ))}
-        {/* Staircase — only for a SOFA with NO lift (skip if there's a lift or no sofa). */}
+        {/* Staircase — only for a SOFA with NO lift (skip if there's a lift or no sofa).
+            Staircase width + the landing area's length / width / depth. */}
         {needStaircase && (
           <>
-            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Sofa with no lift — staircase length, width & landing height are mandatory (printed on the PDF)</div>
-            <Field label="Staircase Length" value={o.staircaseLength} onChange={v=>setF('staircaseLength',v)} mono required/>
-            <Field label="Staircase Width" value={o.staircaseWidth} onChange={v=>setF('staircaseWidth',v)} mono required/>
-            <Field label="Staircase Landing Height" value={o.staircaseLandingHeight} onChange={v=>setF('staircaseLandingHeight',v)} mono required/>
+            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Sofa with no lift — staircase width & the landing area length/width/depth are mandatory (printed on the PDF)</div>
+            <Field label="Staircase Width (cm)" value={o.staircaseWidth} onChange={v=>setF('staircaseWidth',v)} mono required/>
+            <Field label="Landing Area Length (cm)" value={o.landingLength} onChange={v=>setF('landingLength',v)} mono required/>
+            <Field label="Landing Area Width (cm)" value={o.landingWidth} onChange={v=>setF('landingWidth',v)} mono required/>
+            <Field label="Landing Area Depth (cm)" value={o.landingDepth} onChange={v=>setF('landingDepth',v)} mono required/>
           </>
         )}
         {/* Entry-door measurement — mandatory only for sofa orders */}
-        <Field label="Entry Door Width" value={o.entryDoorWidth} onChange={v=>setF('entryDoorWidth',v)} mono required={hasSofa} hint={hasSofa?'Mandatory for sofa orders':undefined}/>
-        <Field label="Entry Door Height" value={o.entryDoorHeight} onChange={v=>setF('entryDoorHeight',v)} mono required={hasSofa}/>
+        <Field label="Entry Door Width (cm)" value={o.entryDoorWidth} onChange={v=>setF('entryDoorWidth',v)} mono required={hasSofa} hint={hasSofa?'Mandatory for sofa orders':undefined}/>
+        <Field label="Entry Door Height (cm)" value={o.entryDoorHeight} onChange={v=>setF('entryDoorHeight',v)} mono required={hasSofa}/>
 
         <SectionHead n="04" label={`Items · ${(o.items||[]).length}`} action="+ ADD ITEM" onAction={()=>nav('search')}/>
         <div style={{background:'#fff'}}>
@@ -2396,7 +2416,7 @@ function OrderFormScreen({ctx}) {
             <option>Pine Labs EMI</option>
           </select>
         </div>
-        <Field label="Earnest Amount" value={o.earnest} onChange={v=>setF('earnest',v)} mono type="number" required/>
+        <Field label="Earnest Amount" value={o.earnest} onChange={v=>setF('earnest',v)} mono type="number" required error={(Number(o.earnest)||0) > total ? `Amount paid ₹${(Number(o.earnest)||0).toLocaleString('en-IN')} exceeds the order total ₹${total.toLocaleString('en-IN')}` : undefined} hint={total>0?`Order total: ₹${total.toLocaleString('en-IN')}`:undefined}/>
         {/* Money receipt no + date — updatable up to 3 times */}
         {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:''}; const setMR=(field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:''},{no:'',date:''},{no:'',date:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; }); return (
           <div key={i} style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
@@ -2433,7 +2453,7 @@ function OrderFormScreen({ctx}) {
             <div style={{height:1,background:'rgba(255,255,255,.2)',margin:'8px 0'}}/>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:18,fontWeight:700}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginTop:4,color:'rgba(255,255,255,.6)'}}><span>Earnest</span><span>₹{(Number(o.earnest)||0).toLocaleString('en-IN')}</span></div>
-            <div style={{display:'flex',justifyContent:'space-between',fontSize:15,fontWeight:700,color:'#ffd27a',marginTop:2}}><span>Balance</span><span>₹{balance.toLocaleString('en-IN')}</span></div>
+            <div style={{display:'flex',justifyContent:'space-between',fontSize:15,fontWeight:700,color:balance<0?'#ff8a80':'#ffd27a',marginTop:2}}><span>{balance<0?'Overpaid':'Balance'}</span><span>₹{Math.abs(balance).toLocaleString('en-IN')}</span></div>
             {priv&&(
               <>
                 <div style={{height:1,background:'rgba(255,255,255,.2)',margin:'8px 0'}}/>
@@ -2912,9 +2932,9 @@ function SettingsScreen({ctx}) {
                         ⚠ The deployed Apps Script did not report a version. Copy the latest Code.gs → save in Apps Script → Deploy → Manage deployments → Edit → New version.
                       </div>
                     )}
-                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v26' && (
+                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v27' && (
                       <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>
-                        Latest available is v26 — a redeploy is optional but recommended for the newest fixes.
+                        Latest available is v27 — a redeploy is optional but recommended for the newest fixes.
                       </div>
                     )}
                     {debugResult.discontinued && (
