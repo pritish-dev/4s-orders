@@ -878,6 +878,21 @@ function handleOrders(p) {
 
   function cell(r, ci) { return ci >= 0 ? r[ci] : ''; }
   function sval(r, ci) { return String(cell(r, ci) || '').trim(); }
+  // Date-typed cells (Planned Dly, Follow-up, DOB, Anniversary, receipt dates)
+  // round-trip through Sheets as real Date values — writing the string
+  // "2026-07-20" makes Sheets store an actual date. Stringifying that gives
+  // "Sat Jul 20 2026 …", which the app's <input type="date"> fields can't show,
+  // so the value looks lost on reopen. Format Dates back to yyyy-MM-dd; pass
+  // plain strings through untouched.
+  var _tz = (function () {
+    try { return sh.getParent().getSpreadsheetTimeZone() || Session.getScriptTimeZone(); }
+    catch (e) { return Session.getScriptTimeZone(); }
+  })();
+  function dstr(r, ci) {
+    var v = cell(r, ci);
+    if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, _tz, 'yyyy-MM-dd');
+    return String(v || '').trim();
+  }
 
   // Everyone sees every salesperson's orders (filtering happens client-side).
   var cutoff = new Date();
@@ -914,8 +929,8 @@ function handleOrders(p) {
         // liftTypes / wardrobes / rooms are attached after this literal (below).
         contactNumber: sval(r, cCPNum),
         contactRemark: sval(r, cCPRem),
-        dob: sval(r, cDob),
-        anniversary: sval(r, cAnniv),
+        dob: dstr(r, cDob),
+        anniversary: dstr(r, cAnniv),
         awareness: sval(r, cAware),
         purchasePattern: sval(r, cPatt) ? sval(r, cPatt).split(/\s*,\s*/).filter(String) : [],
         purchasingFor: sval(r, cPurpose),
@@ -923,21 +938,21 @@ function handleOrders(p) {
         wardrobeLength: sval(r, cWardL), wardrobeWidth: sval(r, cWardW), wardrobeHeight: sval(r, cWardH),
         staircaseLength: sval(r, cStairLen), staircaseWidth: sval(r, cStairW), staircaseLandingHeight: sval(r, cStairL),
         entryDoorWidth: sval(r, cDoorW), entryDoorHeight: sval(r, cDoorH),
-        plannedDly: sval(r, cPlanned),
+        plannedDly: dstr(r, cPlanned),
         installNote: sval(r, cInstr),
         orderFormReceiptNo: sval(r, cOFRcpt),
         orderDiscount: disc,
         paymentMode: sval(r, cPay),
         earnest: cAdv >= 0 ? Number(r[cAdv]) || 0 : 0,
-        followUp: sval(r, cFollow),
+        followUp: dstr(r, cFollow),
         salesExec: sval(r, cSales),
         orderType: sval(r, cOrdType) || 'B2C',
         poRef: sval(r, cPoRef),
         deliveryStatus: sval(r, cDelvSt) || 'Pending',
         moneyReceipts: [
-          { no: sval(r, cMr1n), date: sval(r, cMr1d) },
-          { no: sval(r, cMr2n), date: sval(r, cMr2d) },
-          { no: sval(r, cMr3n), date: sval(r, cMr3d) },
+          { no: sval(r, cMr1n), date: dstr(r, cMr1d) },
+          { no: sval(r, cMr2n), date: dstr(r, cMr2d) },
+          { no: sval(r, cMr3n), date: dstr(r, cMr3d) },
         ],
         date: sval(r, cDate),
         amt: 0,
@@ -1112,10 +1127,17 @@ var CRM_APP_COLUMNS = [
   ['PURCHASING FOR', 'PURCHASING FOR:'],
   ['SOFA WIDTH'], ['SOFA HEIGHT'], ['SOFA DEPTH'],
   ['WARDROBE LENGTH'], ['WARDROBE WIDTH'], ['WARDROBE HEIGHT'],
+  ['STAIRCASE LENGTH', 'STAIR CASE LENGTH'],
   ['STAIRCASE WIDTH', 'STAIR CASE WIDTH'],
   ['STAIRCASE LANDING HEIGHT', 'STAIR CASE LANDING HEIGHT'],
   ['CUSTOMER HOUSE ENTRY DOOR WIDTH', 'ENTRY DOOR WIDTH'],
   ['CUSTOMER HOUSE ENTRY DOOR HEIGHT', 'ENTRY DOOR HEIGHT'],
+  // Multi-block measurements: lift type(s), per-furniture & per-room summaries,
+  // and the JSON blob that round-trips wardrobes[] / rooms[] exactly on reopen.
+  ['LIFT TYPE', 'LIFT TYPES'],
+  ['MODULAR FURNITURE MEASUREMENTS', 'MODULAR MEASUREMENTS'],
+  ['ROOM MEASUREMENTS', 'ROOMS MEASUREMENTS'],
+  ['SITE MEASUREMENTS DATA', 'MEASUREMENTS DATA', 'MEASUREMENTS JSON'],
   ['ORDER TYPE', 'B2C/B2B', 'ORDER CATEGORY'],
   ['LEAD SOURCE'],
   ['CUSTOMER GST NO', 'CUSTOMER GSTIN', 'GST NO', 'GSTIN'],
