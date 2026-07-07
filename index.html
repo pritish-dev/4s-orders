@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '31';
+  var V = '32';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -2107,6 +2107,7 @@ function OrderFormScreen({ctx}) {
       }
       if(!rooms.length) return ctx.showToast('Add at least one room measurement (mandatory for modular furniture)','bad');
       for(let i=0;i<rooms.length;i++){ const r=rooms[i];
+        if(!r.name||!(r.name||'').trim()) return ctx.showToast(`Enter the room name for Room ${i+1}`,'bad');
         if(!r.width||!r.height||!r.depth) return ctx.showToast(`Enter width, height & depth for Room ${i+1}`,'bad');
       }
     }
@@ -2279,7 +2280,7 @@ function OrderFormScreen({ctx}) {
           <div key={ri} style={{borderBottom:`1px solid ${T.line}`,background:T.paper2||'#fafafa'}}>
             <div style={{padding:'8px 14px',fontSize:11,fontWeight:700,color:T.ink2,letterSpacing:0.5,textTransform:'uppercase'}}>Room {ri+1}</div>
             <div style={{background:'#fff'}}>
-              <Field label="Room Name" value={r.name} onChange={v=>setRoomField(ri,'name',v)} placeholder={`Room ${ri+1}`} hint="e.g. Master Bedroom, Kids Room"/>
+              <Field label="Room Name" value={r.name} onChange={v=>setRoomField(ri,'name',v)} placeholder={`Room ${ri+1}`} required={hasWardrobe} hint="e.g. Master Bedroom, Kids Room"/>
               <Field label="Room Width" value={r.width} onChange={v=>setRoomField(ri,'width',v)} mono required={hasWardrobe}/>
               <Field label="Room Height" value={r.height} onChange={v=>setRoomField(ri,'height',v)} mono required={hasWardrobe}/>
               <Field label="Room Depth" value={r.depth} onChange={v=>setRoomField(ri,'depth',v)} mono required={hasWardrobe}/>
