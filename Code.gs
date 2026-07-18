@@ -437,11 +437,16 @@ function handlePriceList(p) {
   //   Any row that carries an Alt item code → item.altCode, which the order
   //   form / PDF / CRM use in place of the (old) price-list code. The alt code
   //   is applied whenever it exists, regardless of the exact REMARKS wording.
-  var annDiscontinued = 0, annAltCode = 0;
+  var annDiscontinued = 0, annAltCode = 0, addedDiscontinued = 0;
   try {
     var discMap = _getDiscontinuedMap(opsSS);
     if (discMap) {
+      // Track which codes already exist in the price list, so a discontinued
+      // entry whose code IS in the price list is only annotated (below), while
+      // one whose code is NOT in the price list gets added as its own item.
+      var haveCode = {};
       for (var d = 0; d < all.length; d++) {
+        haveCode[all[d].code] = true;
         var info = discMap[all[d].code];
         if (!info) continue;
         if (info.remarks.indexOf('discontinu') !== -1) {
@@ -454,6 +459,25 @@ function handlePriceList(p) {
           if (info.altName) all[d].altName = info.altName;
           annAltCode++;
         }
+      }
+
+      // Add discontinued items that are NOT in any price list. They have no
+      // price on file, so CPL is 0 and the salesperson fills the price in
+      // manually on the order form. These stay searchable by code / name.
+      for (var code in discMap) {
+        if (!discMap.hasOwnProperty(code) || haveCode[code]) continue;
+        var di   = discMap[code];
+        var desc = di.name || di.altName || code;
+        var item = _makeItem('Discontinued Products', di.family || 'Discontinued',
+                             di.family || '', code, desc, 0, di.remarksRaw || '');
+        item.discontinued = true;
+        item.discSince    = di.date || '';
+        if (di.altCode) {
+          item.altCode = di.altCode;
+          if (di.altName) item.altName = di.altName;
+        }
+        all.push(item);
+        addedDiscontinued++;
       }
     }
   } catch (e) { /* discontinued annotation is non-fatal */ }
@@ -475,7 +499,7 @@ function handlePriceList(p) {
   }
 
   var result = { ok: true, scriptVersion: SCRIPT_VERSION, mode: usedFallback ? 'auto-scan' : 'config', items: all, counts: counts, totalTabs: Object.keys(counts).length,
-                 annotated: { discontinued: annDiscontinued, altCode: annAltCode } };
+                 annotated: { discontinued: annDiscontinued, altCode: annAltCode, addedFromDiscontinued: addedDiscontinued } };
   if (errors.length) result.tabErrors = errors;
   _cachePut(cacheKey, result);   // speed up the next load
   return result;
@@ -688,7 +712,7 @@ function _parseMattressTab(rows, headerRow, tabName, catOverride) {
 // OPS tab "Discontinued Products" headers:
 //   Item Code | Item Description | PRODUCT FAMILY | DATE OF DISCONTINUATION |
 //   REMARKS | Alt item code | Alt Item code Description
-// Returns { <UPPER item code>: {remarks, remarksRaw, date, altCode, altName} } or null.
+// Returns { <UPPER item code>: {name, family, remarks, remarksRaw, date, altCode, altName} } or null.
 function _getDiscontinuedMap(opsSS) {
   var sh = opsSS.getSheetByName('Discontinued Products');
   if (!sh) return null;
@@ -701,6 +725,8 @@ function _getDiscontinuedMap(opsSS) {
   // IMPORTANT: match the DESCRIPTION column first, then EXCLUDE it when finding
   // the alt-code column, so "Alt Item code Description" is never mistaken for it.
   var cCode = _hdrKeyIdx(hdr, ['ITEM CODE', 'ITEMCODE', 'CODE', 'OLD ITEM CODE', 'OLD CODE']);
+  var cName = _hdrKeyIdx(hdr, ['ITEM DESCRIPTION', 'ITEMDESCRIPTION', 'DESCRIPTION', 'PRODUCT NAME', 'PRODUCT DESCRIPTION']);
+  var cFam  = _hdrKeyIdx(hdr, ['PRODUCT FAMILY', 'PRODUCTFAMILY', 'FAMILY', 'CATEGORY', 'ITEM GROUP', 'GROUP']);
   var cDate = _hdrKeyIdx(hdr, ['DATE OF DISCONTINUATION', 'DISCONTINUATION DATE', 'DATE']);
   var cRem  = _hdrKeyIdx(hdr, ['REMARKS', 'REMARK', 'STATUS']);
   var cAltD = _hdrKeyIdx(hdr, ['ALT ITEM CODE DESCRIPTION', 'ALT ITEM CODE DESC', 'ALT CODE DESCRIPTION', 'ALTERNATE ITEM CODE DESCRIPTION', 'ALT DESCRIPTION']);
@@ -708,6 +734,8 @@ function _getDiscontinuedMap(opsSS) {
 
   // Positional fallback matching the documented header order
   if (cCode < 0) cCode = 0;
+  if (cName < 0) cName = 1;
+  if (cFam  < 0) cFam  = 2;
   if (cDate < 0) cDate = 3;
   if (cRem  < 0) cRem  = 4;
   if (cAlt  < 0) cAlt  = 5;
@@ -720,6 +748,8 @@ function _getDiscontinuedMap(opsSS) {
     if (!code) continue;
     var remarksRaw = String(r[cRem] || '').trim();
     map[code] = {
+      name:       String(r[cName] || '').trim(),
+      family:     String(r[cFam]  || '').trim(),
       remarks:    remarksRaw.toLowerCase(),
       remarksRaw: remarksRaw,
       date:       _fmtDate(r[cDate]),
