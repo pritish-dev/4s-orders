@@ -883,6 +883,7 @@ function handleOrders(p) {
   var cPlanned = colOf(['CUSTOMER DELIVERY DATE (TO BE)']);
   var cInstr   = colOf(['SPECIFIC INSTRUCTION','INSTALLATION NOTE','INSTALL NOTE']);
   var cOFRcpt  = colOf(['ORDER FORM RECEIPT NO','ORDER FORM RECEIPT NO.','ORDER FORM RECEIPT']);
+  var cManual  = colOf(['MANUAL ORDER','IS MANUAL ORDER','MANUAL']);
   var cOrdDisc = colOf(['ORDER DISCOUNT %','ADDITIONAL ORDER DISCOUNT %','ORDER DISCOUNT']);
   var cPay     = colOf(['PAYMENT MODE']);
   var cAdv     = colOf(['ADV RECEIVED']);
@@ -973,6 +974,7 @@ function handleOrders(p) {
         plannedDly: dstr(r, cPlanned),
         installNote: sval(r, cInstr),
         orderFormReceiptNo: sval(r, cOFRcpt),
+        manualOrder: /^(yes|true|1)$/i.test(sval(r, cManual)),
         orderDiscount: disc,
         paymentMode: sval(r, cPay),
         earnest: cAdv >= 0 ? Number(r[cAdv]) || 0 : 0,
@@ -1198,6 +1200,7 @@ var CRM_APP_COLUMNS = [
   ['MONEY RECEIPT DATE 3'],
   ['DELIVERY STATUS'],
   ['ORDER FORM RECEIPT NO', 'ORDER FORM RECEIPT NO.', 'ORDER FORM RECEIPT'],
+  ['MANUAL ORDER', 'IS MANUAL ORDER', 'MANUAL'],
 ];
 
 // Appends any missing CRM columns (by header name) to the end of the header row
@@ -1471,6 +1474,9 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['MONEY RECEIPT DATE 3'], mr3.date || '');
     put(['DELIVERY STATUS'], o.deliveryStatus || 'Pending');
     put(['ORDER FORM RECEIPT NO','ORDER FORM RECEIPT NO.','ORDER FORM RECEIPT'], o.orderFormReceiptNo || '');
+    // Manual order flag — replicated (paper) orders. Booking date is carried via
+    // the DATE column; this flag lets the app keep its manual GST display on reopen.
+    put(['MANUAL ORDER','IS MANUAL ORDER','MANUAL'], o.manualOrder ? 'Yes' : '');
 
     out.push(row);
   }

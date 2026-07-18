@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '33';
+  var V = '34';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -376,18 +376,58 @@ function isValidPhone(v) {
   return /^[6-9]\d{9}$/.test(d);
 }
 
+// The app stores order dates as "dd.mm.yy" (matching the CRM sheet), but the
+// native date picker works in ISO "yyyy-mm-dd". These convert between the two so
+// a manually-set Booking Date round-trips through both.
+function dmyToISO(dmy) {
+  const p = String(dmy || '').trim().split('.');
+  if (p.length !== 3) return '';
+  let [d, m, y] = p;
+  if (!d || !m || !y) return '';
+  if (y.length === 2) y = '20' + y;
+  return y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+}
+function isoToDMY(iso) {
+  const p = String(iso || '').trim().split('-');
+  if (p.length !== 3) return '';
+  const [y, m, d] = p;
+  if (!y || !m || !d) return '';
+  return String(Number(d)).padStart(2, '0') + '.' + String(Number(m)).padStart(2, '0') + '.' + y.slice(2);
+}
+
+// Effective per-unit selling price for one line (matches the order form's
+// on-screen "Disc. Price"): an explicit unitPrice wins, else MRP after item disc.
+function itemUnitPrice(it) {
+  const mrpVal  = Number(it.mrp) || Number(it.cpl) || 0;
+  const discPct = parseFloat(it.disc || '0') / 100;
+  return (it.unitPrice > 0) ? it.unitPrice : (mrpVal > 0 ? Math.round(mrpVal * (1 - discPct)) : 0);
+}
+// ── Manual-order GST ──────────────────────────────────────────
+// A "Manual Order" bakes 18% GST into each item's price, so the per-unit price
+// and the line total already include tax and NO separate CGST/SGST is added at
+// the bottom (the GST/CGST/SGST rows are left empty on the total).
+const GST_RATE = 0.18;
+function gstInclUnit(it) { return Math.round(itemUnitPrice(it) * (1 + GST_RATE)); }
+function gstInclLine(it) { return gstInclUnit(it) * (Number(it.qty) || 0); }
+
 function orderTotals(o) {
   const items         = o.items || [];
-  const itemsSubtotal = items.reduce((s, i) => s + (i.total || 0), 0);
+  const manual        = !!o.manualOrder;
+  // Manual: each line is already GST-inclusive. Normal: line total is pre-tax
+  // and GST is added below.
+  const itemsSubtotal = manual
+    ? items.reduce((s, i) => s + gstInclLine(i), 0)
+    : items.reduce((s, i) => s + (i.total || 0), 0);
   const orderDiscPct  = Math.max(0, parseFloat(o.orderDiscount) || 0) / 100;
   const orderDiscAmt  = rnd(itemsSubtotal * orderDiscPct);
   const taxable       = itemsSubtotal - orderDiscAmt;
-  const cgst          = rnd(taxable * 0.09);
-  const sgst          = rnd(taxable * 0.09);
-  const total         = taxable + cgst + sgst;
+  // Manual: tax is already inside the item prices → keep CGST/SGST empty.
+  const cgst          = manual ? 0 : rnd(taxable * 0.09);
+  const sgst          = manual ? 0 : rnd(taxable * 0.09);
+  const total         = manual ? taxable : (taxable + cgst + sgst);
   const earnest       = Number(o.earnest) || 0;
   const balance       = total - earnest;
-  return { itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance };
+  return { itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance, manual };
 }
 
 // ─── ROLE-BASED ACCESS ──────────────────────────────────────
@@ -901,22 +941,31 @@ function generatePDF(order, copyType) {
     // Disc — per-item discount %
     doc.setFontSize(7.5); doc.setTextColor(...(dPct>0?DRED:GR));
     doc.text(dPct>0?dPct+'%':'—', tC.disc.x+tC.disc.w/2, y+7, {align:'center'});
+    // Manual orders: the Disc. Price + Total columns are shown GST-inclusive
+    // (18% baked into each item's price); normal orders stay pre-tax here and
+    // GST is added in the totals block below.
+    const manualPdf = !!order.manualOrder;
+    const cplShown  = manualPdf ? Math.round(cplV*(1+GST_RATE)) : cplV;
+    const totShown  = manualPdf ? Math.round(cplV*(1+GST_RATE))*(Number(it.qty)||0) : (it.total||0);
     doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...INK);
-    rval(tC.cpl.x+tC.cpl.w-1.5, y+7, cplV>0?cplV.toLocaleString('en-IN'):'—');
+    rval(tC.cpl.x+tC.cpl.w-1.5, y+7, cplShown>0?cplShown.toLocaleString('en-IN'):'—');
     doc.setFont('helvetica','bold'); doc.setTextColor(...INK);
-    rval(tC.tot.x+tC.tot.w-1.5, y+7, (it.total||0).toLocaleString('en-IN'));
+    rval(tC.tot.x+tC.tot.w-1.5, y+7, totShown.toLocaleString('en-IN'));
     return y + h;
   }
 
   // ── TOTALS + RECEIPT + SIGNATURE (final page only) ────────
   function drawTotalsBlock(y) {
-    const fRows = [['TOTAL', inr(subtotal), false]];
+    // Manual orders already carry 18% GST inside each item's price, so the
+    // subtotal is GST-inclusive and the CGST/SGST rows are left empty.
+    const manualPdf = !!order.manualOrder;
+    const fRows = [[manualPdf ? 'TOTAL (incl. GST)' : 'TOTAL', inr(subtotal), false]];
     if (orderDiscAmt > 0) {
       fRows.push(['Order Disc. @' + (orderDiscPct*100).toLocaleString('en-IN') + '%', '- ' + inr(orderDiscAmt), false]);
-      fRows.push(['Taxable Amt.', inr(taxable), false]);
+      fRows.push([manualPdf ? 'Net Amt.' : 'Taxable Amt.', inr(taxable), false]);
     }
-    fRows.push(['CGST @ 9%',   inr(cgst),     false]);
-    fRows.push(['SGST @ 9%',   inr(sgst),     false]);
+    fRows.push(['CGST @ 9%',   manualPdf ? '' : inr(cgst),     false]);
+    fRows.push(['SGST @ 9%',   manualPdf ? '' : inr(sgst),     false]);
     fRows.push(['Total Amt.',  inr(totalAmt), true ]);
     fRows.push(['Earnest Amt.',inr(earnest),  false]);
     fRows.push(['Balance Amt.',inr(balance),  true ]);
@@ -1663,6 +1712,15 @@ function HomeScreen({ctx}) {
             <div style={{width:40,height:40,borderRadius:99,background:'#fff',display:'flex',alignItems:'center',justifyContent:'center'}}>{Icon.plus(T.green)}</div>
           </button>
         </div>
+        {/* Manual Order — same booking flow as "Book an order", but the booking
+            date is settable and 18% GST is baked into each item's price. Used to
+            replicate orders that were booked manually (on paper). */}
+        <div style={{padding:'0 18px 12px'}}>
+          <button onClick={()=>{ctx.setOrder({...BLANK_ORDER(),manualOrder:true,salesExec:user?.name||''});nav('order');}} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 18px',background:T.ink,color:'#fff',border:'none',borderRadius:8,cursor:'pointer',textAlign:'left'}}>
+            <div><div style={{fontSize:11,fontWeight:600,opacity:.7,letterSpacing:.5,textTransform:'uppercase'}}>MANUAL</div><div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4,marginTop:2}}>Manual Order</div></div>
+            <div style={{width:40,height:40,borderRadius:99,background:'#fff',display:'flex',alignItems:'center',justifyContent:'center'}}>{Icon.plus(T.ink)}</div>
+          </button>
+        </div>
         {/* Price list status banner */}
         {!priceItems?.length && (
           <div style={{margin:'0 18px 10px',padding:'10px 14px',background:priceSyncError?T.badSoft:T.warnSoft,border:`1.5px solid ${priceSyncError?T.bad:T.warn}`,borderRadius:8,display:'flex',alignItems:'center',justifyContent:'space-between',gap:10}}>
@@ -2106,6 +2164,10 @@ function OrderFormScreen({ctx}) {
     if(addrDiffer && (!o.contactPersonName||!o.contactNumber)) return ctx.showToast('Delivery Contact Person Name & Number are required (billing & delivery addresses differ)','bad');
     if(o.contactNumber && !isValidPhone(o.contactNumber)) return ctx.showToast('Contact number is not a valid mobile number','bad');
     if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item','bad');
+    // Order Form Receipt No is mandatory (printed as the Receipt part of the PDF order no).
+    if(!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim()) return ctx.showToast('Order Form Receipt No is required','bad');
+    // Manual orders must carry the actual (settable) booking date.
+    if(o.manualOrder && !o.date) return ctx.showToast('Set the Booking Date for the manual order','bad');
     // Mandatory customer-profiling fields (DOB & anniversary are now optional)
     if(!o.awareness)    return ctx.showToast('Select the Lead Source','bad');
     if(!o.purchasePattern||o.purchasePattern.length===0) return ctx.showToast('Select the purchase pattern','bad');
@@ -2161,8 +2223,8 @@ function OrderFormScreen({ctx}) {
           <button onClick={back} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
           <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.home(T.ink2,18)}</button>
           <div>
-            <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>{o.no?'Edit order':'New order'}</div>
-            <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono}}>{o.no?o.no:'DRAFT'}</div>
+            <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>{o.no?(o.manualOrder?'Edit manual order':'Edit order'):(o.manualOrder?'New manual order':'New order')}</div>
+            <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono}}>{o.no?o.no:(o.manualOrder?'MANUAL · DRAFT':'DRAFT')}</div>
           </div>
         </div>
         <div style={{display:'flex',alignItems:'center',gap:8}}>
@@ -2172,6 +2234,14 @@ function OrderFormScreen({ctx}) {
       </div>
       <StockRibbon syncedAt={ctx.syncedAt}/>
       <div className="scroll">
+        {o.manualOrder && (
+          <>
+            <div style={{padding:'9px 14px',background:T.ink,color:'#fff',fontSize:11,fontWeight:700,letterSpacing:0.4}}>
+              MANUAL ORDER — set the booking date below · 18% GST is included in each item's price (no separate GST is added to the total)
+            </div>
+            <Field label="Booking Date" value={dmyToISO(o.date)} onChange={v=>setF('date',isoToDMY(v))} type="date" mono required hint="Manual order — the actual date this order was booked"/>
+          </>
+        )}
         <SectionHead n="01" label="Customer"/>
         <Field label="Customer Name" value={o.customer} onChange={v=>setF('customer',v)} required/>
         <Field label="Phone" value={o.phone} onChange={v=>setF('phone',v)} mono required type="tel" action="CALL" onAction={()=>o.phone&&window.open('tel:'+o.phone)} error={o.phone&&!isValidPhone(o.phone)?'Enter a valid 10-digit mobile number':undefined}/>
@@ -2327,6 +2397,11 @@ function OrderFormScreen({ctx}) {
             const mrpVal   = it.mrp||it.cpl||0;
             const discPct  = parseFloat(it.disc||'0')/100;
             const curPrice = (it.unitPrice>0) ? it.unitPrice : (mrpVal>0 ? Math.round(mrpVal*(1-discPct)) : 0);
+            // Manual orders: each item's price includes 18% GST — show the
+            // tax-inclusive unit price and line total on the item.
+            const manual   = !!o.manualOrder;
+            const gstUnit  = Math.round(curPrice*(1+GST_RATE));
+            const lineShown= manual ? gstUnit*it.qty : curPrice*it.qty;
             return (
             <div key={it.code+i} style={{padding:'11px 14px',borderBottom:`1px solid ${T.line}`}}>
               <div style={{display:'flex',gap:8,alignItems:'flex-start'}}>
@@ -2339,6 +2414,7 @@ function OrderFormScreen({ctx}) {
                   </div>
                   <div style={{fontSize:13,fontWeight:600,lineHeight:1.3}}>{it.name}</div>
                   {discPct>0&&curPrice>0&&<div style={{fontSize:10,color:T.green,marginTop:2,fontWeight:700}}>Disc. price: ₹{curPrice.toLocaleString('en-IN')} /unit</div>}
+                  {manual&&curPrice>0&&<div style={{fontSize:10,color:T.ink2,marginTop:2,fontWeight:700}}>Incl. 18% GST: ₹{gstUnit.toLocaleString('en-IN')} /unit <span style={{color:T.ink4,fontWeight:600}}>(base ₹{curPrice.toLocaleString('en-IN')})</span></div>}
                   {priv&&(()=>{const cplU=Number(it.cpl)||Number(it.mrp)||0;const m=curPrice-cplU;const mp=cplU>0?Math.round(m/cplU*100):0;return(
                     <div style={{fontSize:10,color:T.ink4,marginTop:2}}>CPL: ₹{cplU.toLocaleString('en-IN')} · Margin: <b style={{color:m>=0?T.green:T.bad}}>₹{m.toLocaleString('en-IN')}{cplU>0?` (${mp}%)`:''}</b> <span style={{opacity:.7}}>· mgr only</span></div>
                   );})()}
@@ -2383,8 +2459,8 @@ function OrderFormScreen({ctx}) {
                   </div>
                 </div>
                 <div style={{textAlign:'right',flexShrink:0}}>
-                  <div style={{fontFamily:T.mono,fontSize:15,fontWeight:700}}>₹{(curPrice*it.qty).toLocaleString('en-IN')}</div>
-                  <div style={{fontSize:9,color:T.ink4,marginTop:1}}>×{it.qty} unit{it.qty>1?'s':''}</div>
+                  <div style={{fontFamily:T.mono,fontSize:15,fontWeight:700}}>₹{lineShown.toLocaleString('en-IN')}</div>
+                  <div style={{fontSize:9,color:T.ink4,marginTop:1}}>×{it.qty} unit{it.qty>1?'s':''}{manual?' · incl. GST':''}</div>
                   <button onClick={()=>removeItem(i)} style={{marginTop:8,fontSize:11,color:T.bad,background:'none',border:'none',cursor:'pointer',fontWeight:600}}>REMOVE</button>
                 </div>
               </div>
@@ -2397,7 +2473,7 @@ function OrderFormScreen({ctx}) {
         </div>
         <SectionHead n="05" label="Commercials"/>
         <Field label="Additional Order Discount %" value={o.orderDiscount} onChange={v=>setF('orderDiscount',v.replace(/[^\d.]/g,''))} mono type="number" hint="Extra discount on the whole order (on top of per-item discounts). Shown on the PDF."/>
-        <Field label="Order Form Receipt No" value={o.orderFormReceiptNo} onChange={v=>setF('orderFormReceiptNo',v)} mono hint="Printed as the Receipt part of the PDF's Order No. (Sl / Receipt)"/>
+        <Field label="Order Form Receipt No" value={o.orderFormReceiptNo} onChange={v=>setF('orderFormReceiptNo',v)} mono required hint="Mandatory · printed as the Receipt part of the PDF's Order No. (Sl / Receipt)"/>
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setOrder(prev=>({...prev,plannedDly:v,followUp:followUpFromDelivery(v)||prev.followUp}))} mono required type="date" hint="Follow-up auto-set to 2 days before this date"/>
         <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
         <SectionHead n="06" label="Payment"/>
@@ -2411,7 +2487,7 @@ function OrderFormScreen({ctx}) {
             <option>Credit Card</option>
             <option>Debit Card</option>
             <option>Cheque</option>
-            <option>NEFT / RTGS / Bank Transfer</option>
+            <option>NEFT / RTGS / IMPS / Bank Transfer</option>
             <option>Bajaj Finance EMI</option>
             <option>Pine Labs EMI</option>
           </select>
@@ -2447,9 +2523,11 @@ function OrderFormScreen({ctx}) {
         </div>
         <div style={{padding:'14px 14px 18px'}}>
           <div style={{background:T.ink,color:'#fff',borderRadius:8,padding:'14px 16px',fontFamily:T.mono}}>
-            <div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>Items subtotal</span><span>₹{itemsSubtotal.toLocaleString('en-IN')}</span></div>
+            <div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>Items subtotal{o.manualOrder?' (incl. GST)':''}</span><span>₹{itemsSubtotal.toLocaleString('en-IN')}</span></div>
             {orderDiscAmt>0&&<div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13,color:'#ffd27a'}}><span>Order disc {(orderDiscPct*100).toLocaleString('en-IN')}%</span><span>−₹{orderDiscAmt.toLocaleString('en-IN')}</span></div>}
-            {[['CGST 9%',cgst],['SGST 9%',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>{k}</span><span>₹{v.toLocaleString('en-IN')}</span></div>)}
+            {/* Manual orders bake GST into each item price, so CGST/SGST are left empty here. */}
+            {[['CGST 9%',cgst],['SGST 9%',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>{k}</span><span>{o.manualOrder?'—':('₹'+v.toLocaleString('en-IN'))}</span></div>)}
+            {o.manualOrder&&<div style={{fontSize:10,color:'rgba(255,255,255,.55)',marginTop:2}}>18% GST is included in each item's price — no separate GST added.</div>}
             <div style={{height:1,background:'rgba(255,255,255,.2)',margin:'8px 0'}}/>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:18,fontWeight:700}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginTop:4,color:'rgba(255,255,255,.6)'}}><span>Earnest</span><span>₹{(Number(o.earnest)||0).toLocaleString('en-IN')}</span></div>
@@ -2503,7 +2581,7 @@ function PDFPreviewScreen({ctx}) {
   }
 
   function whatsapp() {
-    const msg = `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${i.total.toLocaleString('en-IN')}`).join('\n')}\n\n*Total:* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${(Number(o.earnest)||0).toLocaleString('en-IN')}\n*Balance:* ₹${(total-(Number(o.earnest)||0)).toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
+    const msg = `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${(o.manualOrder?gstInclLine(i):(i.total||0)).toLocaleString('en-IN')}`).join('\n')}\n\n*Total:* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${(Number(o.earnest)||0).toLocaleString('en-IN')}\n*Balance:* ₹${(total-(Number(o.earnest)||0)).toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
     const phone = (o.phone||'').replace(/\D/g,'');
     window.open('https://wa.me/91'+phone+'?text='+encodeURIComponent(msg),'_blank');
   }
@@ -2549,15 +2627,15 @@ function PDFPreviewScreen({ctx}) {
                   <span style={{fontFamily:T.mono,color:T.ink4}}>{i+1}</span>
                   <span><div style={{fontFamily:T.mono,fontSize:7,color:T.ink4}}>{it.code}</div><div style={{fontSize:9,fontWeight:600}}>{it.name}</div></span>
                   <span style={{fontFamily:T.mono,textAlign:'right'}}>{it.qty}</span>
-                  <span style={{fontFamily:T.mono,textAlign:'right',fontWeight:700}}>₹{it.total.toLocaleString('en-IN')}</span>
+                  <span style={{fontFamily:T.mono,textAlign:'right',fontWeight:700}}>₹{(o.manualOrder?gstInclLine(it):(it.total||0)).toLocaleString('en-IN')}</span>
                 </div>
               ))}
             </div>
             <div style={{display:'flex',justifyContent:'flex-end',marginBottom:12}}>
               <div style={{width:170,fontFamily:T.mono,fontSize:9}}>
-                <div style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>Subtotal</span><span>₹{itemsSubtotal.toLocaleString('en-IN')}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>Subtotal{o.manualOrder?' (incl. GST)':''}</span><span>₹{itemsSubtotal.toLocaleString('en-IN')}</span></div>
                 {orderDiscAmt>0&&<div style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.bad}}><span>Order disc {(orderDiscPct*100).toLocaleString('en-IN')}%</span><span>−₹{orderDiscAmt.toLocaleString('en-IN')}</span></div>}
-                {[['CGST 9%',cgst],['SGST 9%',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>{k}</span><span>₹{v.toLocaleString('en-IN')}</span></div>)}
+                {[['CGST 9%',cgst],['SGST 9%',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>{k}</span><span>{o.manualOrder?'—':('₹'+v.toLocaleString('en-IN'))}</span></div>)}
                 <div style={{borderTop:`1px solid ${T.ink}`,marginTop:2,paddingTop:3,display:'flex',justifyContent:'space-between',fontWeight:700,fontSize:11,color:T.ink}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
                 <div style={{display:'flex',justifyContent:'space-between',color:T.green,marginTop:1}}><span>Earnest</span><span>₹{(Number(o.earnest)||0).toLocaleString('en-IN')}</span></div>
               </div>
