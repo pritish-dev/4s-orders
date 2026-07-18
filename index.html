@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '34';
+  var V = '35';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -62,8 +62,8 @@
 </script>
 
 <!-- CDN dependencies -->
-<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" crossorigin></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" crossorigin></script>
@@ -309,11 +309,11 @@ function fuzzySearch(allItems, query) {
   const words = q.split(/\s+/).filter(w => w.length >= 2);
 
   function score(it) {
-    // Build search string directly — never from searchName which may carry extra
-    // colour/finish codes from old server deploys, causing false-positive matches
-    const nm = ([it.cat, it.item, it.name]
-      .filter(Boolean).join(' ')).toLowerCase();
-    const cd = (it.code || '').toLowerCase();
+    // Search string built directly from [cat,item,name] — never from searchName
+    // which may carry extra colour/finish codes causing false-positive matches.
+    // Use the pre-lowercased fields attached at load time when present (fast path).
+    const nm = (it._s != null) ? it._s : ([it.cat, it.item, it.name].filter(Boolean).join(' ')).toLowerCase();
+    const cd = (it._c != null) ? it._c : (it.code || '').toLowerCase();
 
     // S4: entire typed query is a substring of name or code
     if (nm.includes(q) || cd.includes(q)) return 100;
@@ -402,32 +402,36 @@ function itemUnitPrice(it) {
   const discPct = parseFloat(it.disc || '0') / 100;
   return (it.unitPrice > 0) ? it.unitPrice : (mrpVal > 0 ? Math.round(mrpVal * (1 - discPct)) : 0);
 }
-// ── Manual-order GST ──────────────────────────────────────────
-// A "Manual Order" bakes 18% GST into each item's price, so the per-unit price
-// and the line total already include tax and NO separate CGST/SGST is added at
-// the bottom (the GST/CGST/SGST rows are left empty on the total).
+// ── GST-inclusive pricing (MRP) ────────────────────────────────
+// Every price shown in the app is the MRP = list price (CPL) + 18% GST, baked
+// in once at the point of display. The GST is ALREADY inside the price, so it is
+// never added again on top: the order total is simply the sum of the MRP lines,
+// and CGST/SGST on the bill are BACK-CALCULATED out of that inclusive total (for
+// a valid tax breakup) — never added to it. Editing an item's price does not
+// re-apply GST; the entered value is treated as the final MRP.
 const GST_RATE = 0.18;
+// Per-unit MRP = the (possibly edited / discounted) list price with 18% GST in it.
 function gstInclUnit(it) { return Math.round(itemUnitPrice(it) * (1 + GST_RATE)); }
 function gstInclLine(it) { return gstInclUnit(it) * (Number(it.qty) || 0); }
 
 function orderTotals(o) {
   const items         = o.items || [];
-  const manual        = !!o.manualOrder;
-  // Manual: each line is already GST-inclusive. Normal: line total is pre-tax
-  // and GST is added below.
-  const itemsSubtotal = manual
-    ? items.reduce((s, i) => s + gstInclLine(i), 0)
-    : items.reduce((s, i) => s + (i.total || 0), 0);
+  // Each line is the GST-inclusive MRP × qty. The subtotal already includes GST.
+  const itemsSubtotal = items.reduce((s, i) => s + gstInclLine(i), 0);
   const orderDiscPct  = Math.max(0, parseFloat(o.orderDiscount) || 0) / 100;
   const orderDiscAmt  = rnd(itemsSubtotal * orderDiscPct);
-  const taxable       = itemsSubtotal - orderDiscAmt;
-  // Manual: tax is already inside the item prices → keep CGST/SGST empty.
-  const cgst          = manual ? 0 : rnd(taxable * 0.09);
-  const sgst          = manual ? 0 : rnd(taxable * 0.09);
-  const total         = manual ? taxable : (taxable + cgst + sgst);
+  // Total = MRP subtotal less any order-wide discount. GST is NOT added on top —
+  // it is already part of every MRP line.
+  const total         = itemsSubtotal - orderDiscAmt;
+  // Carve the 18% GST already contained in the total back out, so the bill can
+  // still show a CGST/SGST breakup without ever inflating the amount payable.
+  const taxable       = Math.round(total / (1 + GST_RATE));
+  const gstTotal      = total - taxable;
+  const cgst          = Math.round(gstTotal / 2);
+  const sgst          = gstTotal - cgst;
   const earnest       = Number(o.earnest) || 0;
   const balance       = total - earnest;
-  return { itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance, manual };
+  return { itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance, manual: !!o.manualOrder };
 }
 
 // ─── ROLE-BASED ACCESS ──────────────────────────────────────
@@ -931,22 +935,22 @@ function generatePDF(order, copyType) {
         doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...GR); doc.text(nm[1], tC.desc.x+1.5, y+9);
       }
     }
-    // MRP — the (possibly edited) list price per unit
-    const mrpV = it.mrp||it.cpl||0;
+    // MRP — the (possibly edited) list price per unit, shown WITH 18% GST in it.
+    const incl = (n) => Math.round((Number(n) || 0) * (1 + GST_RATE));
+    const mrpV = it.mrp||it.cpl||0;                       // pre-GST base (per unit, or line-gross for a collapsed family)
     const dPct = parseFloat(it.disc)||0;
     // Disc. Price — MRP after the per-item discount
-    const cplV = it.unitPrice>0?it.unitPrice:(mrpV>0?Math.round(mrpV*(1-dPct/100)):0);
+    const cplV = it.unitPrice>0?it.unitPrice:(mrpV>0?mrpV*(1-dPct/100):0);
+    const mrpShown = incl(mrpV);
     doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...INK);
-    rval(tC.mrp.x+tC.mrp.w-1.5, y+7, mrpV>0?mrpV.toLocaleString('en-IN'):'—');
+    rval(tC.mrp.x+tC.mrp.w-1.5, y+7, mrpShown>0?mrpShown.toLocaleString('en-IN'):'—');
     // Disc — per-item discount %
     doc.setFontSize(7.5); doc.setTextColor(...(dPct>0?DRED:GR));
     doc.text(dPct>0?dPct+'%':'—', tC.disc.x+tC.disc.w/2, y+7, {align:'center'});
-    // Manual orders: the Disc. Price + Total columns are shown GST-inclusive
-    // (18% baked into each item's price); normal orders stay pre-tax here and
-    // GST is added in the totals block below.
-    const manualPdf = !!order.manualOrder;
-    const cplShown  = manualPdf ? Math.round(cplV*(1+GST_RATE)) : cplV;
-    const totShown  = manualPdf ? Math.round(cplV*(1+GST_RATE))*(Number(it.qty)||0) : (it.total||0);
+    // Every price column is GST-inclusive (18% baked into each MRP). GST is never
+    // added on top; it is carved back out in the totals block only for the breakup.
+    const cplShown  = incl(cplV);
+    const totShown  = it._group ? incl(it.total) : gstInclLine(it);
     doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...INK);
     rval(tC.cpl.x+tC.cpl.w-1.5, y+7, cplShown>0?cplShown.toLocaleString('en-IN'):'—');
     doc.setFont('helvetica','bold'); doc.setTextColor(...INK);
@@ -956,17 +960,17 @@ function generatePDF(order, copyType) {
 
   // ── TOTALS + RECEIPT + SIGNATURE (final page only) ────────
   function drawTotalsBlock(y) {
-    // Manual orders already carry 18% GST inside each item's price, so the
-    // subtotal is GST-inclusive and the CGST/SGST rows are left empty.
-    const manualPdf = !!order.manualOrder;
-    const fRows = [[manualPdf ? 'TOTAL (incl. GST)' : 'TOTAL', inr(subtotal), false]];
+    // Every MRP already includes 18% GST, so the subtotal is GST-inclusive. The
+    // CGST/SGST rows are carved OUT of that inclusive amount (taxable + CGST +
+    // SGST = Total) — the GST is shown for the breakup but never added on top.
+    const fRows = [['Sub Total (incl. GST)', inr(subtotal), false]];
     if (orderDiscAmt > 0) {
       fRows.push(['Order Disc. @' + (orderDiscPct*100).toLocaleString('en-IN') + '%', '- ' + inr(orderDiscAmt), false]);
-      fRows.push([manualPdf ? 'Net Amt.' : 'Taxable Amt.', inr(taxable), false]);
     }
-    fRows.push(['CGST @ 9%',   manualPdf ? '' : inr(cgst),     false]);
-    fRows.push(['SGST @ 9%',   manualPdf ? '' : inr(sgst),     false]);
-    fRows.push(['Total Amt.',  inr(totalAmt), true ]);
+    fRows.push(['Taxable Value',  inr(taxable), false]);
+    fRows.push(['CGST @ 9%',   inr(cgst),     false]);
+    fRows.push(['SGST @ 9%',   inr(sgst),     false]);
+    fRows.push(['Total Amt. (incl. GST)',  inr(totalAmt), true ]);
     fRows.push(['Earnest Amt.',inr(earnest),  false]);
     fRows.push(['Balance Amt.',inr(balance),  true ]);
 
@@ -1783,39 +1787,60 @@ function SearchScreen({ctx}) {
   const hasPriceList = priceItems && priceItems.length > 0;
   const {priceSyncError} = ctx;
 
-  // Only use price list items — never fall back to stock items for ordering
-  const allItems = (() => {
+  // Only use price list items — never fall back to stock items for ordering.
+  // Memoised so it is built once per data sync, NOT on every keystroke, and each
+  // item carries a pre-lowercased search string so fuzzy matching stays cheap.
+  const allItems = React.useMemo(() => {
     if (!hasPriceList) return [];
     const stockMap = {};
     (items||[]).forEach(it => { stockMap[it.code] = it; });
     return priceItems.map(pi => {
       const si = stockMap[pi.code];
-      return si ? {...pi, stock:si.stock||[], mrp:si.mrp||pi.mrp||0, cpl:si.cpl||pi.cpl||0} : pi;
+      const it = si ? {...pi, stock:si.stock||[], mrp:si.mrp||pi.mrp||0, cpl:si.cpl||pi.cpl||0} : {...pi};
+      it._s = ([it.cat, it.item, it.name].filter(Boolean).join(' ')).toLowerCase();
+      it._c = (it.code || '').toLowerCase();
+      return it;
     });
-  })();
+  }, [priceItems, items, hasPriceList]);
 
-  // Categories come directly from it.cat (set by Price_Lists sheet column B)
-  const uniqueCats = [...new Set(allItems.map(i => i.cat).filter(Boolean))].sort();
+  // Categories + per-category counts, computed once per data change.
+  const uniqueCats = React.useMemo(() => [...new Set(allItems.map(i => i.cat).filter(Boolean))].sort(), [allItems]);
+  const catCounts  = React.useMemo(() => {
+    const m = {}; allItems.forEach(i => { if (i.cat) m[i.cat] = (m[i.cat]||0) + 1; }); return m;
+  }, [allItems]);
 
   React.useEffect(() => {
     const valid = ['all', ...uniqueCats];
     if (!valid.includes(cat)) setCat('all');
   }, [allItems.length]);
 
-  const CATS = [
+  const CATS = React.useMemo(() => [
     { key: 'all', label: 'All' + (allItems.length > 0 ? ' · ' + allItems.length : '') },
-    ...uniqueCats.map(c => ({ key: c, label: c + ' · ' + allItems.filter(i => i.cat === c).length })),
-  ];
+    ...uniqueCats.map(c => ({ key: c, label: c + ' · ' + (catCounts[c]||0) })),
+  ], [allItems.length, uniqueCats, catCounts]);
 
-  const bycat = cat === 'all' ? allItems : allItems.filter(i => i.cat === cat);
+  const bycat = React.useMemo(() => cat === 'all' ? allItems : allItems.filter(i => i.cat === cat), [allItems, cat]);
 
-  const {results: rawResults, mode: searchMode} = fuzzySearch(bycat, q);
-  // Show in-stock items first, then out-of-stock, then Made-To-Order. Stable
-  // within each tier so search relevance / browse order is preserved.
-  const filtered = rawResults
-    .map((it, i) => ({ it, i }))
-    .sort((a, b) => (availabilityTier(a.it) - availabilityTier(b.it)) || (a.i - b.i))
-    .map(x => x.it);
+  // Defer the query for the heavy filtering so each keystroke paints instantly
+  // (the input stays responsive; React runs the search in the background).
+  const deferredQ = React.useDeferredValue(q);
+
+  const {filtered, searchMode} = React.useMemo(() => {
+    const { results, mode } = fuzzySearch(bycat, deferredQ);
+    // Show in-stock items first, then out-of-stock, then Made-To-Order. Stable
+    // within each tier so search relevance / browse order is preserved.
+    const sorted = results
+      .map((it, i) => ({ it, i }))
+      .sort((a, b) => (availabilityTier(a.it) - availabilityTier(b.it)) || (a.i - b.i))
+      .map(x => x.it);
+    return { filtered: sorted, searchMode: mode };
+  }, [bycat, deferredQ]);
+
+  // Cap what we actually render so a broad browse / match never mounts thousands
+  // of rows (the cause of scroll + typing jank). Extras are one tap away by
+  // narrowing the search or category.
+  const RENDER_CAP = 80;
+  const shownItems = filtered.length > RENDER_CAP ? filtered.slice(0, RENDER_CAP) : filtered;
 
   function handleInput(e) { setQ(e.target.value); }
 
@@ -1979,14 +2004,16 @@ function SearchScreen({ctx}) {
           </div>
         )}
 
-        {filtered.map((it,fi)=>{
+        {shownItems.map((it,fi)=>{
           // Only warehouses that actually have availability are shown.
           const availStock = (it.stock||[]).filter(s=>s.q>0);
           const stockTotal = availStock.reduce((s,x)=>s+x.q,0);
           const hasStock   = (it.stock||[]).length > 0;
           const mto        = isMTOItem(it);
           const oos        = hasStock && stockTotal === 0 && !mto;
-          const cpl = Number(it.cpl) || Number(it.mrp) || 0;
+          const cplBase = Number(it.cpl) || Number(it.mrp) || 0;
+          // MRP shown to the user = list price (CPL) with 18% GST already added in.
+          const cpl = cplBase > 0 ? Math.round(cplBase * (1 + GST_RATE)) : 0;
           return (
             <div key={(it.code||it.name||'')+'|'+(it.sheet||'')+'|'+fi} style={{padding:'12px 18px',borderBottom:`1px solid ${T.line}`}}>
               <div style={{display:'flex',gap:10}}>
@@ -2016,10 +2043,11 @@ function SearchScreen({ctx}) {
                 {/* Price + Add */}
                 <div style={{flexShrink:0,textAlign:'right',display:'flex',flexDirection:'column',alignItems:'flex-end',gap:8,paddingLeft:6}}>
                   <div>
-                    <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.5,textAlign:'right'}}>CPL</div>
+                    <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.5,textAlign:'right'}}>MRP</div>
                     <div style={{fontFamily:T.mono,fontSize:14,fontWeight:700,color:cpl>0?T.ink:T.ink4}}>
                       {cpl > 0 ? '₹' + cpl.toLocaleString('en-IN') : '—'}
                     </div>
+                    {cpl > 0 && <div style={{fontSize:8,color:T.ink4,fontWeight:600,textAlign:'right',marginTop:1}}>incl. 18% GST</div>}
                   </div>
                   <button onClick={()=>addToOrder(it)} style={{height:32,padding:'0 12px',borderRadius:6,background:oos?T.warn:T.green,color:'#fff',border:'none',fontSize:13,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:4}}>
                     {Icon.plus('#fff',14)}{oos?'Book':'Add'}
@@ -2029,6 +2057,13 @@ function SearchScreen({ctx}) {
             </div>
           );
         })}
+
+        {/* More results exist than we render — nudge the user to narrow down. */}
+        {filtered.length>shownItems.length&&(
+          <div style={{padding:'12px 18px',textAlign:'center',fontSize:12,color:T.ink4,background:T.paper}}>
+            Showing first {shownItems.length} of {filtered.length} — {q?'refine your search':'pick a category or search'} to see the rest.
+          </div>
+        )}
 
         {/* Empty states */}
         {hasPriceList&&filtered.length===0&&q&&(
@@ -2080,7 +2115,8 @@ function OrderFormScreen({ctx}) {
   // Manager / Admin see cost + margin; Sales does not.
   const priv        = hasManagerAccess(user);
   const totalCost   = (o.items||[]).reduce((s,it)=>s+((Number(it.cpl)||Number(it.mrp)||0)*(it.qty||0)),0);
-  const totalMargin = itemsSubtotal - totalCost;
+  // Margin compares the pre-GST selling value (tax carved out) against pre-GST cost.
+  const totalMargin = taxable - totalCost;
 
   // A sofa (incl. Upmods modular sofa) or a modular wardrobe (Kalista /
   // Kreation X2 / X3) in the cart makes its measurements mandatory.
@@ -2394,14 +2430,14 @@ function OrderFormScreen({ctx}) {
         <SectionHead n="04" label={`Items · ${(o.items||[]).length}`} action="+ ADD ITEM" onAction={()=>nav('search')}/>
         <div style={{background:'#fff'}}>
           {(o.items||[]).map((it,i)=>{
-            const mrpVal   = it.mrp||it.cpl||0;
+            const mrpVal   = it.mrp||it.cpl||0;                 // pre-GST list price (base)
             const discPct  = parseFloat(it.disc||'0')/100;
-            const curPrice = (it.unitPrice>0) ? it.unitPrice : (mrpVal>0 ? Math.round(mrpVal*(1-discPct)) : 0);
-            // Manual orders: each item's price includes 18% GST — show the
-            // tax-inclusive unit price and line total on the item.
-            const manual   = !!o.manualOrder;
-            const gstUnit  = Math.round(curPrice*(1+GST_RATE));
-            const lineShown= manual ? gstUnit*it.qty : curPrice*it.qty;
+            const curPrice = (it.unitPrice>0) ? it.unitPrice : (mrpVal>0 ? mrpVal*(1-discPct) : 0);
+            // Every price shown includes 18% GST (the MRP). GST is baked in for
+            // display only — never re-applied — so the line total is just MRP × qty.
+            const mrpIncl  = Math.round(mrpVal*(1+GST_RATE));   // per-unit MRP (incl. GST)
+            const gstUnit  = gstInclUnit(it);                   // per-unit MRP after discount
+            const lineShown= gstInclLine(it);                   // line total (incl. GST)
             return (
             <div key={it.code+i} style={{padding:'11px 14px',borderBottom:`1px solid ${T.line}`}}>
               <div style={{display:'flex',gap:8,alignItems:'flex-start'}}>
@@ -2413,10 +2449,9 @@ function OrderFormScreen({ctx}) {
                     {it.discontinued&&<Pill tone="bad" size="sm">DISCONTINUED{it.discSince?' since '+it.discSince:''}</Pill>}
                   </div>
                   <div style={{fontSize:13,fontWeight:600,lineHeight:1.3}}>{it.name}</div>
-                  {discPct>0&&curPrice>0&&<div style={{fontSize:10,color:T.green,marginTop:2,fontWeight:700}}>Disc. price: ₹{curPrice.toLocaleString('en-IN')} /unit</div>}
-                  {manual&&curPrice>0&&<div style={{fontSize:10,color:T.ink2,marginTop:2,fontWeight:700}}>Incl. 18% GST: ₹{gstUnit.toLocaleString('en-IN')} /unit <span style={{color:T.ink4,fontWeight:600}}>(base ₹{curPrice.toLocaleString('en-IN')})</span></div>}
-                  {priv&&(()=>{const cplU=Number(it.cpl)||Number(it.mrp)||0;const m=curPrice-cplU;const mp=cplU>0?Math.round(m/cplU*100):0;return(
-                    <div style={{fontSize:10,color:T.ink4,marginTop:2}}>CPL: ₹{cplU.toLocaleString('en-IN')} · Margin: <b style={{color:m>=0?T.green:T.bad}}>₹{m.toLocaleString('en-IN')}{cplU>0?` (${mp}%)`:''}</b> <span style={{opacity:.7}}>· mgr only</span></div>
+                  {discPct>0&&gstUnit>0&&<div style={{fontSize:10,color:T.green,marginTop:2,fontWeight:700}}>Disc. MRP: ₹{gstUnit.toLocaleString('en-IN')} /unit <span style={{color:T.ink4,fontWeight:600}}>(incl. GST)</span></div>}
+                  {priv&&(()=>{const cplU=Number(it.cpl)||Number(it.mrp)||0;const sellEx=Math.round(curPrice);const m=sellEx-cplU;const mp=cplU>0?Math.round(m/cplU*100):0;return(
+                    <div style={{fontSize:10,color:T.ink4,marginTop:2}}>CPL: ₹{cplU.toLocaleString('en-IN')} · Margin: <b style={{color:m>=0?T.green:T.bad}}>₹{m.toLocaleString('en-IN')}{cplU>0?` (${mp}%)`:''}</b> <span style={{opacity:.7}}>· pre-GST · mgr only</span></div>
                   );})()}
                   <div style={{display:'flex',gap:8,marginTop:6,alignItems:'center',flexWrap:'wrap'}}>
                     <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>QTY</span>
@@ -2427,14 +2462,22 @@ function OrderFormScreen({ctx}) {
                   <div style={{display:'flex',gap:8,marginTop:6,alignItems:'center',flexWrap:'wrap'}}>
                     <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>MRP ₹</span>
                     <input
-                      value={mrpVal}
-                      onChange={e=>{const v=Number(e.target.value)||0;const up=Math.round(v*(1-discPct));setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,mrp:v,unitPrice:up,total:up*x.qty}:x)}));}}
+                      value={mrpIncl}
+                      onChange={e=>{
+                        // The user edits the GST-inclusive MRP. Store the pre-GST
+                        // list price so 18% GST is never re-added on top of the
+                        // number they typed — the MRP round-trips exactly.
+                        const vIncl=Number(e.target.value)||0;
+                        const base=vIncl/(1+GST_RATE);
+                        const up=base*(1-discPct);
+                        setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,mrp:base,unitPrice:up,total:up*x.qty}:x)}));
+                      }}
                       style={{width:72,border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 6px',fontFamily:T.mono,fontSize:13,fontWeight:700,textAlign:'right',color:T.ink}}
                     />
                     <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>DISC</span>
                     <input
                       value={it.disc||''}
-                      onChange={e=>{const v=e.target.value;const pct=parseFloat(v||0)/100;const newUp=Math.round(mrpVal*(1-pct));setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,disc:v,unitPrice:newUp,total:newUp*x.qty}:x)}));}}
+                      onChange={e=>{const v=e.target.value;const pct=parseFloat(v||0)/100;const newUp=mrpVal*(1-pct);setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,disc:v,unitPrice:newUp,total:newUp*x.qty}:x)}));}}
                       style={{width:46,border:`1px solid ${T.line}`,borderRadius:4,padding:'2px 6px',fontFamily:T.mono,fontSize:12,textAlign:'center'}}
                       placeholder="0%"
                     />
@@ -2460,7 +2503,7 @@ function OrderFormScreen({ctx}) {
                 </div>
                 <div style={{textAlign:'right',flexShrink:0}}>
                   <div style={{fontFamily:T.mono,fontSize:15,fontWeight:700}}>₹{lineShown.toLocaleString('en-IN')}</div>
-                  <div style={{fontSize:9,color:T.ink4,marginTop:1}}>×{it.qty} unit{it.qty>1?'s':''}{manual?' · incl. GST':''}</div>
+                  <div style={{fontSize:9,color:T.ink4,marginTop:1}}>×{it.qty} unit{it.qty>1?'s':''} · incl. GST</div>
                   <button onClick={()=>removeItem(i)} style={{marginTop:8,fontSize:11,color:T.bad,background:'none',border:'none',cursor:'pointer',fontWeight:600}}>REMOVE</button>
                 </div>
               </div>
@@ -2523,11 +2566,12 @@ function OrderFormScreen({ctx}) {
         </div>
         <div style={{padding:'14px 14px 18px'}}>
           <div style={{background:T.ink,color:'#fff',borderRadius:8,padding:'14px 16px',fontFamily:T.mono}}>
-            <div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>Items subtotal{o.manualOrder?' (incl. GST)':''}</span><span>₹{itemsSubtotal.toLocaleString('en-IN')}</span></div>
+            <div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>Items subtotal (incl. GST)</span><span>₹{itemsSubtotal.toLocaleString('en-IN')}</span></div>
             {orderDiscAmt>0&&<div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13,color:'#ffd27a'}}><span>Order disc {(orderDiscPct*100).toLocaleString('en-IN')}%</span><span>−₹{orderDiscAmt.toLocaleString('en-IN')}</span></div>}
-            {/* Manual orders bake GST into each item price, so CGST/SGST are left empty here. */}
-            {[['CGST 9%',cgst],['SGST 9%',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>{k}</span><span>{o.manualOrder?'—':('₹'+v.toLocaleString('en-IN'))}</span></div>)}
-            {o.manualOrder&&<div style={{fontSize:10,color:'rgba(255,255,255,.55)',marginTop:2}}>18% GST is included in each item's price — no separate GST added.</div>}
+            {/* GST is already inside each MRP — CGST/SGST shown here are carved OUT
+                of the inclusive total (never added on top). */}
+            {[['CGST 9% (incl.)',cgst],['SGST 9% (incl.)',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13,color:'rgba(255,255,255,.6)'}}><span>{k}</span><span>₹{v.toLocaleString('en-IN')}</span></div>)}
+            <div style={{fontSize:10,color:'rgba(255,255,255,.55)',marginTop:2}}>18% GST is already included in every MRP — no separate GST is added.</div>
             <div style={{height:1,background:'rgba(255,255,255,.2)',margin:'8px 0'}}/>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:18,fontWeight:700}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginTop:4,color:'rgba(255,255,255,.6)'}}><span>Earnest</span><span>₹{(Number(o.earnest)||0).toLocaleString('en-IN')}</span></div>
@@ -2581,7 +2625,7 @@ function PDFPreviewScreen({ctx}) {
   }
 
   function whatsapp() {
-    const msg = `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${(o.manualOrder?gstInclLine(i):(i.total||0)).toLocaleString('en-IN')}`).join('\n')}\n\n*Total:* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${(Number(o.earnest)||0).toLocaleString('en-IN')}\n*Balance:* ₹${(total-(Number(o.earnest)||0)).toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
+    const msg = `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${gstInclLine(i).toLocaleString('en-IN')}`).join('\n')}\n\n*Total (incl. GST):* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${(Number(o.earnest)||0).toLocaleString('en-IN')}\n*Balance:* ₹${(total-(Number(o.earnest)||0)).toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
     const phone = (o.phone||'').replace(/\D/g,'');
     window.open('https://wa.me/91'+phone+'?text='+encodeURIComponent(msg),'_blank');
   }
@@ -2627,15 +2671,15 @@ function PDFPreviewScreen({ctx}) {
                   <span style={{fontFamily:T.mono,color:T.ink4}}>{i+1}</span>
                   <span><div style={{fontFamily:T.mono,fontSize:7,color:T.ink4}}>{it.code}</div><div style={{fontSize:9,fontWeight:600}}>{it.name}</div></span>
                   <span style={{fontFamily:T.mono,textAlign:'right'}}>{it.qty}</span>
-                  <span style={{fontFamily:T.mono,textAlign:'right',fontWeight:700}}>₹{(o.manualOrder?gstInclLine(it):(it.total||0)).toLocaleString('en-IN')}</span>
+                  <span style={{fontFamily:T.mono,textAlign:'right',fontWeight:700}}>₹{gstInclLine(it).toLocaleString('en-IN')}</span>
                 </div>
               ))}
             </div>
             <div style={{display:'flex',justifyContent:'flex-end',marginBottom:12}}>
               <div style={{width:170,fontFamily:T.mono,fontSize:9}}>
-                <div style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>Subtotal{o.manualOrder?' (incl. GST)':''}</span><span>₹{itemsSubtotal.toLocaleString('en-IN')}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>Subtotal (incl. GST)</span><span>₹{itemsSubtotal.toLocaleString('en-IN')}</span></div>
                 {orderDiscAmt>0&&<div style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.bad}}><span>Order disc {(orderDiscPct*100).toLocaleString('en-IN')}%</span><span>−₹{orderDiscAmt.toLocaleString('en-IN')}</span></div>}
-                {[['CGST 9%',cgst],['SGST 9%',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>{k}</span><span>{o.manualOrder?'—':('₹'+v.toLocaleString('en-IN'))}</span></div>)}
+                {[['CGST 9% (incl.)',cgst],['SGST 9% (incl.)',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>{k}</span><span>₹{v.toLocaleString('en-IN')}</span></div>)}
                 <div style={{borderTop:`1px solid ${T.ink}`,marginTop:2,paddingTop:3,display:'flex',justifyContent:'space-between',fontWeight:700,fontSize:11,color:T.ink}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
                 <div style={{display:'flex',justifyContent:'space-between',color:T.green,marginTop:1}}><span>Earnest</span><span>₹{(Number(o.earnest)||0).toLocaleString('en-IN')}</span></div>
               </div>

@@ -1,10 +1,10 @@
 // ============================================================
-// 4S Interiors Orders — Service Worker  v32
+// 4S Interiors Orders — Service Worker  v33
 // Cache-first for app shell & CDN assets.
 // Network-first for API calls to Google Apps Script.
 // ============================================================
 
-const CACHE  = '4s-orders-v32';
+const CACHE  = '4s-orders-v33';
 const SHELL  = [
   '/4s-orders/',
   '/4s-orders/index.html',
@@ -14,8 +14,8 @@ const SHELL  = [
 
 // CDN assets we want cached for offline use
 const CDN = [
-  'https://unpkg.com/react@18.3.1/umd/react.development.js',
-  'https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js',
+  'https://unpkg.com/react@18.3.1/umd/react.production.min.js',
+  'https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js',
   'https://unpkg.com/@babel/standalone@7.29.0/babel.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
