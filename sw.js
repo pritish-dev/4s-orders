@@ -1,10 +1,10 @@
 // ============================================================
-// 4S Interiors Orders — Service Worker  v33
+// 4S Interiors Orders — Service Worker  v34
 // Cache-first for app shell & CDN assets.
 // Network-first for API calls to Google Apps Script.
 // ============================================================
 
-const CACHE  = '4s-orders-v33';
+const CACHE  = '4s-orders-v34';
 const SHELL  = [
   '/4s-orders/',
   '/4s-orders/index.html',

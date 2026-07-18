@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '35';
+  var V = '36';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -524,6 +524,34 @@ function Field({label,value,onChange,mono,hint,required,action,onAction,multilin
         ? <div style={{fontSize:11,color:T.bad,marginTop:3,fontWeight:600}}>{error}</div>
         : (hint&&<div style={{fontSize:11,color:T.ink4,marginTop:3}}>{hint}</div>)}
     </div>
+  );
+}
+
+// A numeric text box that stays fully editable: it keeps its own draft string
+// so the field can be cleared completely (and typed fresh) instead of snapping
+// back to "0". The parsed value is pushed to the parent on every keystroke; the
+// box re-syncs from the parent's value only while it is NOT being edited (so a
+// change driven by a sibling field — e.g. discount ↔ price — updates it).
+function NumBox({value, onInput, style, placeholder}) {
+  const fmt = v => (v === null || v === undefined || v === '') ? '' : String(v);
+  const [txt, setTxt] = React.useState(() => fmt(value));
+  const editing = React.useRef(false);
+  React.useEffect(() => { if (!editing.current) setTxt(fmt(value)); }, [value]);
+  return (
+    <input
+      value={txt}
+      inputMode="decimal"
+      placeholder={placeholder}
+      onFocus={() => { editing.current = true; }}
+      onBlur={() => { editing.current = false; setTxt(fmt(value)); }}
+      onChange={e => {
+        const t = e.target.value;
+        if (!/^\d*\.?\d*$/.test(t)) return;   // digits + at most one dot; empty allowed
+        setTxt(t);
+        onInput(t);
+      }}
+      style={style}
+    />
   );
 }
 
@@ -2449,7 +2477,7 @@ function OrderFormScreen({ctx}) {
                     {it.discontinued&&<Pill tone="bad" size="sm">DISCONTINUED{it.discSince?' since '+it.discSince:''}</Pill>}
                   </div>
                   <div style={{fontSize:13,fontWeight:600,lineHeight:1.3}}>{it.name}</div>
-                  {discPct>0&&gstUnit>0&&<div style={{fontSize:10,color:T.green,marginTop:2,fontWeight:700}}>Disc. MRP: ₹{gstUnit.toLocaleString('en-IN')} /unit <span style={{color:T.ink4,fontWeight:600}}>(incl. GST)</span></div>}
+                  {discPct>0&&gstUnit>0&&<div style={{fontSize:10,color:T.green,marginTop:2,fontWeight:700}}>You save ₹{Math.max(0,mrpIncl-gstUnit).toLocaleString('en-IN')} /unit <span style={{color:T.ink4,fontWeight:600}}>vs MRP (incl. GST)</span></div>}
                   {priv&&(()=>{const cplU=Number(it.cpl)||Number(it.mrp)||0;const sellEx=Math.round(curPrice);const m=sellEx-cplU;const mp=cplU>0?Math.round(m/cplU*100):0;return(
                     <div style={{fontSize:10,color:T.ink4,marginTop:2}}>CPL: ₹{cplU.toLocaleString('en-IN')} · Margin: <b style={{color:m>=0?T.green:T.bad}}>₹{m.toLocaleString('en-IN')}{cplU>0?` (${mp}%)`:''}</b> <span style={{opacity:.7}}>· pre-GST · mgr only</span></div>
                   );})()}
@@ -2459,27 +2487,51 @@ function OrderFormScreen({ctx}) {
                     <span style={{fontFamily:T.mono,fontSize:14,fontWeight:700,minWidth:20,textAlign:'center'}}>{it.qty}</span>
                     <button onClick={()=>updateItemQty(i,1)} style={{width:24,height:24,borderRadius:4,border:`1px solid ${T.line}`,background:'#fff',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,color:T.ink}}>+</button>
                   </div>
+                  {/* MRP, Discount % and Selling Price are all editable and kept in
+                      sync both ways: change the discount and the price updates;
+                      type the selling price and the discount % is calculated. All
+                      prices are GST-inclusive; GST is never re-added on an edit. */}
                   <div style={{display:'flex',gap:8,marginTop:6,alignItems:'center',flexWrap:'wrap'}}>
                     <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>MRP ₹</span>
-                    <input
+                    <NumBox
                       value={mrpIncl}
-                      onChange={e=>{
-                        // The user edits the GST-inclusive MRP. Store the pre-GST
-                        // list price so 18% GST is never re-added on top of the
-                        // number they typed — the MRP round-trips exactly.
-                        const vIncl=Number(e.target.value)||0;
+                      onInput={t=>{
+                        // Edited in GST-inclusive terms; store the pre-GST list price
+                        // so 18% GST never gets re-added to what was typed. Discount %
+                        // is held fixed, so the selling price follows the new MRP.
+                        const vIncl=parseFloat(t)||0;
                         const base=vIncl/(1+GST_RATE);
                         const up=base*(1-discPct);
                         setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,mrp:base,unitPrice:up,total:up*x.qty}:x)}));
                       }}
-                      style={{width:72,border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 6px',fontFamily:T.mono,fontSize:13,fontWeight:700,textAlign:'right',color:T.ink}}
+                      style={{width:78,border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 6px',fontFamily:T.mono,fontSize:13,fontWeight:700,textAlign:'right',color:T.ink}}
                     />
-                    <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>DISC</span>
-                    <input
+                    <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>DISC %</span>
+                    <NumBox
                       value={it.disc||''}
-                      onChange={e=>{const v=e.target.value;const pct=parseFloat(v||0)/100;const newUp=mrpVal*(1-pct);setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,disc:v,unitPrice:newUp,total:newUp*x.qty}:x)}));}}
-                      style={{width:46,border:`1px solid ${T.line}`,borderRadius:4,padding:'2px 6px',fontFamily:T.mono,fontSize:12,textAlign:'center'}}
-                      placeholder="0%"
+                      placeholder="0"
+                      onInput={t=>{
+                        // Discount drives the selling price (MRP held fixed).
+                        const pct=parseFloat(t)||0;
+                        const newUp=mrpVal*(1-pct/100);
+                        setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,disc:t,unitPrice:newUp,total:newUp*x.qty}:x)}));
+                      }}
+                      style={{width:52,border:`1px solid ${T.line}`,borderRadius:4,padding:'2px 6px',fontFamily:T.mono,fontSize:12,textAlign:'center'}}
+                    />
+                    <span style={{fontSize:10,color:T.green,fontWeight:700}}>SELL ₹</span>
+                    <NumBox
+                      value={gstUnit}
+                      onInput={t=>{
+                        // Type the selling price → the discount % is auto-calculated
+                        // from the MRP (both GST-inclusive, so GST cancels out). The
+                        // entered price is stored as-is; GST is never added on top.
+                        const sellIncl=parseFloat(t)||0;
+                        const up=sellIncl/(1+GST_RATE);
+                        const discP=mrpIncl>0 ? (1 - sellIncl/mrpIncl)*100 : 0;
+                        const discStr=discP>0.0001 ? String(Math.round(discP*100)/100) : '';
+                        setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,unitPrice:up,disc:discStr,total:up*x.qty}:x)}));
+                      }}
+                      style={{width:78,border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 6px',fontFamily:T.mono,fontSize:13,fontWeight:700,textAlign:'right',color:T.green}}
                     />
                   </div>
                   {/* Scheme flags — saved to CRM "Disc Allowed"; NOT printed on the PDF */}
@@ -2556,7 +2608,7 @@ function OrderFormScreen({ctx}) {
           <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Order is Completed only when "Installation Done".</div>
         </div>
         <SectionHead n="07" label="Internal"/>
-        <Field label="Salesperson" value={o.salesExec||user?.name||''} onChange={v=>setF('salesExec',v)} mono/>
+        <Field label="Salesperson" value={o.salesExec??''} onChange={v=>setF('salesExec',v)} mono hint="Pre-filled with your name — edit or clear freely (your name is used if left blank)."/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Order Type <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <select value={o.orderType||'B2C'} onChange={e=>setF('orderType',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
