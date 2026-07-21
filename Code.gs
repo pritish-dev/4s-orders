@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v27';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v28';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -353,14 +353,46 @@ function handleStock() {
   if (cFree  < 0) cFree  = 5;
   if (cAvail < 0) cAvail = 6;
 
-  // Quantity to surface: available-for-commitment, else free stock.
-  var cQty = cAvail >= 0 ? cAvail : cFree;
+  // Quantity to surface: "Free Stock" is the availability the app reports,
+  // falling back to available-for-commitment only if the Free Stock column is
+  // absent from the sheet.
+  var cQty = cFree >= 0 ? cFree : cAvail;
+
+  // Only surface the LATEST stock snapshot. Sheets accumulate one block of rows
+  // per fetch (all sharing the same "Fetched On" date); older blocks stay in the
+  // tab. We keep just the rows whose fetch date equals today's date, and if
+  // today's data hasn't been pushed yet we fall back to the most recent date
+  // present so the app is never left empty.
+  var _tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+  function _dayKey(v) {
+    if (v === '' || v == null) return '';
+    var d = (v instanceof Date) ? v : new Date(v);
+    if (isNaN(d.getTime())) return '';
+    return Utilities.formatDate(d, _tz, 'yyyy-MM-dd');
+  }
+  var todayKey = Utilities.formatDate(new Date(), _tz, 'yyyy-MM-dd');
+
+  // First pass: discover the newest fetch date present, and whether today's
+  // snapshot exists at all.
+  var latestKey = '', hasToday = false;
+  if (cFetch >= 0) {
+    for (var j = 1; j < rows.length; j++) {
+      var k = _dayKey(rows[j][cFetch]);
+      if (!k) continue;
+      if (k > latestKey) latestKey = k;
+      if (k === todayKey) hasToday = true;
+    }
+  }
+  // Prefer today's snapshot; otherwise fall back to the most recent one present.
+  var wantKey = hasToday ? todayKey : latestKey;
 
   var byCode = {}, order = [], syncedAt = null;
   for (var i = 1; i < rows.length; i++) {
     var r    = rows[i];
     var code = String(r[cCode] || '').toUpperCase().trim();
     if (!code) continue;
+    // Skip rows that aren't part of the chosen (today / latest) snapshot.
+    if (cFetch >= 0 && wantKey && _dayKey(r[cFetch]) !== wantKey) continue;
     var wh   = String(r[cWh]   || '').toUpperCase().trim();
     var name = String(r[cName] || '').trim();
     var qty  = parseInt(String(r[cQty] != null ? r[cQty] : 0).replace(/[^\d-]/g, ''), 10) || 0;

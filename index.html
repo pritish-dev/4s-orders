@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '36';
+  var V = '37';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -1339,7 +1339,9 @@ function App() {
     }
   }, []);
 
-  // Load stock + price list on login (quietly — cached data shows instantly)
+  // Load stock + price list on login. Cached data shows instantly for a snappy
+  // UI, but we always pull FRESH stock + price data from the sheet on every
+  // login so each session starts fully in sync (stock = current-date snapshot).
   useEffect(() => {
     if (!user) return;
     const cached = localStorage.getItem('4s_items');
@@ -1348,7 +1350,7 @@ function App() {
     let hadCachedPL = false;
     if (cachedPL) try { const p = JSON.parse(cachedPL); setPriceItems(p); hadCachedPL = p.length > 0; } catch {}
     syncStock({ silent: true });
-    loadPriceListItems()
+    loadPriceListItems(true)
       .then(pi => {
         if (pi.length > 0) {
           setPriceItems(pi);
@@ -2158,8 +2160,17 @@ function OrderFormScreen({ctx}) {
   const PURCHASING = ['New Home','Renovation','Rented Home','Other'];
   const LIFT_TYPES = ['Standard Lift','Goods Lift','Service Lift'];
 
-  // Staircase measurements are only needed for a SOFA when there is NO lift.
-  const needStaircase = hasSofa && o.liftAvailable==='No';
+  // A ground-floor delivery needs no staircase carry, so its measurements are
+  // never required. Treat FLOOR values of 0 / G / GF / "Ground floor" /
+  // "Groundfloor" (any spacing/casing) as ground floor.
+  const isGroundFloor = (() => {
+    const f = String(o.floor||'').toLowerCase().replace(/\s+/g,'');
+    return f==='0' || f==='g' || f==='gf' || f==='groundfloor' || f==='ground';
+  })();
+
+  // Staircase measurements are only needed for a SOFA when there is NO lift AND
+  // the delivery is above the ground floor.
+  const needStaircase = hasSofa && o.liftAvailable==='No' && !isGroundFloor;
 
   // ── Multi-block measurement state ──────────────────────────────────────
   // Normalise older orders (single wardrobe scalars) into the wardrobes[] /
