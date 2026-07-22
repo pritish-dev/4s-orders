@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '37';
+  var V = '38';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -695,6 +695,20 @@ function generatePDF(order, copyType) {
   const rval= (x,y,t,sz=8,bold=false,clr=INK) => { doc.setFont('helvetica',bold?'bold':'normal'); doc.setFontSize(sz); doc.setTextColor(...clr); doc.text(String(t||''),x,y,{align:'right'}); };
   // fit1: clamps text to one line within width w
   const fit1= (t,w,sz=8) => { doc.setFontSize(sz); return (doc.splitTextToSize(String(t||''),w)[0])||''; };
+  // drawFull: renders the ENTIRE string centred at (cx,cy), shrinking the font
+  // until it fits width w so nothing is ever truncated (item codes must always
+  // appear in full). Only if the string is still too wide at the minimum size
+  // does it wrap onto multiple lines, centred vertically about cy.
+  const drawFull = (t, cx, cy, w, sz=7, min=4) => {
+    t = String(t||''); if (!t) return;
+    doc.setFont('helvetica','normal'); doc.setFontSize(sz);
+    while (sz > min && doc.getTextWidth(t) > w) { sz -= 0.25; doc.setFontSize(sz); }
+    if (doc.getTextWidth(t) <= w) { doc.text(t, cx, cy, {align:'center'}); return; }
+    const lines = doc.splitTextToSize(t, w);
+    const lh = sz * 0.4;
+    const sy = cy - (lines.length - 1) * lh / 2;
+    lines.forEach((ln,i) => doc.text(ln, cx, sy + i*lh, {align:'center'}));
+  };
   // Use 'Rs.' instead of Rs symbol — jsPDF Helvetica is Latin-1 only,
   // the Unicode rupee glyph (U+20B9) produces wrong metrics and overflows.
   const inr = (n) => 'Rs.' + n.toLocaleString('en-IN');
@@ -925,7 +939,9 @@ function generatePDF(order, copyType) {
     brd(ml,y,cw,h);
     Object.values(tC).forEach(c=>vln(c.x+c.w,y,y+h));
     doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...INK);
-    doc.text(fit1(it.code||'',tC.code.w-2,7), tC.code.x+tC.code.w/2, y+7, {align:'center'});
+    // Full item code, never truncated — shrinks/wraps to fit the column.
+    drawFull(it.code||'', tC.code.x+tC.code.w/2, y+7, tC.code.w-2, 7);
+    doc.setFontSize(7);
     doc.text(String(it.qty), tC.qty.x+tC.qty.w/2, y+7, {align:'center'});
     if (it._group && it._children && it._children.length) {
       // Family heading, then every underlying item + its code listed below it.
