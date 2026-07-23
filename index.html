@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '40';
+  var V = '41';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -429,7 +429,14 @@ function orderTotals(o) {
   const gstTotal      = total - taxable;
   const cgst          = Math.round(gstTotal / 2);
   const sgst          = gstTotal - cgst;
-  const earnest       = Number(o.earnest) || 0;
+  // MRPs are GST-inclusive and every line is rounded to the whole rupee, so a
+  // "paid in full" amount can land a rupee or two under the rounded total. Treat
+  // a residual of up to ₹2 as fully paid so the customer who paid the whole
+  // amount never sees the received amount short by a rupee or a phantom balance.
+  const earnestRaw    = Number(o.earnest) || 0;
+  const balanceRaw    = total - earnestRaw;
+  const paidInFull    = earnestRaw > 0 && balanceRaw > 0 && balanceRaw <= 2;
+  const earnest       = paidInFull ? total : earnestRaw;
   const balance       = total - earnest;
   return { itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance, manual: !!o.manualOrder };
 }
@@ -2175,7 +2182,7 @@ function OrderFormScreen({ctx}) {
     if(ok){ setOrder(BLANK_ORDER()); nav('history'); }
   }
   const setF = (k,v) => setOrder(prev=>({...prev,[k]:v}));
-  const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, balance} = orderTotals(o);
+  const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance} = orderTotals(o);
 
   // Manager / Admin see cost + margin; Sales does not.
   const priv        = hasManagerAccess(user);
@@ -2747,7 +2754,7 @@ function OrderFormScreen({ctx}) {
             <div style={{fontSize:10,color:'rgba(255,255,255,.55)',marginTop:2}}>18% GST is already included in every MRP — no separate GST is added.</div>
             <div style={{height:1,background:'rgba(255,255,255,.2)',margin:'8px 0'}}/>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:18,fontWeight:700}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
-            <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginTop:4,color:'rgba(255,255,255,.6)'}}><span>Earnest</span><span>₹{(Number(o.earnest)||0).toLocaleString('en-IN')}</span></div>
+            <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginTop:4,color:'rgba(255,255,255,.6)'}}><span>Earnest</span><span>₹{earnest.toLocaleString('en-IN')}</span></div>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:15,fontWeight:700,color:balance<0?'#ff8a80':'#ffd27a',marginTop:2}}><span>{balance<0?'Overpaid':'Balance'}</span><span>₹{Math.abs(balance).toLocaleString('en-IN')}</span></div>
             {priv&&(
               <>
@@ -2773,7 +2780,7 @@ function OrderFormScreen({ctx}) {
 function PDFPreviewScreen({ctx}) {
   const {order,nav,back} = ctx;
   const o = order;
-  const {itemsSubtotal, orderDiscPct, orderDiscAmt, cgst, sgst, total} = orderTotals(o);
+  const {itemsSubtotal, orderDiscPct, orderDiscAmt, cgst, sgst, total, earnest, balance} = orderTotals(o);
   const qrRef = useRef(null);
 
   useEffect(()=>{
@@ -2798,7 +2805,7 @@ function PDFPreviewScreen({ctx}) {
   }
 
   function whatsapp() {
-    const msg = `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${gstInclLine(i).toLocaleString('en-IN')}`).join('\n')}\n\n*Total (incl. GST):* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${(Number(o.earnest)||0).toLocaleString('en-IN')}\n*Balance:* ₹${(total-(Number(o.earnest)||0)).toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
+    const msg = `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${gstInclLine(i).toLocaleString('en-IN')}`).join('\n')}\n\n*Total (incl. GST):* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${earnest.toLocaleString('en-IN')}\n*Balance:* ₹${balance.toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
     const phone = (o.phone||'').replace(/\D/g,'');
     window.open('https://wa.me/91'+phone+'?text='+encodeURIComponent(msg),'_blank');
   }
@@ -2854,7 +2861,7 @@ function PDFPreviewScreen({ctx}) {
                 {orderDiscAmt>0&&<div style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.bad}}><span>Order disc {(orderDiscPct*100).toLocaleString('en-IN')}%</span><span>−₹{orderDiscAmt.toLocaleString('en-IN')}</span></div>}
                 {[['CGST 9% (incl.)',cgst],['SGST 9% (incl.)',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>{k}</span><span>₹{v.toLocaleString('en-IN')}</span></div>)}
                 <div style={{borderTop:`1px solid ${T.ink}`,marginTop:2,paddingTop:3,display:'flex',justifyContent:'space-between',fontWeight:700,fontSize:11,color:T.ink}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
-                <div style={{display:'flex',justifyContent:'space-between',color:T.green,marginTop:1}}><span>Earnest</span><span>₹{(Number(o.earnest)||0).toLocaleString('en-IN')}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between',color:T.green,marginTop:1}}><span>Earnest</span><span>₹{earnest.toLocaleString('en-IN')}</span></div>
               </div>
             </div>
             <div style={{padding:'10px 10px',background:T.greenSoft,border:`1px solid ${T.greenLine}`,borderRadius:4,display:'flex',alignItems:'center',gap:12}}>
