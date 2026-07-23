@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '48';
+  var V = '49';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -2358,22 +2358,21 @@ function OrderFormScreen({ctx}) {
     });
   },[o.no]);
 
-  // Pre-fill the Receipt No for a brand-new normal booking with the exact next
-  // number in sequence (1, 2, 3 …), so it shows in the "Order No" preview and on
-  // the PDF straight away — the user no longer has to save first to see it. The
-  // number is fetched from the backend (which reads the live sheet and skips
-  // manual orders) so it is always correct and never depends on a possibly
-  // empty/stale client-side order list; it falls back to a local estimate only if
-  // the backend is unreachable. The backend re-derives on save, so it stays the
-  // source of truth. Manual orders start blank (typed in from the paper order).
+  // Pre-fill the Receipt No preview for a brand-new normal booking with the next
+  // app-order serial (1, 2, 3 …), so it shows in the "Order No" box and on the PDF
+  // straight away. The number is a PEEK at the backend's stored serial counter —
+  // authoritative and independent of any sheet data, so no big/garbage value can
+  // appear. It's provisional until save: the backend atomically allocates the real
+  // serial when the order is saved. When offline we simply leave it blank (the box
+  // shows "…") rather than guess — the correct number is stamped on sync. Manual
+  // orders start blank (typed in from the paper order).
   React.useEffect(()=>{
     if(o.no || o.manualOrder) return;
     if(o.orderFormReceiptNo && String(o.orderFormReceiptNo).trim()) return;
     let cancelled=false;
     (async()=>{
-      let n = await ctx.getNextReceipt();
-      if(cancelled) return;
-      if(n==null) n = nextReceiptNo(ctx.orders);   // offline fallback
+      const n = await ctx.getNextReceipt();
+      if(cancelled || n==null) return;   // offline / unreachable → leave blank, stamped on save
       setOrder(prev=> (prev.no || prev.manualOrder || (prev.orderFormReceiptNo && String(prev.orderFormReceiptNo).trim()))
         ? prev
         : {...prev, orderFormReceiptNo:String(n)});
