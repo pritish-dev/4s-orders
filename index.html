@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '43';
+  var V = '44';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -2285,11 +2285,13 @@ function OrderFormScreen({ctx}) {
   },[o.no]);
 
   // Pre-fill the Receipt No for a brand-new normal booking with the next number in
-  // sequence (1, 2, 3 …). The field stays editable, so the salesperson can change
-  // it; manual orders start blank and are typed in from the paper order.
+  // sequence (1, 2, 3 …). This is only a suggestion — the backend re-derives the
+  // authoritative number on save (unless the user hand-edits it, which flips
+  // receiptAuto to false). The field stays editable; manual orders start blank and
+  // are typed in from the paper order.
   React.useEffect(()=>{
     if(!o.no && !o.manualOrder && !String(o.orderFormReceiptNo||'').trim()){
-      setF('orderFormReceiptNo', String(nextReceiptNo(ctx.orders)));
+      setOrder(prev=>({...prev, orderFormReceiptNo:String(nextReceiptNo(ctx.orders)), receiptAuto:true}));
     }
   },[o.no, o.manualOrder]);
 
@@ -2753,7 +2755,7 @@ function OrderFormScreen({ctx}) {
         <SectionHead n="05" label="Commercials"/>
         <Field label="Additional Order Discount %" value={o.orderDiscount} onChange={v=>setF('orderDiscount',v.replace(/[^\d.]/g,''))} mono type="number" hint="Extra discount on the whole order (on top of per-item discounts). Shown on the PDF."/>
         <Field label="SI No" value={o.slNo} onChange={v=>setF('slNo',v)} mono required hint="Mandatory · the order-form SI number · printed as the Sl part of the PDF's Order No. (Sl / Receipt)"/>
-        <Field label="Receipt No" value={o.orderFormReceiptNo} onChange={v=>setF('orderFormReceiptNo',v.replace(/[^\d]/g,''))} mono required type="tel" hint={o.manualOrder?"Manual order — enter the receipt number from the paper order form":"Auto-incremented (1, 2, 3 …) — edit if you need a different number"}/>
+        <Field label="Receipt No" value={o.orderFormReceiptNo} onChange={v=>setOrder(prev=>({...prev,orderFormReceiptNo:v.replace(/[^\d]/g,''),receiptAuto:false}))} mono required type="tel" hint={o.manualOrder?"Manual order — enter the receipt number from the paper order form":"Auto-incremented (1, 2, 3 …) — edit if you need a different number"}/>
         <Field label="WON (Godrej SO No)" value={o.won} onChange={v=>setF('won',v)} mono hint="Godrej SO / WON number — can be added or updated any time"/>
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setOrder(prev=>({...prev,plannedDly:v,followUp:followUpFromDelivery(v)||prev.followUp}))} mono required type="date" hint="Follow-up auto-set to 2 days before this date"/>
         <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
@@ -3292,9 +3294,9 @@ function SettingsScreen({ctx}) {
                         ⚠ The deployed Apps Script did not report a version. Copy the latest Code.gs → save in Apps Script → Deploy → Manage deployments → Edit → New version.
                       </div>
                     )}
-                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v32' && (
+                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v33' && (
                       <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>
-                        Latest available is v32 — a redeploy is optional but recommended for the newest fixes.
+                        Latest available is v33 — a redeploy is optional but recommended for the newest fixes.
                       </div>
                     )}
                     {debugResult.discontinued && (

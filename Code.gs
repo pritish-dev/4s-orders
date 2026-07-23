@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v32';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v33';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -1360,7 +1360,14 @@ function _writeOrderToCRM(o) {
   // both kinds. This runs when the field arrives blank; the app normally sends a
   // pre-filled, editable value derived the same way.
   var isManualOrder = /^(yes|true|1)$/i.test(String(o.manualOrder || ''));
-  if (!isManualOrder && !String(o.orderFormReceiptNo || '').trim()) {
+  // A brand-new order matches no existing rows. The app pre-fills the Receipt No,
+  // but the backend is the source of truth: for any NEW app order the user did not
+  // hand-edit (client sends receiptAuto=false only when they actually typed over
+  // it), re-derive the number here from the full, fresh sheet — so a stale or wrong
+  // value pre-filled by an out-of-date client is corrected. Blank always derives.
+  var isNewOrder     = !incomingOrder && !matchRows.length;
+  var userSetReceipt = String(o.receiptAuto) === 'false';
+  if (!isManualOrder && (!String(o.orderFormReceiptNo || '').trim() || (isNewOrder && !userSetReceipt))) {
     var maxRcpt = 0;
     if (cRcpt >= 0) for (var rr = 0; rr < data.length; rr++) {
       // Skip manual-order rows — only app bookings advance the receipt counter.
