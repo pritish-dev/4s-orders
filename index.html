@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '47';
+  var V = '48';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -2358,6 +2358,29 @@ function OrderFormScreen({ctx}) {
     });
   },[o.no]);
 
+  // Pre-fill the Receipt No for a brand-new normal booking with the exact next
+  // number in sequence (1, 2, 3 …), so it shows in the "Order No" preview and on
+  // the PDF straight away — the user no longer has to save first to see it. The
+  // number is fetched from the backend (which reads the live sheet and skips
+  // manual orders) so it is always correct and never depends on a possibly
+  // empty/stale client-side order list; it falls back to a local estimate only if
+  // the backend is unreachable. The backend re-derives on save, so it stays the
+  // source of truth. Manual orders start blank (typed in from the paper order).
+  React.useEffect(()=>{
+    if(o.no || o.manualOrder) return;
+    if(o.orderFormReceiptNo && String(o.orderFormReceiptNo).trim()) return;
+    let cancelled=false;
+    (async()=>{
+      let n = await ctx.getNextReceipt();
+      if(cancelled) return;
+      if(n==null) n = nextReceiptNo(ctx.orders);   // offline fallback
+      setOrder(prev=> (prev.no || prev.manualOrder || (prev.orderFormReceiptNo && String(prev.orderFormReceiptNo).trim()))
+        ? prev
+        : {...prev, orderFormReceiptNo:String(n)});
+    })();
+    return ()=>{ cancelled=true; };
+  },[o.no, o.manualOrder]);
+
   const liftTypes = Array.isArray(o.liftTypes) ? o.liftTypes : [];
   const wardrobes = Array.isArray(o.wardrobes) ? o.wardrobes : [];
   const rooms     = Array.isArray(o.rooms)     ? o.rooms     : [];
@@ -2830,8 +2853,8 @@ function OrderFormScreen({ctx}) {
           ? <Field label="Receipt No" value={o.orderFormReceiptNo} onChange={v=>setF('orderFormReceiptNo',v.replace(/[^\d]/g,''))} mono required type="tel" hint="Manual order — enter the receipt number from the paper order form"/>
           : <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
               <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:3}}>Order No</div>
-              <div style={{fontSize:14,fontFamily:T.mono,fontWeight:600,color:T.ink3}}>{(o.slNo&&String(o.slNo).trim())?String(o.slNo).trim():'SI No'} / <span style={{color:T.green}}>#</span></div>
-              <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Auto-generated on save as <b>SI No / Receipt No</b> — the Receipt No is the next app-booking number, taken from the sheet.</div>
+              <div style={{fontSize:14,fontFamily:T.mono,fontWeight:600,color:T.ink3}}>{(o.slNo&&String(o.slNo).trim())?String(o.slNo).trim():'SI No'} / {(o.orderFormReceiptNo&&String(o.orderFormReceiptNo).trim())?<span style={{color:T.green}}>{String(o.orderFormReceiptNo).trim()}</span>:<span style={{color:T.ink4}}>…</span>}</div>
+              <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Auto-assigned as <b>SI No / Receipt No</b> — the Receipt No is the next app-booking number, taken from the sheet. Confirmed on save.</div>
             </div>}
         <Field label="WON (Godrej SO No)" value={o.won} onChange={v=>setF('won',v)} mono hint="Godrej SO / WON number — can be added or updated any time"/>
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setOrder(prev=>({...prev,plannedDly:v,followUp:followUpFromDelivery(v)||prev.followUp}))} mono required type="date" hint="Follow-up auto-set to 2 days before this date"/>
