@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '38';
+  var V = '39';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -680,7 +680,7 @@ function generatePDF(order, copyType) {
 
   // Order number: <Sl No>/<Receipt No> in red
   const slNo     = order.slNo||order.internalNo||'—';
-  const rcptNo   = order.orderFormReceiptNo || order.receiptNo || '—';
+  const rcptNo   = order.orderFormReceiptNo || order.internalNo || '—';
   const orderRef = slNo + ' / ' + rcptNo;
   const oDate    = order.date||new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'2-digit',year:'numeric'});
 
@@ -1187,8 +1187,12 @@ const BLANK_ORDER = () => ({
   customerCode:'', poRef:'', source:'',
   orderDiscount:'', plannedDly:'', installNote:'',
   paymentMode:'', earnest:'',
-  // Order Form Receipt No — printed as the "Receipt" part of the PDF's
-  // "Order No. (Sl / Receipt)" field.
+  // SI No — the order-form serial the salesperson enters (printed as the "Sl"
+  // part of the PDF's "Order No. (Sl / Receipt)" field).
+  slNo:'',
+  // Receipt No — auto-assigned in sequence (1, 2, 3 …) for normal bookings;
+  // hand-entered for manual (paper-replica) orders. Printed as the "Receipt"
+  // part of the PDF's "Order No. (Sl / Receipt)" field.
   orderFormReceiptNo:'',
   // Up to three money-receipt no + date pairs (updatable over time)
   receiptNo:'', moneyReceipts:[{no:'',date:''},{no:'',date:''},{no:'',date:''}],
@@ -2149,6 +2153,10 @@ function OrderFormScreen({ctx}) {
   const o = order;
   // Admins can permanently delete an already-saved order straight from the edit screen.
   const isAdmin = normRole(user?.role) === 'admin';
+  // Sales team can only EDIT a saved order's WON, money-receipt no/date and its
+  // delivery status. Admins may edit everything; a brand-new order (no o.no yet)
+  // is always fully editable so the booking can be filled in.
+  const restricted = !!o.no && !isAdmin;
   async function handleDelete() {
     if(!isAdmin || !o.no) return;
     if(!window.confirm('Permanently delete order '+(o.no||'')+' for '+(o.customer||'this customer')+'? This removes it from the CRM sheet and cannot be undone.')) return;
@@ -2255,8 +2263,13 @@ function OrderFormScreen({ctx}) {
     if(addrDiffer && (!o.contactPersonName||!o.contactNumber)) return ctx.showToast('Delivery Contact Person Name & Number are required (billing & delivery addresses differ)','bad');
     if(o.contactNumber && !isValidPhone(o.contactNumber)) return ctx.showToast('Contact number is not a valid mobile number','bad');
     if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item','bad');
-    // Order Form Receipt No is mandatory (printed as the Receipt part of the PDF order no).
-    if(!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim()) return ctx.showToast('Order Form Receipt No is required','bad');
+    // SI No is mandatory for every order (printed as the Sl part of the PDF order no).
+    if(!o.slNo||!String(o.slNo).trim()) return ctx.showToast('SI No is required','bad');
+    // Receipt No: manual orders must carry a hand-entered number; normal orders get
+    // one auto-assigned in sequence on save (nothing to validate here).
+    if(o.manualOrder && (!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim())) return ctx.showToast('Receipt No is required for a manual order','bad');
+    // Money Receipt No is mandatory on the order form.
+    if(!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim()) return ctx.showToast('Money Receipt No is required','bad');
     // Manual orders must carry the actual (settable) booking date.
     if(o.manualOrder && !o.date) return ctx.showToast('Set the Booking Date for the manual order','bad');
     // Mandatory customer-profiling fields (DOB & anniversary are now optional)
@@ -2305,6 +2318,65 @@ function OrderFormScreen({ctx}) {
     if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item to save a draft','bad');
     const saved = await doSaveOrder(withMeasurements({...o,salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)}));
     if(saved) { setOrder(saved); ctx.showToast('Draft saved — you can reopen it from Orders','ok'); }
+  }
+
+  // Sales-team restricted edit: only WON, money receipts + dates, and delivery
+  // status are editable. Everything else stays read-only (admins get the full form).
+  async function handleRestrictedSave(){
+    const saved = await doSaveOrder(withMeasurements({...o,salesExec:o.salesExec||user?.name||''}));
+    if(saved){ setOrder(saved); ctx.showToast('Order updated ✓','ok'); nav('history'); }
+  }
+  const setMRestricted=(i,field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:''},{no:'',date:''},{no:'',date:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; });
+  if(restricted){
+    return (
+      <div className="screen">
+        <div style={{display:'flex',alignItems:'center',gap:8,padding:'10px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,flexShrink:0}}>
+          <button onClick={back} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.home(T.ink2,18)}</button>
+          <div>
+            <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>Update order</div>
+            <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono}}>{o.no}</div>
+          </div>
+        </div>
+        <div className="scroll">
+          {/* Read-only order summary */}
+          <div style={{padding:'12px 14px',background:'#fff',borderBottom:`1px solid ${T.line}`}}>
+            <div style={{fontSize:16,fontWeight:700}}>{o.customer||'—'}</div>
+            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.phone||''} · {o.date||''}</div>
+            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>Order No (Sl / Receipt): {(o.slNo||o.internalNo||'—')} / {(o.orderFormReceiptNo||o.internalNo||'—')}</div>
+          </div>
+          <div style={{padding:'9px 14px',background:T.warnSoft,color:T.warn,fontSize:11,fontWeight:600,lineHeight:1.5}}>
+            Sales access — you can update the <b>WON (Godrej SO No)</b>, <b>Money Receipt No &amp; date</b> and the <b>Delivery Status</b>. Other fields can be changed by an admin.
+          </div>
+          <SectionHead n="01" label="Godrej SO / WON"/>
+          <Field label="WON (Godrej SO No)" value={o.won} onChange={v=>setF('won',v)} mono hint="Godrej SO / WON number — add or update it here"/>
+          <SectionHead n="02" label="Money Receipt"/>
+          {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:''}; return (
+            <div key={i} style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
+              <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
+                <Field label={`Money Receipt No ${i+1}`} value={mr.no} onChange={v=>setMRestricted(i,'no',v)} mono/>
+              </div>
+              <div style={{flex:1}}>
+                <Field label={`Date ${i+1}`} value={mr.date} onChange={v=>setMRestricted(i,'date',v)} mono type="date"/>
+              </div>
+            </div>
+          );})}
+          <SectionHead n="03" label="Delivery"/>
+          <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+            <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Delivery Status</div>
+            <select value={o.deliveryStatus||'Pending'} onChange={e=>setF('deliveryStatus',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+              {DELIVERY_STATUSES.map(s=><option key={s}>{s}</option>)}
+            </select>
+            <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Order is Completed only when "Installation Done".</div>
+          </div>
+          <div style={{height:20}}/>
+        </div>
+        <div style={{display:'flex',gap:8,padding:'10px 14px',background:'#fff',borderTop:`1px solid ${T.line}`,flexShrink:0}}>
+          <Btn onClick={()=>{ setOrder(BLANK_ORDER()); nav('history'); }}>Cancel</Btn>
+          <Btn primary full onClick={handleRestrictedSave}>Save Changes</Btn>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -2595,7 +2667,11 @@ function OrderFormScreen({ctx}) {
         </div>
         <SectionHead n="05" label="Commercials"/>
         <Field label="Additional Order Discount %" value={o.orderDiscount} onChange={v=>setF('orderDiscount',v.replace(/[^\d.]/g,''))} mono type="number" hint="Extra discount on the whole order (on top of per-item discounts). Shown on the PDF."/>
-        <Field label="Order Form Receipt No" value={o.orderFormReceiptNo} onChange={v=>setF('orderFormReceiptNo',v)} mono required hint="Mandatory · printed as the Receipt part of the PDF's Order No. (Sl / Receipt)"/>
+        <Field label="SI No" value={o.slNo} onChange={v=>setF('slNo',v)} mono required hint="Mandatory · the order-form SI number · printed as the Sl part of the PDF's Order No. (Sl / Receipt)"/>
+        {o.manualOrder
+          ? <Field label="Receipt No" value={o.orderFormReceiptNo} onChange={v=>setF('orderFormReceiptNo',v)} mono required hint="Manual order — enter the receipt number from the paper order form"/>
+          : <Field label="Receipt No" value={o.orderFormReceiptNo||o.internalNo||''} readOnly mono placeholder="Auto — assigned on save" hint="Auto-assigned in sequence (1, 2, 3 …) when the order is saved"/>}
+        <Field label="WON (Godrej SO No)" value={o.won} onChange={v=>setF('won',v)} mono hint="Godrej SO / WON number — can be added or updated any time"/>
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setOrder(prev=>({...prev,plannedDly:v,followUp:followUpFromDelivery(v)||prev.followUp}))} mono required type="date" hint="Follow-up auto-set to 2 days before this date"/>
         <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
         <SectionHead n="06" label="Payment"/>
@@ -3133,9 +3209,9 @@ function SettingsScreen({ctx}) {
                         ⚠ The deployed Apps Script did not report a version. Copy the latest Code.gs → save in Apps Script → Deploy → Manage deployments → Edit → New version.
                       </div>
                     )}
-                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v27' && (
+                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v29' && (
                       <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>
-                        Latest available is v27 — a redeploy is optional but recommended for the newest fixes.
+                        Latest available is v29 — a redeploy is optional but recommended for the newest fixes.
                       </div>
                     )}
                     {debugResult.discontinued && (

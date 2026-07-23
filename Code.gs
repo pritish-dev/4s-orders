@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v28';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v29';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -915,6 +915,7 @@ function handleOrders(p) {
   var cPlanned = colOf(['CUSTOMER DELIVERY DATE (TO BE)']);
   var cInstr   = colOf(['SPECIFIC INSTRUCTION','INSTALLATION NOTE','INSTALL NOTE']);
   var cOFRcpt  = colOf(['ORDER FORM RECEIPT NO','ORDER FORM RECEIPT NO.','ORDER FORM RECEIPT']);
+  var cSiNo    = colOf(['SI NO','SI NO.','ORDER SI NO','SI NUMBER']);
   var cManual  = colOf(['MANUAL ORDER','IS MANUAL ORDER','MANUAL']);
   var cOrdDisc = colOf(['ORDER DISCOUNT %','ADDITIONAL ORDER DISCOUNT %','ORDER DISCOUNT']);
   var cPay     = colOf(['PAYMENT MODE']);
@@ -1006,6 +1007,7 @@ function handleOrders(p) {
         plannedDly: dstr(r, cPlanned),
         installNote: sval(r, cInstr),
         orderFormReceiptNo: sval(r, cOFRcpt),
+        slNo: sval(r, cSiNo),
         manualOrder: /^(yes|true|1)$/i.test(sval(r, cManual)),
         orderDiscount: disc,
         paymentMode: sval(r, cPay),
@@ -1232,6 +1234,7 @@ var CRM_APP_COLUMNS = [
   ['MONEY RECEIPT DATE 3'],
   ['DELIVERY STATUS'],
   ['ORDER FORM RECEIPT NO', 'ORDER FORM RECEIPT NO.', 'ORDER FORM RECEIPT'],
+  ['SI NO', 'SI NO.'],
   ['MANUAL ORDER', 'IS MANUAL ORDER', 'MANUAL'],
 ];
 
@@ -1347,9 +1350,16 @@ function _writeOrderToCRM(o) {
     }
     internalNo = maxInt + 1;
   }
+  // Receipt No: manual orders carry a hand-entered receipt number; every other
+  // order gets one auto-assigned in sequence (1, 2, 3 …) = its internal number.
+  var isManualOrder = /^(yes|true|1)$/i.test(String(o.manualOrder || ''));
+  if (!isManualOrder && !String(o.orderFormReceiptNo || '').trim()) {
+    o.orderFormReceiptNo = String(internalNo);
+  }
+
   var orderNo = incomingOrder || matchedOrderNo || '';
   if (!orderNo) {
-    var receiptNo = String(o.receiptNo || '').trim();
+    var receiptNo = String(o.orderFormReceiptNo || o.receiptNo || '').trim();
     orderNo = receiptNo ? (internalNo + '/' + receiptNo) : String(internalNo);
   }
 
@@ -1506,6 +1516,7 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['MONEY RECEIPT DATE 3'], mr3.date || '');
     put(['DELIVERY STATUS'], o.deliveryStatus || 'Pending');
     put(['ORDER FORM RECEIPT NO','ORDER FORM RECEIPT NO.','ORDER FORM RECEIPT'], o.orderFormReceiptNo || '');
+    put(['SI NO', 'SI NO.'], o.slNo || '');
     // Manual order flag — replicated (paper) orders. Booking date is carried via
     // the DATE column; this flag lets the app keep its manual GST display on reopen.
     put(['MANUAL ORDER','IS MANUAL ORDER','MANUAL'], o.manualOrder ? 'Yes' : '');
