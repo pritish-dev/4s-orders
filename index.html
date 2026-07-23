@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '48';
+  var V = '50';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -2358,22 +2358,21 @@ function OrderFormScreen({ctx}) {
     });
   },[o.no]);
 
-  // Pre-fill the Receipt No for a brand-new normal booking with the exact next
-  // number in sequence (1, 2, 3 …), so it shows in the "Order No" preview and on
-  // the PDF straight away — the user no longer has to save first to see it. The
-  // number is fetched from the backend (which reads the live sheet and skips
-  // manual orders) so it is always correct and never depends on a possibly
-  // empty/stale client-side order list; it falls back to a local estimate only if
-  // the backend is unreachable. The backend re-derives on save, so it stays the
-  // source of truth. Manual orders start blank (typed in from the paper order).
+  // Pre-fill the Receipt No preview for a brand-new normal booking with the next
+  // app-order serial (1, 2, 3 …), so it shows in the "Order No" box and on the PDF
+  // straight away. The number is a PEEK at the backend's stored serial counter —
+  // authoritative and independent of any sheet data, so no big/garbage value can
+  // appear. It's provisional until save: the backend atomically allocates the real
+  // serial when the order is saved. When offline we simply leave it blank (the box
+  // shows "…") rather than guess — the correct number is stamped on sync. Manual
+  // orders start blank (typed in from the paper order).
   React.useEffect(()=>{
     if(o.no || o.manualOrder) return;
     if(o.orderFormReceiptNo && String(o.orderFormReceiptNo).trim()) return;
     let cancelled=false;
     (async()=>{
-      let n = await ctx.getNextReceipt();
-      if(cancelled) return;
-      if(n==null) n = nextReceiptNo(ctx.orders);   // offline fallback
+      const n = await ctx.getNextReceipt();
+      if(cancelled || n==null) return;   // offline / unreachable → leave blank, stamped on save
       setOrder(prev=> (prev.no || prev.manualOrder || (prev.orderFormReceiptNo && String(prev.orderFormReceiptNo).trim()))
         ? prev
         : {...prev, orderFormReceiptNo:String(n)});
@@ -3235,6 +3234,34 @@ function SettingsScreen({ctx}) {
   const [pinging,setPinging]       = useState(false);
   const [debugResult,setDebugResult] = useState(null);
   const [debugging,setDebugging]   = useState(false);
+  const isAdmin = normRole(user?.role) === 'admin';
+  // App-order serial counter (admin control)
+  const [serial,setSerial]         = useState(null);   // {lastIssued,nextWillBe}
+  const [serialInput,setSerialInput] = useState('');
+  const [serialSaving,setSerialSaving] = useState(false);
+
+  async function loadSerial() {
+    if (!isAdmin) return;
+    try {
+      const res = await apiGet('getAppSerial', {}, 12000);
+      if (res && res.ok) { setSerial(res); setSerialInput(String(res.nextWillBe)); }
+    } catch(e) {}
+  }
+  useEffect(() => { loadSerial(); }, []);
+
+  async function saveSerial() {
+    const next = parseInt(String(serialInput).replace(/[^\d]/g,''), 10);
+    if (!isFinite(next) || next < 1) { showToast('Enter the next order number (1 or more)','warn'); return; }
+    if (serial && next === serial.nextWillBe) { showToast('Already set to '+next); return; }
+    if (!window.confirm('Set the NEXT app order number to '+next+'?\n\nExisting orders keep their numbers; this only affects new orders from now on.')) return;
+    setSerialSaving(true);
+    try {
+      const res = await apiPost({ action:'setAppSerial', next, by: user?.code, updatedBy: user?.name });
+      if (res && res.ok) { setSerial(res); setSerialInput(String(res.nextWillBe)); showToast('Next order number set to '+res.nextWillBe+' ✓'); }
+      else showToast(res?.error || 'Could not update the counter','bad');
+    } catch(e) { showToast(e.message,'bad'); }
+    finally { setSerialSaving(false); }
+  }
 
   async function runDebug() {
     setDebugging(true); setDebugResult(null);
@@ -3328,6 +3355,34 @@ function SettingsScreen({ctx}) {
             </div>
           )}
         </div>
+
+        {/* ── App order serial counter (admin only) ── */}
+        {isAdmin && (
+          <div style={{padding:'0 18px 14px'}}>
+            <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>APP ORDER NUMBER (RECEIPT NO)</div>
+            <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'14px'}}>
+              <div style={{fontSize:12,color:T.ink3,lineHeight:1.6,marginBottom:10}}>
+                App-booked orders get an automatic serial (…, 3, 4, 5). Set the number the <b>next</b> order should get. Existing orders keep their numbers, and deleting an order does <b>not</b> roll this back — set it here after any test.
+              </div>
+              <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
+                <div style={{flex:1,padding:'10px 12px',background:T.paper,border:`1px solid ${T.line}`,borderRadius:6}}>
+                  <div style={{fontSize:9,fontWeight:700,color:T.ink4,letterSpacing:.8,textTransform:'uppercase'}}>Next order will be</div>
+                  <div style={{fontSize:20,fontWeight:800,fontFamily:T.mono,color:T.green,marginTop:2}}>{serial ? serial.nextWillBe : '…'}</div>
+                </div>
+                <div style={{flex:1,padding:'10px 12px',background:T.paper,border:`1px solid ${T.line}`,borderRadius:6}}>
+                  <div style={{fontSize:9,fontWeight:700,color:T.ink4,letterSpacing:.8,textTransform:'uppercase'}}>Last issued</div>
+                  <div style={{fontSize:20,fontWeight:800,fontFamily:T.mono,color:T.ink3,marginTop:2}}>{serial ? serial.lastIssued : '…'}</div>
+                </div>
+              </div>
+              <div style={{display:'flex',gap:8,alignItems:'stretch'}}>
+                <input value={serialInput} onChange={e=>setSerialInput(e.target.value.replace(/[^\d]/g,''))}
+                  type="tel" inputMode="numeric" placeholder="Next order number"
+                  style={{flex:1,border:`1px solid ${T.line}`,borderRadius:6,outline:'none',fontFamily:T.mono,fontSize:15,color:T.ink,background:'#fff',padding:'0 12px'}}/>
+                <Btn primary onClick={saveSerial} disabled={serialSaving}>{serialSaving?'Saving…':'Set number'}</Btn>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ── Price list sync card ── */}
         <div style={{padding:'0 18px 14px'}}>

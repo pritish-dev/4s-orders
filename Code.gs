@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v35';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v37';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -98,6 +98,7 @@ function doGet(e) {
       case 'priceList':      result = handlePriceList(p);       break;
       case 'orders':         result = handleOrders(p);          break;
       case 'nextReceipt':    result = handleNextReceipt();      break;
+      case 'getAppSerial':   result = handleGetAppSerial();     break;
       case 'debugPriceList': result = handleDebugPriceList();   break;
       default:               result = { ok: false, error: 'Unknown action: ' + (p.action || '(none)') };
     }
@@ -118,6 +119,7 @@ function doPost(e) {
       case 'updateWON':       result = handleUpdateWON(body);         break;
       case 'updateDelivery':  result = handleUpdateDelivery(body);    break;
       case 'deleteOrder':     result = handleDeleteOrder(body);       break;
+      case 'setAppSerial':    result = handleSetAppSerial(body);      break;
       default:                result = { ok: false, error: 'Unknown action: ' + body.action };
     }
   } catch(err) {
@@ -1294,35 +1296,84 @@ function handleSaveOrder(o) {
   return { ok: true, orderNo: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo, crmRows: res.rows };
 }
 
-// Next app Receipt No = the highest Receipt No among existing APP (non-manual)
-// orders + 1 — a running counter of app bookings that starts at 1. Manual-order
-// rows are skipped so their large paper receipt numbers never advance it. This is
-// the single source of truth used both to answer the app's "nextReceipt" request
-// and to stamp the number when an order is saved.
-function _nextAppReceiptNo(sh, colOf) {
-  var cRcpt    = colOf(['ORDER FORM RECEIPT NO', 'ORDER FORM RECEIPT NO.', 'ORDER FORM RECEIPT']);
-  var cManualC = colOf(['MANUAL ORDER', 'IS MANUAL ORDER', 'MANUAL']);
-  var lastRow  = sh.getLastRow();
-  if (lastRow < 2 || cRcpt < 0) return 1;
-  var data = sh.getRange(2, 1, lastRow - 1, sh.getLastColumn()).getValues();
-  var maxRcpt = 0;
-  for (var i = 0; i < data.length; i++) {
-    if (cManualC >= 0 && /^(yes|true|1)$/i.test(String(data[i][cManualC] || ''))) continue;
-    var rv = parseInt(String(data[i][cRcpt] || '').replace(/[^\d]/g, ''), 10);
-    if (isFinite(rv) && rv > maxRcpt) maxRcpt = rv;
-  }
-  return maxRcpt + 1;
+// ─── APP-ORDER SERIAL COUNTER ─────────────────────────────────────────────────
+// App-booked orders get a clean, gap-free serial (1, 2, 3 …). The number is a
+// STORED counter kept in Script Properties (APP_ORDER_SERIAL) — it is NOT derived
+// by scanning the sheet, so a stray large value in any receipt cell (e.g. a manual
+// paper receipt, or old junk) can never poison it. The counter is bumped atomically
+// (LockService) so two orders booked at the same instant can never collide.
+var APP_SERIAL_KEY  = 'APP_ORDER_SERIAL';
+var APP_SERIAL_SEED = 2;   // last real app order → the next one allocated is SEED + 1 (= 3)
+
+// The last serial actually issued. Defaults to APP_SERIAL_SEED until the first
+// allocation writes a value, so a fresh script needs no manual seeding.
+function _currentAppSerial() {
+  var raw = PropertiesService.getScriptProperties().getProperty(APP_SERIAL_KEY);
+  var n   = parseInt(raw, 10);
+  return (raw === null || raw === '' || isNaN(n)) ? APP_SERIAL_SEED : n;
 }
 
-// GET endpoint: the exact next app Receipt No, so the order form can pre-fill the
-// field with the correct value the moment it opens (no reliance on a possibly
-// empty/stale client-side order list).
+// Next number WITHOUT consuming it — for the order form's live preview only.
+function _peekAppSerial() { return _currentAppSerial() + 1; }
+
+// Atomically consume and return the next serial — the authoritative allocation,
+// called once when a brand-new app order is saved.
+function _allocateAppSerial() {
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(15000); } catch (e) {}   // best-effort; proceed if lock unavailable
+  try {
+    var next = _currentAppSerial() + 1;
+    PropertiesService.getScriptProperties().setProperty(APP_SERIAL_KEY, String(next));
+    return next;
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+}
+
+// Manual control — run from the Apps Script editor if you ever need to reset the
+// counter. setAppSerial(2) makes the NEXT saved order 3. Pass the LAST issued
+// serial; returns what the next order will be.
+function setAppSerial(lastIssued) {
+  var v = parseInt(lastIssued, 10);
+  if (isNaN(v) || v < 0) throw new Error('Pass a non-negative integer (the last issued serial).');
+  PropertiesService.getScriptProperties().setProperty(APP_SERIAL_KEY, String(v));
+  return { ok: true, lastIssued: v, nextWillBe: v + 1 };
+}
+
+// GET endpoint: the next app serial, so the order form can show it the moment it
+// opens. This is a PEEK (does not consume) — the real number is allocated on save.
 function handleNextReceipt() {
-  var sh;
-  try { sh = _openCRMSheet(); } catch (e) { return { ok: false, error: e.message }; }
-  try { _ensureCrmColumns(sh); } catch (e) {}
-  var C = _crmCols(sh);
-  return { ok: true, nextReceipt: _nextAppReceiptNo(sh, C.colOf), scriptVersion: SCRIPT_VERSION };
+  return { ok: true, nextReceipt: _peekAppSerial(), scriptVersion: SCRIPT_VERSION };
+}
+
+// GET endpoint: current counter state for the admin control in Settings.
+// lastIssued = the last serial handed out; nextWillBe = what the next order gets.
+function handleGetAppSerial() {
+  return { ok: true, lastIssued: _currentAppSerial(), nextWillBe: _peekAppSerial(), scriptVersion: SCRIPT_VERSION };
+}
+
+// POST endpoint (admin only): set the NEXT app-order number. body.next is what the
+// next saved order should become (e.g. 3); it is stored as lastIssued = next - 1.
+// Deleting a test order does NOT roll the counter back (serials are never reused),
+// so this is how an admin corrects the counter after testing or sets any desired
+// starting number. Guarded server-side by the caller's role.
+function handleSetAppSerial(body) {
+  var by = String((body && (body.by || body.updatedBy)) || '').trim();
+  if (_lookupRole(by) !== 'admin') {
+    return { ok: false, error: 'Only an admin can set the receipt counter.' };
+  }
+  var next = parseInt(body && body.next, 10);
+  if (isNaN(next) || next < 1) {
+    return { ok: false, error: 'Enter the next order number (a whole number of 1 or more).' };
+  }
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(15000); } catch (e) {}
+  try {
+    PropertiesService.getScriptProperties().setProperty(APP_SERIAL_KEY, String(next - 1));
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+  return { ok: true, lastIssued: next - 1, nextWillBe: next };
 }
 
 function _writeOrderToCRM(o) {
@@ -1374,10 +1425,11 @@ function _writeOrderToCRM(o) {
 
   // Identity: reuse the matched rows' internal number / order number so the order
   // keeps the same identifiers across edits; only a brand-new order gets fresh ones.
-  var matchedOrderNo = '', matchedInt = 0;
+  var matchedOrderNo = '', matchedInt = 0, matchedReceipt = '';
   if (matchRows.length) {
     if (cOrderNo >= 0) matchedOrderNo = String(data[matchRows[0]][cOrderNo] || '').trim();
     if (cIntNo   >= 0) matchedInt     = Number(data[matchRows[0]][cIntNo]) || 0;
+    if (cRcpt    >= 0) matchedReceipt = String(data[matchRows[0]][cRcpt] || '').trim();
   }
   var internalNo = incomingInt || matchedInt || 0;
   if (!internalNo) {
@@ -1387,23 +1439,22 @@ function _writeOrderToCRM(o) {
     }
     internalNo = maxInt + 1;
   }
-  // Receipt No: manual orders carry a hand-entered receipt number; every APP-booked
-  // order gets one auto-assigned in sequence (1, 2, 3 …) — a running counter of
-  // app bookings only. The next number is the highest Receipt No among existing
-  // APP orders + 1. Manual orders are SKIPPED so their large, unrelated receipt
-  // numbers (e.g. 6810, 45277) never advance the counter. The same sheet holds
-  // both kinds. This runs when the field arrives blank; the app normally sends a
-  // pre-filled, editable value derived the same way.
+  // Receipt No — the app-order serial (1, 2, 3 …). Source of truth is the stored
+  // counter (APP_ORDER_SERIAL via _allocateAppSerial), NOT a scan of the sheet, so
+  // a stray large value in any receipt cell can never poison it.
+  //  • Manual orders  → keep the hand-entered paper receipt number as-is.
+  //  • Existing order (re-save / edit) → keep the serial it already has; never
+  //    re-allocate. If a legacy app order somehow has none, allocate one now.
+  //  • Brand-new app order → atomically consume the next serial from the counter,
+  //    ignoring any provisional value the client pre-filled just for display.
   var isManualOrder = /^(yes|true|1)$/i.test(String(o.manualOrder || ''));
-  // A brand-new order matches no existing rows. The app pre-fills the Receipt No,
-  // but the backend is the source of truth: for any NEW app order the user did not
-  // hand-edit (client sends receiptAuto=false only when they actually typed over
-  // it), re-derive the number here from the full, fresh sheet — so a stale or wrong
-  // value pre-filled by an out-of-date client is corrected. Blank always derives.
-  var isNewOrder     = !incomingOrder && !matchRows.length;
-  var userSetReceipt = String(o.receiptAuto) === 'false';
-  if (!isManualOrder && (!String(o.orderFormReceiptNo || '').trim() || (isNewOrder && !userSetReceipt))) {
-    o.orderFormReceiptNo = String(_nextAppReceiptNo(sh, colOf));
+  var isExisting    = !!(incomingOrder || matchRows.length);
+  if (isManualOrder) {
+    // keep o.orderFormReceiptNo (typed from the paper order form)
+  } else if (isExisting) {
+    o.orderFormReceiptNo = matchedReceipt || (String(o.orderFormReceiptNo || '').trim() || String(_allocateAppSerial()));
+  } else {
+    o.orderFormReceiptNo = String(_allocateAppSerial());
   }
 
   // ORDER NO on the sheet mirrors what the PDF prints as "Order No. (Sl / Receipt)"
