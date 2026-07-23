@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '46';
+  var V = '47';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -704,6 +704,25 @@ function customerCopyItems(items) {
   return out;
 }
 
+// Warehouse tag shown (in red) beside each item on the SALES copy only:
+//   • available in ZBF11T  → "KB"   (also used when the item is out of stock)
+//   • available in ZBF34S  → "34S"
+// An item stocked in both warehouses shows both labels. The tag is computed from
+// the stock snapshot captured when the item was added to the order.
+function warehouseTagOf(stock) {
+  const arr = Array.isArray(stock) ? stock : [];
+  const qtyIn = (code) => arr
+    .filter(s => String(s.b || '').toUpperCase().indexOf(code) >= 0)
+    .reduce((t, s) => t + (Number(s.q) || 0), 0);
+  const in11T = qtyIn('11T') > 0;
+  const in34S = qtyIn('34S') > 0;
+  const labels = [];
+  if (in11T) labels.push('KB');
+  if (in34S) labels.push('34S');
+  if (!labels.length) labels.push('KB');   // out of stock / other warehouse → KB
+  return labels.join(', ');
+}
+
 // copyType: 'sales' (default, fully itemised) or 'customer' (modular families
 // collapsed to one line each).
 function generatePDF(order, copyType) {
@@ -763,8 +782,18 @@ function generatePDF(order, copyType) {
   // the Unicode rupee glyph (U+20B9) produces wrong metrics and overflows.
   const inr = (n) => 'Rs.' + n.toLocaleString('en-IN');
 
-  // Items table columns (MRP → per-item Disc → discounted price → total)
-  const tC = {
+  // Items table columns.
+  //  • Sales copy:    Item Code | Qty | Description | MRP | Disc | Disc. Price | Total
+  //  • Customer copy: Item Code | Qty | Description | Price | Total
+  //    (the customer copy never shows the MRP or the discount — only the net
+  //     price the customer actually pays, per the order form spec).
+  const tC = isCustomer ? {
+    code: { x:ml,        w:22, t:'Item Code' },
+    qty:  { x:ml+22,     w:10, t:'Qty' },
+    desc: { x:ml+32,     w:cw-32-26-24, t:'Product Description' },
+    price:{ x:ml+cw-50,  w:26, t:'Price (Rs.)' },
+    tot:  { x:ml+cw-24,  w:24, t:'Total (Rs.)' },
+  } : {
     code:{ x:ml,          w:22, t:'Item Code' },
     qty: { x:ml+22,       w:10, t:'Qty' },
     desc:{ x:ml+32,       w:cw-32-22-14-26-24, t:'Product Description' },
@@ -843,6 +872,10 @@ function generatePDF(order, copyType) {
     lbl(ox+1, y+3.5, 'Order No. (Sl / Receipt)');
     doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...DRED);
     doc.text(fit1(orderRef, c3w-3, 9), ox+1, y+12);
+    // Order booking date — the date the order was booked (current date for app
+    // bookings) — printed right beside the order number on both copies.
+    lbl(ox+1, y+17, 'Booking Date :');
+    val(ox+19, y+17, fit1(oDate, c3w-21, 7.5), 7.5, true);
     y += r1H;
 
     // Billing / Delivery header
@@ -876,6 +909,7 @@ function generatePDF(order, copyType) {
     doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
     const liftTypesTxt = Array.isArray(order.liftTypes) ? order.liftTypes.join(', ') : '';
     const delvText = [order.delivery||order.billing||'',
+      order.pincode  ? 'Pincode: '  + order.pincode  : '',
       order.floor    ? 'Floor: '    + order.floor    : '',
       order.landmark ? 'Landmark: ' + order.landmark : '',
       order.liftAvailable ? 'Lift: ' + order.liftAvailable + (liftTypesTxt ? ' (' + liftTypesTxt + ')' : '') : '']
@@ -905,11 +939,17 @@ function generatePDF(order, copyType) {
     r5('Reference no.',        order.poRef||'',        siH);
     y += siH;
 
-    // Salesman row
+    // Salesman + Payment Mode row (Payment Mode printed on both copies)
     const scH=7;
-    brd(ml,y,cw,scH); vln(ml+28,y,y+scH);
+    brd(ml,y,cw,scH);
+    const payX = ml+cw*0.58;
+    vln(ml+28,y,y+scH);          // after "Salesman Code" label
+    vln(payX,y,y+scH);           // divider before the payment-mode cell
+    vln(payX+26,y,y+scH);        // after "Payment Mode" label
     lbl(ml+2,y+5,'Salesman Code',7);
-    val(ml+30,y+5, fit1(order.salesExec||'',cw-32,7.5), 7.5);
+    val(ml+30,y+5, fit1(order.salesExec||'', payX-ml-32, 7.5), 7.5);
+    lbl(payX+2,y+5,'Payment Mode',7);
+    val(payX+28,y+5, fit1(order.paymentMode||'', ml+cw-(payX+28)-2, 7.5), 7.5, true);
     y += scH;
 
     // Site measurements row — printed on BOTH the customer and sales copies.
@@ -1010,8 +1050,22 @@ function generatePDF(order, copyType) {
       });
     } else {
       doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-      const nm = doc.splitTextToSize(it.name||'', tC.desc.w-2);
+      // Sales copy: red warehouse tag — "(KB)" / "(34S)" — shown right after the
+      // item name (never on the customer copy). KB = ZBF11T or out of stock,
+      // 34S = ZBF34S, from the stock snapshot taken when the item was added.
+      let whTagTxt = '', whTagW = 0;
+      if (!isCustomer) {
+        whTagTxt = '(' + (it.whTag || warehouseTagOf(it.stock)) + ')';
+        whTagW = doc.getTextWidth(whTagTxt) + 2;
+      }
+      const nm = doc.splitTextToSize(it.name||'', tC.desc.w-2-whTagW);
       doc.text(nm[0]||'', tC.desc.x+1.5, y+4.5);
+      if (whTagTxt) {
+        const nameW = doc.getTextWidth(nm[0]||'');
+        doc.setTextColor(...DRED);
+        doc.text(whTagTxt, tC.desc.x+1.5+nameW+2, y+4.5);
+        doc.setTextColor(...INK);
+      }
       // Sales copy: list every scheme applied to this item (Ageing / Sweetner /
       // Other), with the scheme code spelled out when "Other" is selected.
       let schemeLine = '';
@@ -1036,17 +1090,24 @@ function generatePDF(order, copyType) {
     // Disc. Price — MRP after the per-item discount
     const cplV = it.unitPrice>0?it.unitPrice:(mrpV>0?mrpV*(1-dPct/100):0);
     const mrpShown = incl(mrpV);
-    doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...INK);
-    rval(tC.mrp.x+tC.mrp.w-1.5, y+7, mrpShown>0?mrpShown.toLocaleString('en-IN'):'—');
-    // Disc — per-item discount %
-    doc.setFontSize(7.5); doc.setTextColor(...(dPct>0?DRED:GR));
-    doc.text(dPct>0?dPct+'%':'—', tC.disc.x+tC.disc.w/2, y+7, {align:'center'});
+    // The MRP and Disc columns exist on the SALES copy only — the customer copy
+    // shows just the net price the customer pays (no MRP, no discount %).
+    if (!isCustomer) {
+      doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...INK);
+      rval(tC.mrp.x+tC.mrp.w-1.5, y+7, mrpShown>0?mrpShown.toLocaleString('en-IN'):'—');
+      // Disc — per-item discount %
+      doc.setFontSize(7.5); doc.setTextColor(...(dPct>0?DRED:GR));
+      doc.text(dPct>0?dPct+'%':'—', tC.disc.x+tC.disc.w/2, y+7, {align:'center'});
+    }
     // Every price column is GST-inclusive (18% baked into each MRP). GST is never
     // added on top; it is carved back out in the totals block only for the breakup.
     const cplShown  = incl(cplV);
     const totShown  = it._group ? incl(it.total) : gstInclLine(it);
+    // Price column: "Disc. Price" on the sales copy, "Price (Rs.)" on the customer
+    // copy — both hold the net (post-discount) GST-inclusive unit price.
+    const priceCol  = isCustomer ? tC.price : tC.cpl;
     doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...INK);
-    rval(tC.cpl.x+tC.cpl.w-1.5, y+7, cplShown>0?cplShown.toLocaleString('en-IN'):'—');
+    rval(priceCol.x+priceCol.w-1.5, y+7, cplShown>0?cplShown.toLocaleString('en-IN'):'—');
     doc.setFont('helvetica','bold'); doc.setTextColor(...INK);
     rval(tC.tot.x+tC.tot.w-1.5, y+7, totShown.toLocaleString('en-IN'));
     return y + h;
@@ -1228,7 +1289,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const BLANK_ORDER = () => ({
   no:'', customer:'', phone:'', alt:'', email:'',
   gstNumber:'',
-  billing:'', delivery:'', floor:'', landmark:'', liftAvailable:'',
+  billing:'', delivery:'', pincode:'', floor:'', landmark:'', liftAvailable:'',
   // When a lift is available, which lift type(s): Standard / Goods / Service.
   liftTypes:[],
   // Contact details (for orders purchased on behalf of someone else) —
@@ -1991,6 +2052,9 @@ function SearchScreen({ctx}) {
         discontinued:!!item.discontinued, discSince:item.discSince||'',
         branch:((item.stock||[]).filter(s=>s.q>0)[0]||{}).b||'',
         inStock:(item.stock||[]).reduce((s,x)=>s+x.q,0),
+        // Warehouse tag snapshot for the sales-copy PDF: KB (ZBF11T / out of
+        // stock) or 34S (ZBF34S), captured at the moment the item is added.
+        whTag:warehouseTagOf(item.stock),
       }];
     }
     setOrder({...order,items:newItems});
@@ -2332,7 +2396,12 @@ function OrderFormScreen({ctx}) {
     if(o.alt && !isValidPhone(o.alt)) return ctx.showToast('Alt. phone is not a valid mobile number','bad');
     if(!o.email)    return ctx.showToast('E-mail is required','bad');
     if(!isValidEmail(o.email)) return ctx.showToast('Enter a valid email address','bad');
+    // Customer GST No. is mandatory (printed on both PDF copies).
+    if(!o.gstNumber||!String(o.gstNumber).trim()) return ctx.showToast('Customer GST No. is required','bad');
     if(!o.delivery) return ctx.showToast('Delivery address is required','bad');
+    // Pincode is a mandatory part of the delivery address.
+    if(!o.pincode||!String(o.pincode).trim()) return ctx.showToast('Pincode is required','bad');
+    if(!/^\d{6}$/.test(String(o.pincode).trim())) return ctx.showToast('Enter a valid 6-digit pincode','bad');
     if(!o.floor)    return ctx.showToast('Floor is required','bad');
     if(!o.landmark) return ctx.showToast('Nearest landmark is required','bad');
     if(!o.liftAvailable) return ctx.showToast('Select whether a lift is available','bad');
@@ -2348,6 +2417,8 @@ function OrderFormScreen({ctx}) {
     // Receipt No: app orders get it auto-assigned on save (next app-booking number),
     // so it's not entered here; a manual order must carry its paper receipt number.
     if(o.manualOrder && (!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim())) return ctx.showToast('Receipt No is required for a manual order','bad');
+    // Payment Mode is mandatory (printed on both PDF copies).
+    if(!o.paymentMode||!String(o.paymentMode).trim()) return ctx.showToast('Select the Payment Mode','bad');
     // Money Receipt No is mandatory on the order form.
     if(!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim()) return ctx.showToast('Money Receipt No is required','bad');
     // Manual orders must carry the actual (settable) booking date.
@@ -2490,7 +2561,7 @@ function OrderFormScreen({ctx}) {
         <Field label="Phone" value={o.phone} onChange={v=>setF('phone',v)} mono required type="tel" action="CALL" onAction={()=>o.phone&&window.open('tel:'+o.phone)} error={o.phone&&!isValidPhone(o.phone)?'Enter a valid 10-digit mobile number':undefined}/>
         <Field label="Alt. Phone" value={o.alt} onChange={v=>setF('alt',v)} mono type="tel" error={o.alt&&!isValidPhone(o.alt)?'Enter a valid 10-digit mobile number':undefined}/>
         <Field label="E-mail" value={o.email} onChange={v=>setF('email',v)} type="email" required hint="Mandatory · digital copy is sent here" error={o.email&&!isValidEmail(o.email)?'Enter a valid email address':undefined}/>
-        <Field label="Customer GST No." value={o.gstNumber} onChange={v=>setF('gstNumber',v.toUpperCase())} mono hint="Fill only if the customer wants a GST bill · printed on the PDF"/>
+        <Field label="Customer GST No." value={o.gstNumber} onChange={v=>setF('gstNumber',v.toUpperCase())} mono required hint="Mandatory · printed on the customer & sales copy of the PDF"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Lead Source <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <select value={o.awareness} onChange={e=>setF('awareness',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.awareness?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
@@ -2521,6 +2592,7 @@ function OrderFormScreen({ctx}) {
 
         <SectionHead n="02" label="Address"/>
         <Field label="Delivery Address" value={o.delivery} onChange={v=>setF('delivery',v)} multiline required/>
+        <Field label="Pincode" value={o.pincode} onChange={v=>setF('pincode',v.replace(/[^\d]/g,'').slice(0,6))} mono required type="tel" hint="Mandatory · delivery address pincode (printed on the PDF)" error={o.pincode&&!/^\d{6}$/.test(o.pincode)?'Enter a valid 6-digit pincode':undefined}/>
         <Field label="Floor" value={o.floor} onChange={v=>setF('floor',v)} required hint="Mandatory"/>
         <Field label="Nearest Landmark" value={o.landmark} onChange={v=>setF('landmark',v)} required hint="Mandatory"/>
         <Field label="Billing Address" value={o.billing} onChange={v=>setF('billing',v)} multiline action="SAME AS DELIVERY" onAction={()=>setF('billing',o.delivery)} hint="Leave blank or tap SAME AS DELIVERY if identical"/>
@@ -3299,9 +3371,9 @@ function SettingsScreen({ctx}) {
                         ⚠ The deployed Apps Script did not report a version. Copy the latest Code.gs → save in Apps Script → Deploy → Manage deployments → Edit → New version.
                       </div>
                     )}
-                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v34' && (
+                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v35' && (
                       <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>
-                        Latest available is v34 — a redeploy is optional but recommended for the newest fixes.
+                        Latest available is v35 — a redeploy is optional but recommended for the newest fixes.
                       </div>
                     )}
                     {debugResult.discontinued && (

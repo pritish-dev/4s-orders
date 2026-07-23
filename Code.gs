@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v34';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v35';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -889,6 +889,7 @@ function handleOrders(p) {
   var cGst     = colOf(['CUSTOMER GST NO','CUSTOMER GSTIN','GST NO','GSTIN']);
   var cBill    = colOf(['BILLING ADDRESS']);
   var cDelv    = colOf(['DELIVERY ADDRESS']);
+  var cPincode = colOf(['PINCODE','PIN CODE','DELIVERY PINCODE','DELIVERY PIN CODE']);
   var cFloor   = colOf(['FLOOR']);
   var cLandmk  = colOf(['LANDMARK']);
   var cLiftAv  = colOf(['LIFT AVAILABLE','LIFT AVAILABLE?']);
@@ -989,6 +990,7 @@ function handleOrders(p) {
         gstNumber: sval(r, cGst),
         billing: sval(r, cBill),
         delivery: sval(r, cDelv),
+        pincode: sval(r, cPincode),
         floor: sval(r, cFloor),
         landmark: sval(r, cLandmk),
         liftAvailable: sval(r, cLiftAv),
@@ -1216,6 +1218,7 @@ var CRM_APP_COLUMNS = [
   ['ALT PHONE', 'ALTERNATE PHONE', 'ALT CONTACT NUMBER', 'ALTERNATE CONTACT NUMBER'],
   ['BILLING ADDRESS'],
   ['DELIVERY ADDRESS'],
+  ['PINCODE', 'PIN CODE', 'DELIVERY PINCODE', 'DELIVERY PIN CODE'],
   ['FLOOR'],
   ['LANDMARK'],
   ['LIFT AVAILABLE', 'LIFT AVAILABLE?'],
@@ -1538,6 +1541,7 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['ALT PHONE', 'ALTERNATE PHONE', 'ALT CONTACT NUMBER', 'ALTERNATE CONTACT NUMBER'], o.alt || '');
     put(['BILLING ADDRESS'], o.billing || '');
     put(['DELIVERY ADDRESS'], o.delivery || '');
+    put(['PINCODE', 'PIN CODE', 'DELIVERY PINCODE', 'DELIVERY PIN CODE'], o.pincode || '');
     put(['FLOOR'], o.floor || '');
     put(['LANDMARK'], o.landmark || '');
     put(['LIFT AVAILABLE', 'LIFT AVAILABLE?'], o.liftAvailable || '');
