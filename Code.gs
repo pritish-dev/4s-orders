@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v30';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v31';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -1366,10 +1366,14 @@ function _writeOrderToCRM(o) {
     o.orderFormReceiptNo = String(maxRcpt + 1);
   }
 
+  // ORDER NO on the sheet mirrors what the PDF prints as "Order No. (Sl / Receipt)"
+  // — i.e. <SI No>/<Receipt No>. Fall back to the internal number only when the SI
+  // No is missing (older/legacy orders). Existing orders keep their stored ORDER NO.
   var orderNo = incomingOrder || matchedOrderNo || '';
   if (!orderNo) {
+    var siNo      = String(o.slNo || internalNo).trim();
     var receiptNo = String(o.orderFormReceiptNo || o.receiptNo || '').trim();
-    orderNo = receiptNo ? (internalNo + '/' + receiptNo) : String(internalNo);
+    orderNo = receiptNo ? (siNo + '/' + receiptNo) : siNo;
   }
 
   var now          = new Date();
