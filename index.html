@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '42';
+  var V = '43';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -1335,12 +1335,18 @@ function normalizeLoadedOrder(o) {
   return { ...o, orderDiscount: fixPct(o.orderDiscount), items };
 }
 
-// Next auto Receipt No = the highest numeric Receipt No already used across all
-// orders + 1 (starts at 1). Used to pre-fill the editable Receipt No field for a
-// new booking — the backend re-derives the same number if the field is left blank.
+// Next auto Receipt No = a running counter of APP-booked orders. It is the highest
+// Receipt No among existing app (non-manual) orders + 1 (starts at 1). Manual orders
+// are skipped so their large, unrelated receipt numbers (typed from the paper order,
+// e.g. 6810 / 45277) never advance the counter — the same sheet holds both kinds.
+// Used to pre-fill the editable Receipt No field; the backend derives it the same way.
 function nextReceiptNo(orders){
   let mx = 0;
-  (orders||[]).forEach(o=>{ const n = parseInt(String((o&&o.orderFormReceiptNo)||'').replace(/[^\d]/g,''),10); if(isFinite(n) && n>mx) mx = n; });
+  (orders||[]).forEach(o=>{
+    if(o && o.manualOrder) return;   // manual orders don't count toward the app counter
+    const n = parseInt(String((o&&o.orderFormReceiptNo)||'').replace(/[^\d]/g,''),10);
+    if(isFinite(n) && n>mx) mx = n;
+  });
   return mx + 1;
 }
 
@@ -3286,9 +3292,9 @@ function SettingsScreen({ctx}) {
                         ⚠ The deployed Apps Script did not report a version. Copy the latest Code.gs → save in Apps Script → Deploy → Manage deployments → Edit → New version.
                       </div>
                     )}
-                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v31' && (
+                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v32' && (
                       <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>
-                        Latest available is v31 — a redeploy is optional but recommended for the newest fixes.
+                        Latest available is v32 — a redeploy is optional but recommended for the newest fixes.
                       </div>
                     )}
                     {debugResult.discontinued && (
