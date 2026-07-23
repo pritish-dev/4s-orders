@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v33';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v34';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -97,6 +97,7 @@ function doGet(e) {
       case 'stock':          result = handleStock();            break;
       case 'priceList':      result = handlePriceList(p);       break;
       case 'orders':         result = handleOrders(p);          break;
+      case 'nextReceipt':    result = handleNextReceipt();      break;
       case 'debugPriceList': result = handleDebugPriceList();   break;
       default:               result = { ok: false, error: 'Unknown action: ' + (p.action || '(none)') };
     }
@@ -1290,6 +1291,37 @@ function handleSaveOrder(o) {
   return { ok: true, orderNo: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo, crmRows: res.rows };
 }
 
+// Next app Receipt No = the highest Receipt No among existing APP (non-manual)
+// orders + 1 — a running counter of app bookings that starts at 1. Manual-order
+// rows are skipped so their large paper receipt numbers never advance it. This is
+// the single source of truth used both to answer the app's "nextReceipt" request
+// and to stamp the number when an order is saved.
+function _nextAppReceiptNo(sh, colOf) {
+  var cRcpt    = colOf(['ORDER FORM RECEIPT NO', 'ORDER FORM RECEIPT NO.', 'ORDER FORM RECEIPT']);
+  var cManualC = colOf(['MANUAL ORDER', 'IS MANUAL ORDER', 'MANUAL']);
+  var lastRow  = sh.getLastRow();
+  if (lastRow < 2 || cRcpt < 0) return 1;
+  var data = sh.getRange(2, 1, lastRow - 1, sh.getLastColumn()).getValues();
+  var maxRcpt = 0;
+  for (var i = 0; i < data.length; i++) {
+    if (cManualC >= 0 && /^(yes|true|1)$/i.test(String(data[i][cManualC] || ''))) continue;
+    var rv = parseInt(String(data[i][cRcpt] || '').replace(/[^\d]/g, ''), 10);
+    if (isFinite(rv) && rv > maxRcpt) maxRcpt = rv;
+  }
+  return maxRcpt + 1;
+}
+
+// GET endpoint: the exact next app Receipt No, so the order form can pre-fill the
+// field with the correct value the moment it opens (no reliance on a possibly
+// empty/stale client-side order list).
+function handleNextReceipt() {
+  var sh;
+  try { sh = _openCRMSheet(); } catch (e) { return { ok: false, error: e.message }; }
+  try { _ensureCrmColumns(sh); } catch (e) {}
+  var C = _crmCols(sh);
+  return { ok: true, nextReceipt: _nextAppReceiptNo(sh, C.colOf), scriptVersion: SCRIPT_VERSION };
+}
+
 function _writeOrderToCRM(o) {
   var sh;
   try { sh = _openCRMSheet(); }
@@ -1368,14 +1400,7 @@ function _writeOrderToCRM(o) {
   var isNewOrder     = !incomingOrder && !matchRows.length;
   var userSetReceipt = String(o.receiptAuto) === 'false';
   if (!isManualOrder && (!String(o.orderFormReceiptNo || '').trim() || (isNewOrder && !userSetReceipt))) {
-    var maxRcpt = 0;
-    if (cRcpt >= 0) for (var rr = 0; rr < data.length; rr++) {
-      // Skip manual-order rows — only app bookings advance the receipt counter.
-      if (cManualC >= 0 && /^(yes|true|1)$/i.test(String(data[rr][cManualC] || ''))) continue;
-      var rv = parseInt(String(data[rr][cRcpt] || '').replace(/[^\d]/g, ''), 10);
-      if (isFinite(rv) && rv > maxRcpt) maxRcpt = rv;
-    }
-    o.orderFormReceiptNo = String(maxRcpt + 1);
+    o.orderFormReceiptNo = String(_nextAppReceiptNo(sh, colOf));
   }
 
   // ORDER NO on the sheet mirrors what the PDF prints as "Order No. (Sl / Receipt)"

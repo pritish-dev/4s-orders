@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '44';
+  var V = '45';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -1541,6 +1541,16 @@ function App() {
     finally { setLoading(false); }
   }
 
+  // Ask the backend for the exact next app Receipt No (authoritative — it reads the
+  // live sheet and skips manual orders). Returns a number, or null if unreachable.
+  async function getNextReceipt() {
+    try {
+      const res = await apiGet('nextReceipt', {}, 12000);
+      if (res && res.ok && Number(res.nextReceipt) > 0) return Number(res.nextReceipt);
+    } catch(e) {}
+    return null;
+  }
+
   async function doLogin(username, password) {
     setLoading(true);
     try {
@@ -1641,7 +1651,7 @@ function App() {
     nav('login');
   }
 
-  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doDeleteOrder, doSignOut, syncStock, syncPriceList, loadOrders };
+  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doDeleteOrder, doSignOut, syncStock, syncPriceList, loadOrders, getNextReceipt };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -2284,15 +2294,25 @@ function OrderFormScreen({ctx}) {
     });
   },[o.no]);
 
-  // Pre-fill the Receipt No for a brand-new normal booking with the next number in
-  // sequence (1, 2, 3 …). This is only a suggestion — the backend re-derives the
-  // authoritative number on save (unless the user hand-edits it, which flips
-  // receiptAuto to false). The field stays editable; manual orders start blank and
-  // are typed in from the paper order.
+  // Pre-fill the Receipt No for a brand-new normal booking with the exact next
+  // number in sequence (1, 2, 3 …). The number is fetched from the backend (which
+  // reads the live sheet and skips manual orders) so it is always correct and never
+  // depends on a possibly empty/stale client-side order list. Falls back to a local
+  // estimate only if the backend is unreachable. The field stays editable — a value
+  // the user types flips receiptAuto to false and is respected; manual orders start
+  // blank and are typed in from the paper order.
   React.useEffect(()=>{
-    if(!o.no && !o.manualOrder && !String(o.orderFormReceiptNo||'').trim()){
-      setOrder(prev=>({...prev, orderFormReceiptNo:String(nextReceiptNo(ctx.orders)), receiptAuto:true}));
-    }
+    if(o.no || o.manualOrder) return;
+    let cancelled=false;
+    (async()=>{
+      let n = await ctx.getNextReceipt();
+      if(cancelled) return;
+      if(n==null) n = nextReceiptNo(ctx.orders);   // offline fallback
+      setOrder(prev=> (prev.no || prev.manualOrder || prev.receiptAuto===false)
+        ? prev
+        : {...prev, orderFormReceiptNo:String(n), receiptAuto:true});
+    })();
+    return ()=>{ cancelled=true; };
   },[o.no, o.manualOrder]);
 
   const liftTypes = Array.isArray(o.liftTypes) ? o.liftTypes : [];
@@ -3294,9 +3314,9 @@ function SettingsScreen({ctx}) {
                         ⚠ The deployed Apps Script did not report a version. Copy the latest Code.gs → save in Apps Script → Deploy → Manage deployments → Edit → New version.
                       </div>
                     )}
-                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v33' && (
+                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v34' && (
                       <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>
-                        Latest available is v33 — a redeploy is optional but recommended for the newest fixes.
+                        Latest available is v34 — a redeploy is optional but recommended for the newest fixes.
                       </div>
                     )}
                     {debugResult.discontinued && (
