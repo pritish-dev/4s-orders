@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v36';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v37';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -98,6 +98,7 @@ function doGet(e) {
       case 'priceList':      result = handlePriceList(p);       break;
       case 'orders':         result = handleOrders(p);          break;
       case 'nextReceipt':    result = handleNextReceipt();      break;
+      case 'getAppSerial':   result = handleGetAppSerial();     break;
       case 'debugPriceList': result = handleDebugPriceList();   break;
       default:               result = { ok: false, error: 'Unknown action: ' + (p.action || '(none)') };
     }
@@ -118,6 +119,7 @@ function doPost(e) {
       case 'updateWON':       result = handleUpdateWON(body);         break;
       case 'updateDelivery':  result = handleUpdateDelivery(body);    break;
       case 'deleteOrder':     result = handleDeleteOrder(body);       break;
+      case 'setAppSerial':    result = handleSetAppSerial(body);      break;
       default:                result = { ok: false, error: 'Unknown action: ' + body.action };
     }
   } catch(err) {
@@ -1342,6 +1344,36 @@ function setAppSerial(lastIssued) {
 // opens. This is a PEEK (does not consume) — the real number is allocated on save.
 function handleNextReceipt() {
   return { ok: true, nextReceipt: _peekAppSerial(), scriptVersion: SCRIPT_VERSION };
+}
+
+// GET endpoint: current counter state for the admin control in Settings.
+// lastIssued = the last serial handed out; nextWillBe = what the next order gets.
+function handleGetAppSerial() {
+  return { ok: true, lastIssued: _currentAppSerial(), nextWillBe: _peekAppSerial(), scriptVersion: SCRIPT_VERSION };
+}
+
+// POST endpoint (admin only): set the NEXT app-order number. body.next is what the
+// next saved order should become (e.g. 3); it is stored as lastIssued = next - 1.
+// Deleting a test order does NOT roll the counter back (serials are never reused),
+// so this is how an admin corrects the counter after testing or sets any desired
+// starting number. Guarded server-side by the caller's role.
+function handleSetAppSerial(body) {
+  var by = String((body && (body.by || body.updatedBy)) || '').trim();
+  if (_lookupRole(by) !== 'admin') {
+    return { ok: false, error: 'Only an admin can set the receipt counter.' };
+  }
+  var next = parseInt(body && body.next, 10);
+  if (isNaN(next) || next < 1) {
+    return { ok: false, error: 'Enter the next order number (a whole number of 1 or more).' };
+  }
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(15000); } catch (e) {}
+  try {
+    PropertiesService.getScriptProperties().setProperty(APP_SERIAL_KEY, String(next - 1));
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+  return { ok: true, lastIssued: next - 1, nextWillBe: next };
 }
 
 function _writeOrderToCRM(o) {
