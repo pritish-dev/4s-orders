@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '39';
+  var V = '40';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -1285,6 +1285,15 @@ function normalizeLoadedOrder(o) {
   return { ...o, orderDiscount: fixPct(o.orderDiscount), items };
 }
 
+// Next auto Receipt No = the highest numeric Receipt No already used across all
+// orders + 1 (starts at 1). Used to pre-fill the editable Receipt No field for a
+// new booking — the backend re-derives the same number if the field is left blank.
+function nextReceiptNo(orders){
+  let mx = 0;
+  (orders||[]).forEach(o=>{ const n = parseInt(String((o&&o.orderFormReceiptNo)||'').replace(/[^\d]/g,''),10); if(isFinite(n) && n>mx) mx = n; });
+  return mx + 1;
+}
+
 // Follow-up date = 2 days before the planned delivery date (yyyy-mm-dd in, out).
 function followUpFromDelivery(deliveryDate) {
   if (!deliveryDate) return '';
@@ -1497,9 +1506,11 @@ function App() {
     try {
       const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total } });
       if (res.ok) {
-        const saved = {...draft, no: res.orderNo, internalNo: res.internalNo};
+        const saved = {...draft, no: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo || draft.orderFormReceiptNo};
         setOrder(saved);
         showToast('Order '+res.orderNo+' saved ✓');
+        // Refresh the ledger so the next new booking picks up the latest Receipt No.
+        try { loadOrders(); } catch {}
         return saved;
       } else {
         showToast(res.error||'Save failed','bad');
@@ -2214,6 +2225,15 @@ function OrderFormScreen({ctx}) {
     });
   },[o.no]);
 
+  // Pre-fill the Receipt No for a brand-new normal booking with the next number in
+  // sequence (1, 2, 3 …). The field stays editable, so the salesperson can change
+  // it; manual orders start blank and are typed in from the paper order.
+  React.useEffect(()=>{
+    if(!o.no && !o.manualOrder && !String(o.orderFormReceiptNo||'').trim()){
+      setF('orderFormReceiptNo', String(nextReceiptNo(ctx.orders)));
+    }
+  },[o.no, o.manualOrder]);
+
   const liftTypes = Array.isArray(o.liftTypes) ? o.liftTypes : [];
   const wardrobes = Array.isArray(o.wardrobes) ? o.wardrobes : [];
   const rooms     = Array.isArray(o.rooms)     ? o.rooms     : [];
@@ -2265,9 +2285,9 @@ function OrderFormScreen({ctx}) {
     if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item','bad');
     // SI No is mandatory for every order (printed as the Sl part of the PDF order no).
     if(!o.slNo||!String(o.slNo).trim()) return ctx.showToast('SI No is required','bad');
-    // Receipt No: manual orders must carry a hand-entered number; normal orders get
-    // one auto-assigned in sequence on save (nothing to validate here).
-    if(o.manualOrder && (!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim())) return ctx.showToast('Receipt No is required for a manual order','bad');
+    // Receipt No is mandatory — normal orders come pre-filled with the next number
+    // in sequence (editable); manual orders carry the number from the paper order.
+    if(!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim()) return ctx.showToast('Receipt No is required','bad');
     // Money Receipt No is mandatory on the order form.
     if(!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim()) return ctx.showToast('Money Receipt No is required','bad');
     // Manual orders must carry the actual (settable) booking date.
@@ -2668,9 +2688,7 @@ function OrderFormScreen({ctx}) {
         <SectionHead n="05" label="Commercials"/>
         <Field label="Additional Order Discount %" value={o.orderDiscount} onChange={v=>setF('orderDiscount',v.replace(/[^\d.]/g,''))} mono type="number" hint="Extra discount on the whole order (on top of per-item discounts). Shown on the PDF."/>
         <Field label="SI No" value={o.slNo} onChange={v=>setF('slNo',v)} mono required hint="Mandatory · the order-form SI number · printed as the Sl part of the PDF's Order No. (Sl / Receipt)"/>
-        {o.manualOrder
-          ? <Field label="Receipt No" value={o.orderFormReceiptNo} onChange={v=>setF('orderFormReceiptNo',v)} mono required hint="Manual order — enter the receipt number from the paper order form"/>
-          : <Field label="Receipt No" value={o.orderFormReceiptNo||o.internalNo||''} readOnly mono placeholder="Auto — assigned on save" hint="Auto-assigned in sequence (1, 2, 3 …) when the order is saved"/>}
+        <Field label="Receipt No" value={o.orderFormReceiptNo} onChange={v=>setF('orderFormReceiptNo',v.replace(/[^\d]/g,''))} mono required type="tel" hint={o.manualOrder?"Manual order — enter the receipt number from the paper order form":"Auto-incremented (1, 2, 3 …) — edit if you need a different number"}/>
         <Field label="WON (Godrej SO No)" value={o.won} onChange={v=>setF('won',v)} mono hint="Godrej SO / WON number — can be added or updated any time"/>
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setOrder(prev=>({...prev,plannedDly:v,followUp:followUpFromDelivery(v)||prev.followUp}))} mono required type="date" hint="Follow-up auto-set to 2 days before this date"/>
         <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
@@ -3209,9 +3227,9 @@ function SettingsScreen({ctx}) {
                         ⚠ The deployed Apps Script did not report a version. Copy the latest Code.gs → save in Apps Script → Deploy → Manage deployments → Edit → New version.
                       </div>
                     )}
-                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v29' && (
+                    {debugResult.scriptVersion && debugResult.scriptVersion!=='v30' && (
                       <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>
-                        Latest available is v29 — a redeploy is optional but recommended for the newest fixes.
+                        Latest available is v30 — a redeploy is optional but recommended for the newest fixes.
                       </div>
                     )}
                     {debugResult.discontinued && (

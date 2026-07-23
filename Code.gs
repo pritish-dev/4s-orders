@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v29';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v30';   // bump this whenever you redeploy
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -1287,7 +1287,7 @@ function handleSaveOrder(o) {
   if (!o) throw new Error('No order data provided.');
   var res = _writeOrderToCRM(o);
   if (!res.ok) throw new Error(res.error || 'Could not write the order to the CRM sheet.');
-  return { ok: true, orderNo: res.orderNo, internalNo: res.internalNo, crmRows: res.rows };
+  return { ok: true, orderNo: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo, crmRows: res.rows };
 }
 
 function _writeOrderToCRM(o) {
@@ -1310,6 +1310,7 @@ function _writeOrderToCRM(o) {
   var cIntNo   = colOf(CRM_H.INT_NO);
   var cWon     = colOf(CRM_H.WON);
   var cDate    = colOf(CRM_H.DATE);
+  var cRcpt    = colOf(['ORDER FORM RECEIPT NO', 'ORDER FORM RECEIPT NO.', 'ORDER FORM RECEIPT']);
 
   var lastRow = sh.getLastRow();
   var data    = lastRow >= 2 ? sh.getRange(2, 1, lastRow - 1, ncol).getValues() : [];
@@ -1351,10 +1352,18 @@ function _writeOrderToCRM(o) {
     internalNo = maxInt + 1;
   }
   // Receipt No: manual orders carry a hand-entered receipt number; every other
-  // order gets one auto-assigned in sequence (1, 2, 3 …) = its internal number.
+  // order gets one auto-assigned in sequence (1, 2, 3 …). The next number is the
+  // highest numeric Receipt No already on the sheet + 1 (independent of the
+  // internal order number, which is not always populated). This runs whenever the
+  // field arrives blank; the app normally sends a pre-filled, editable value.
   var isManualOrder = /^(yes|true|1)$/i.test(String(o.manualOrder || ''));
   if (!isManualOrder && !String(o.orderFormReceiptNo || '').trim()) {
-    o.orderFormReceiptNo = String(internalNo);
+    var maxRcpt = 0;
+    if (cRcpt >= 0) for (var rr = 0; rr < data.length; rr++) {
+      var rv = parseInt(String(data[rr][cRcpt] || '').replace(/[^\d]/g, ''), 10);
+      if (isFinite(rv) && rv > maxRcpt) maxRcpt = rv;
+    }
+    o.orderFormReceiptNo = String(maxRcpt + 1);
   }
 
   var orderNo = incomingOrder || matchedOrderNo || '';
@@ -1375,9 +1384,9 @@ function _writeOrderToCRM(o) {
   }
 
   var built = _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wonToWrite, sh.getLastRow());
-  if (!built.length) return { ok: true, orderNo: orderNo, internalNo: internalNo, rows: 0 };
+  if (!built.length) return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: 0 };
   sh.getRange(sh.getLastRow() + 1, 1, built.length, ncol).setValues(built);
-  return { ok: true, orderNo: orderNo, internalNo: internalNo, rows: built.length };
+  return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: built.length };
 }
 
 // Builds the per-item rows for one order (values matched to columns by header).
