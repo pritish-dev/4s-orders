@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v39';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v40';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -1158,7 +1158,9 @@ function handleMisData() {
       var s2 = allSheets[j];
       if (s2.getLastRow() < 1 || s2.getLastColumn() < 1) continue;
       var h2 = s2.getRange(1, 1, 1, s2.getLastColumn()).getValues()[0].map(norm);
-      if (h2.indexOf('SONO') >= 0 && h2.indexOf('SOCOMMITTEDQTY') >= 0) { sh = s2; how = 'by-columns'; break; }
+      var hasSo = h2.indexOf('SALESORDERNO') >= 0 || h2.indexOf('SONO') >= 0;
+      var hasCommit = h2.indexOf('SALESORDERCOMMITTEDQTY') >= 0 || h2.indexOf('SOCOMMITTEDQTY') >= 0;
+      if (hasSo && hasCommit) { sh = s2; how = 'by-columns'; break; }
     }
   }
   if (!sh) {
@@ -1182,17 +1184,21 @@ function handleMisData() {
     }
     return -1;
   }
-  var cSo       = col(['SO_NO', 'SONO', 'WON', 'WONNO']);
-  var cPos      = col(['SO_POSITION', 'SOPOSITION', 'POSITION']);
-  var cCode     = col(['ITEM_CODE', 'ITEMCODE']);
-  var cDesc     = col(['ITEM_DESCRIPTION', 'ITEMDESCRIPTION', 'DESCRIPTION']);
-  var cQty      = col(['SO_QTY', 'SOQTY', 'QTY']);
-  var cCommQty  = col(['SO_COMMITTED_QTY', 'SOCOMMITTEDQTY', 'COMMITTEDQTY']);
-  var cCommDate = col(['INV_COMMITMENT_DATE', 'INVCOMMITMENTDATE', 'COMMITMENTDATE']);
-  var cDelDate  = col(['DELIVERY_DATE', 'DELIVERYDATE', '_DEL_DATE_STR', 'DELDATESTR']);
-  var cSales    = col(['SALES_EXECUTIVE', 'SALESEXECUTIVE', 'SALESEXEC']);
-  var cCust     = col(['CUSTOMER_NAME', 'CUSTOMERNAME', 'CUSTOMER']);
-  var cStatus   = col(['DELIVERY_STATUS', 'DELIVERYSTATUS']);
+  // Column lookups match by name after stripping case / spaces / punctuation, so
+  // "Sales Order No." and "SALES_ORDER_NO" both resolve. The friendly MIS headers
+  // ("Sales Order No.", "Sales Order Qty", "Sales Order Committed Qty") are listed
+  // first, with the legacy SO_* export names kept as fallbacks.
+  var cSo       = col(['Sales Order No.', 'Sales Order No', 'SALES ORDER NUMBER', 'SO_NO', 'SONO', 'WON', 'WON NO']);
+  var cPos      = col(['Sales Order Position', 'SO Position', 'SO_POSITION', 'POSITION']);
+  var cCode     = col(['Item Code', 'Material Code', 'Material', 'ITEM_CODE', 'ITEMCODE']);
+  var cDesc     = col(['Item Description', 'Material Description', 'Product Name', 'ITEM_DESCRIPTION', 'DESCRIPTION']);
+  var cQty      = col(['Sales Order Qty', 'SO Qty', 'SO_QTY', 'SOQTY', 'QTY']);
+  var cCommQty  = col(['Sales Order Committed Qty', 'SO Committed Qty', 'Committed Qty', 'SO_COMMITTED_QTY', 'SOCOMMITTEDQTY']);
+  var cCommDate = col(['Invoice Commitment Date', 'Inv Commitment Date', 'Commitment Date', 'INV_COMMITMENT_DATE', 'COMMITMENTDATE']);
+  var cDelDate  = col(['Delivery Date', 'Customer Delivery Date', 'DELIVERY_DATE', 'DELIVERYDATE', '_DEL_DATE_STR']);
+  var cSales    = col(['Sales Executive', 'Sales Person', 'SALES_EXECUTIVE', 'SALESEXEC']);
+  var cCust     = col(['Customer Name', 'Customer', 'CUSTOMER_NAME', 'CUSTOMERNAME']);
+  var cStatus   = col(['Delivery Status', 'DELIVERY_STATUS', 'DELIVERYSTATUS']);
 
   var tz = (function () {
     try { return sh.getParent().getSpreadsheetTimeZone() || Session.getScriptTimeZone(); }
