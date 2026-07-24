@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '50';
+  var V = '51';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -475,6 +475,9 @@ const Icon = {
   close: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke={c} strokeWidth="2" strokeLinecap="round"/></svg>,
   cloud: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M7 18a4 4 0 010-8 6 6 0 0111.7 1.5A4 4 0 0118 18H7z" stroke={c} strokeWidth="2"/></svg>,
   trash: (c='currentColor',s=14) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2m-9 0l1 13a1 1 0 001 1h6a1 1 0 001-1l1-13" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>,
+  bell: (c='currentColor',s=20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M6 9a6 6 0 0112 0c0 5 2 6 2 6H4s2-1 2-6z" stroke={c} strokeWidth="2" strokeLinejoin="round"/><path d="M10 20a2 2 0 004 0" stroke={c} strokeWidth="2" strokeLinecap="round"/></svg>,
+  truck: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M3 6h10v9H3zM13 9h4l3 3v3h-7z" stroke={c} strokeWidth="2" strokeLinejoin="round"/><circle cx="7" cy="18" r="1.6" stroke={c} strokeWidth="2"/><circle cx="17" cy="18" r="1.6" stroke={c} strokeWidth="2"/></svg>,
+  clock: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke={c} strokeWidth="2"/><path d="M12 7v5l3 2" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>,
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -1331,7 +1334,9 @@ const BLANK_ORDER = () => ({
 });
 
 // Delivery-status options. The order is only "Completed" once installation is done.
-const DELIVERY_STATUSES = ['Pending', 'Scheduled for Delivery', 'Delivered', 'Installation Done'];
+// "Partial Delivery" means some items are delivered and the rest are still Pending
+// for delivery (the delivered items are tracked per-order).
+const DELIVERY_STATUSES = ['Pending', 'Scheduled for Delivery', 'Partial Delivery', 'Delivered', 'Installation Done'];
 // Godrej modular product families. On the CUSTOMER copy of the PDF, every item
 // belonging to one family is collapsed into a single line (family name + the
 // summed line total). The SALES copy stays fully itemised.
@@ -1421,6 +1426,85 @@ function followUpFromDelivery(deliveryDate) {
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
 }
 
+// ── MIS + delivery-deadline notifications ────────────────────────────────────
+// The order's WON is the join key into the MIS_Daily feed (SO_NO). Look it up so
+// the sales team can be told which items Godrej has committed (→ plan delivery)
+// and when a scheduled delivery is approaching / overdue.
+const MIS_UPDATE_URL_DEFAULT = 'https://godrej-crm-app-4sinteriors.streamlit.app/MIS_Update';
+const DELIVERY_SOON_DAYS = 3;   // "approaching" window
+// Whole-day difference between an ISO date (yyyy-mm-dd) and today (negative = past).
+function daysFromToday(iso) {
+  if (!iso) return null;
+  const d = new Date(iso + 'T00:00:00');
+  if (isNaN(d.getTime())) return null;
+  const t = new Date(); t.setHours(0, 0, 0, 0);
+  return Math.round((d.getTime() - t.getTime()) / 86400000);
+}
+function prettyDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso + 'T00:00:00');
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+// An order counts as "done" (no more delivery chasing) once fully delivered or installed.
+function isDeliveryDone(o) {
+  const s = (o.deliveryStatus || '').toLowerCase();
+  return o.status === 'completed' || /installation done|^delivered/.test(s);
+}
+// Look up an order's MIS record by its WON (a single order may carry several WONs).
+function misForOrder(mis, o) {
+  if (!mis || !o || !o.won) return null;
+  const wons = String(o.won).split(/[,\s]+/).map(w => w.trim().toUpperCase()).filter(Boolean);
+  for (const w of wons) if (mis[w]) return mis[w];
+  return null;
+}
+// Build the notification feed from the current orders + MIS data. Each item has a
+// stable id so we only fire a native push once per event.
+function buildNotifications(orders, mis) {
+  const out = [];
+  (orders || []).forEach(o => {
+    const m = misForOrder(mis, o);
+    // 1) Items committed in MIS → plan the delivery.
+    if (m && m.anyCommitted && !isDeliveryDone(o)) {
+      out.push({
+        id: 'mis|' + (o.no || o.won) + '|' + m.committedQty + '/' + m.totalQty,
+        kind: 'mis', tone: 'green', orderNo: o.no, order: o,
+        title: 'Committed in MIS — plan delivery',
+        body: (o.customer || m.customer || 'Order') + ' · ' + (o.won || m.so) + ' · ' +
+              m.committedQty + '/' + m.totalQty + ' item(s) committed' +
+              (m.deliveryDate ? ' · MIS delivery ' + prettyDate(m.deliveryDate) : ''),
+        sortDate: m.commitDate || m.deliveryDate || '',
+      });
+    }
+    // 2) Scheduled delivery approaching / overdue (app date, else MIS date).
+    const delIso = (o.plannedDly && o.plannedDly.length >= 8 ? o.plannedDly : '') || (m && m.deliveryDate) || '';
+    const dd = daysFromToday(delIso);
+    if (dd != null && !isDeliveryDone(o)) {
+      if (dd < 0) {
+        out.push({
+          id: 'overdue|' + (o.no || o.won) + '|' + delIso,
+          kind: 'overdue', tone: 'bad', orderNo: o.no, order: o,
+          title: 'Delivery overdue by ' + Math.abs(dd) + ' day' + (Math.abs(dd) > 1 ? 's' : ''),
+          body: (o.customer || 'Order') + ' · due ' + prettyDate(delIso) + ' · ' + (o.deliveryStatus || 'Pending'),
+          sortDate: delIso,
+        });
+      } else if (dd <= DELIVERY_SOON_DAYS) {
+        out.push({
+          id: 'soon|' + (o.no || o.won) + '|' + delIso,
+          kind: 'soon', tone: 'warn', orderNo: o.no, order: o,
+          title: dd === 0 ? 'Delivery due today' : 'Delivery in ' + dd + ' day' + (dd > 1 ? 's' : ''),
+          body: (o.customer || 'Order') + ' · ' + prettyDate(delIso) + ' · ' + (o.deliveryStatus || 'Pending'),
+          sortDate: delIso,
+        });
+      }
+    }
+  });
+  // Overdue first, then soonest; committed notices interleave by date.
+  const rank = { overdue: 0, soon: 1, mis: 2 };
+  out.sort((a, b) => (rank[a.kind] - rank[b.kind]) || String(a.sortDate).localeCompare(String(b.sortDate)));
+  return out;
+}
+
 function App() {
   const [screen,        setScreen]       = useState('loading');
   const [user,          setUser]         = useState(null);
@@ -1434,6 +1518,11 @@ function App() {
   const [selOrder,      setSelOrder]     = useState(null);
   const [toast,         setToast]        = useState(null);
   const [loading,       setLoading]      = useState(false);
+  // MIS_Daily (Godrej committed-stock feed) — keyed by SO_NO / WON.
+  const [mis,           setMis]          = useState(() => { try { return JSON.parse(localStorage.getItem('4s_mis')||'{}'); } catch { return {}; } });
+  const [misSyncedAt,   setMisSyncedAt]  = useState(localStorage.getItem('4s_mis_ts') ? new Date(Number(localStorage.getItem('4s_mis_ts'))).toISOString() : null);
+  const [misUpdateUrl,  setMisUpdateUrl] = useState(MIS_UPDATE_URL_DEFAULT);
+  const [misLoading,    setMisLoading]   = useState(false);
 
   const showToast = (msg,type='ok') => setToast({msg,type});
 
@@ -1507,6 +1596,7 @@ function App() {
       // If we already have cached prices, stay silent — no scary toast on a
       // slow background refresh. Only surface an error when there's nothing to show.
       .catch(e => { if (!hadCachedPL) setPriceSyncError(e.message); });
+    loadMis({ silent: true });
   }, [user]);
 
   // Restore an unsaved order draft once, right after login
@@ -1602,6 +1692,27 @@ function App() {
     finally { setLoading(false); }
   }
 
+  // Pull the MIS_Daily committed-stock feed (read from the OPS sheet by the backend).
+  async function loadMis(opts) {
+    const silent = opts && opts.silent;
+    setMisLoading(true);
+    try {
+      const res = await apiGet('mis', {}, 30000);
+      if (res && res.ok) {
+        setMis(res.mis || {});
+        localStorage.setItem('4s_mis', JSON.stringify(res.mis || {}));
+        const now = Date.now();
+        setMisSyncedAt(new Date(now).toISOString());
+        localStorage.setItem('4s_mis_ts', String(now));
+        if (res.misUpdateUrl) setMisUpdateUrl(res.misUpdateUrl);
+        if (!silent) showToast('MIS updated · ' + (res.count || 0) + ' SO' + ((res.count||0)===1?'':'s') + ' ✓');
+        return res.mis || {};
+      } else if (!silent) showToast((res && res.error) || 'MIS fetch failed', 'bad');
+    } catch (e) { if (!silent) showToast(e.message, 'bad'); }
+    finally { setMisLoading(false); }
+    return null;
+  }
+
   // Ask the backend for the exact next app Receipt No (authoritative — it reads the
   // live sheet and skips manual orders). Returns a number, or null if unreachable.
   async function getNextReceipt() {
@@ -1679,10 +1790,10 @@ function App() {
     finally { setLoading(false); }
   }
 
-  async function doUpdateDelivery(orderNo, internalNo, deliveryStatus) {
+  async function doUpdateDelivery(orderNo, internalNo, deliveryStatus, deliveredItems) {
     setLoading(true);
     try {
-      const res = await apiPost({ action:'updateDelivery', orderNo, internalNo, deliveryStatus, updatedBy: user?.name });
+      const res = await apiPost({ action:'updateDelivery', orderNo, internalNo, deliveryStatus, deliveredItems, updatedBy: user?.name });
       if (res.ok) { showToast('Delivery status updated ✓'); loadOrders(); return true; }
       else { showToast(res.error||'Update failed','bad'); return false; }
     } catch(e) { showToast(e.message,'bad'); return false; }
@@ -1712,7 +1823,42 @@ function App() {
     nav('login');
   }
 
-  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doDeleteOrder, doSignOut, syncStock, syncPriceList, loadOrders, getNextReceipt };
+  // ── Notification feed (MIS committed + delivery deadlines) ────────────────
+  const notifications = React.useMemo(() => buildNotifications(orders, mis), [orders, mis]);
+  const [seenNotifs, setSeenNotifs] = useState(() => { try { return JSON.parse(localStorage.getItem('4s_notif_seen')||'[]'); } catch { return []; } });
+  const unreadCount = notifications.filter(n => !seenNotifs.includes(n.id)).length;
+  const markNotifsSeen = useCallback(() => {
+    const ids = buildNotifications(orders, mis).map(n => n.id);
+    setSeenNotifs(ids);
+    localStorage.setItem('4s_notif_seen', JSON.stringify(ids));
+  }, [orders, mis]);
+
+  // Fire a native (OS) notification once per new event, so the sales team is
+  // alerted even when the app is only in the background. Guarded by permission.
+  const pushedRef = useRef(null);
+  useEffect(() => {
+    if (pushedRef.current === null) {
+      try { pushedRef.current = new Set(JSON.parse(localStorage.getItem('4s_notif_pushed')||'[]')); }
+      catch { pushedRef.current = new Set(); }
+    }
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    const fresh = notifications.filter(n => !pushedRef.current.has(n.id));
+    if (!fresh.length) return;
+    fresh.slice(0, 5).forEach(n => {
+      try {
+        if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+          navigator.serviceWorker.ready.then(reg => reg.showNotification('4S Orders · ' + n.title, { body: n.body, icon: '/4s-orders/icon.svg', badge: '/4s-orders/icon.svg', tag: n.id, vibrate: [150,80,150] })).catch(()=>{});
+        } else {
+          new Notification('4S Orders · ' + n.title, { body: n.body, icon: '/4s-orders/icon.svg', tag: n.id });
+        }
+      } catch (e) {}
+      pushedRef.current.add(n.id);
+    });
+    localStorage.setItem('4s_notif_pushed', JSON.stringify([...pushedRef.current].slice(-500)));
+  }, [notifications]);
+
+  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doDeleteOrder, doSignOut, syncStock, syncPriceList, loadOrders, getNextReceipt,
+    mis, misSyncedAt, misUpdateUrl, misLoading, loadMis, notifications, unreadCount, markNotifsSeen };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -1724,6 +1870,7 @@ function App() {
     pdf:     <PDFPreviewScreen ctx={ctx}/>,
     history: <HistoryScreen ctx={ctx}/>,
     won:     <WONUpdateScreen ctx={ctx}/>,
+    notifs:  <NotificationsScreen ctx={ctx}/>,
     settings:<SettingsScreen ctx={ctx}/>,
   };
 
@@ -1870,11 +2017,11 @@ function LoginScreen({ctx}) {
 
 // ─── Home ───────────────────────────────────────────────────
 function HomeScreen({ctx}) {
-  const {user,orders,syncedAt,priceItems,priceSyncError,nav,loadOrders,syncPriceList,loading} = ctx;
+  const {user,orders,syncedAt,priceItems,priceSyncError,nav,loadOrders,syncPriceList,loading,unreadCount,loadMis} = ctx;
   const todayOrders = orders.filter(o=>o.date===new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'2-digit',year:'2-digit'}).replace(/\//g,'.'));
   const pendingWON  = orders.filter(o=>!o.won&&o.status!=='draft').length;
   const mtd         = orders.reduce((s,o)=>s+o.amt,0);
-  useEffect(()=>{ loadOrders(); },[]);
+  useEffect(()=>{ loadOrders(); loadMis({silent:true}); requestNotifPermission(); },[]);
   return (
     <div className="screen">
       <div style={{flexShrink:0}}>
@@ -1886,7 +2033,13 @@ function HomeScreen({ctx}) {
               {hasManagerAccess(user)&&<span style={{fontSize:9,fontWeight:800,letterSpacing:.6,color:'#fff',background:T.ink,padding:'2px 7px',borderRadius:99,textTransform:'uppercase'}}>{normRole(user?.role)}</span>}
             </div>
           </div>
-          <div style={{width:42,height:42,borderRadius:6,background:T.green,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:T.mono,fontSize:16,fontWeight:700}}>{(user?.name||'?').slice(0,2).toUpperCase()}</div>
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            <div onClick={()=>nav('notifs')} style={{position:'relative',width:42,height:42,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>
+              {Icon.bell(T.ink2,20)}
+              {unreadCount>0 && <span style={{position:'absolute',top:-5,right:-5,minWidth:18,height:18,padding:'0 4px',borderRadius:99,background:T.bad,color:'#fff',fontSize:10,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',fontFamily:T.mono}}>{unreadCount>99?'99+':unreadCount}</span>}
+            </div>
+            <div style={{width:42,height:42,borderRadius:6,background:T.green,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:T.mono,fontSize:16,fontWeight:700}}>{(user?.name||'?').slice(0,2).toUpperCase()}</div>
+          </div>
         </div>
         <div style={{display:'grid',gridTemplateColumns:'1.2fr 1fr 1fr',gap:8,padding:'8px 18px 14px'}}>
           {[{label:'TODAY',val:String(todayOrders.length),sub:'orders',tone:'green'},{label:'PEND WON',val:String(pendingWON),sub:'awaiting',tone:'warn'},{label:'M.T.D.',val:'₹'+(mtd>99999?(mtd/100000).toFixed(1)+'L':mtd.toLocaleString('en-IN')),sub:'booked',tone:'ink'}].map(s=>(
@@ -2290,8 +2443,22 @@ function SearchScreen({ctx}) {
 
 // ─── Order Form ──────────────────────────────────────────────
 function OrderFormScreen({ctx}) {
-  const {order,setOrder,nav,back,user,doSaveOrder,doDeleteOrder} = ctx;
+  const {order,setOrder,nav,back,user,doSaveOrder,doDeleteOrder,doUpdateDelivery} = ctx;
   const o = order;
+  const [partialPicker,setPartialPicker] = React.useState(false);
+  // Delivery-status change: "Partial Delivery" opens the item picker so we can
+  // record which items are delivered (the rest stay Pending for Delivery).
+  function handleDeliveryChange(val){
+    if(/partial/i.test(val)){ setPartialPicker(true); return; }
+    setOrder(prev=>({...prev,deliveryStatus:val}));
+  }
+  async function confirmPartialDelivery(deliveredItems){
+    setPartialPicker(false);
+    setOrder(prev=>({...prev,deliveryStatus:'Partial Delivery',deliveredItems}));
+    // Persist immediately if the order already exists (the plain save path does
+    // not carry the delivered-items list).
+    if(order.no) await doUpdateDelivery(order.no, order.internalNo, 'Partial Delivery', deliveredItems);
+  }
   // Admins can permanently delete an already-saved order straight from the edit screen.
   const isAdmin = normRole(user?.role) === 'admin';
   // Sales team can only EDIT a saved order's WON, money-receipt no/date and its
@@ -2537,10 +2704,11 @@ function OrderFormScreen({ctx}) {
           <SectionHead n="03" label="Delivery"/>
           <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
             <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Delivery Status</div>
-            <select value={o.deliveryStatus||'Pending'} onChange={e=>setF('deliveryStatus',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+            <select value={o.deliveryStatus||'Pending'} onChange={e=>handleDeliveryChange(e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
               {DELIVERY_STATUSES.map(s=><option key={s}>{s}</option>)}
             </select>
             <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Order is Completed only when "Installation Done".</div>
+            {/partial/i.test(o.deliveryStatus||'') && <PartialDeliverySummary order={o} onEdit={()=>setPartialPicker(true)}/>}
           </div>
           <div style={{height:20}}/>
         </div>
@@ -2548,6 +2716,7 @@ function OrderFormScreen({ctx}) {
           <Btn onClick={()=>{ setOrder(BLANK_ORDER()); nav('history'); }}>Cancel</Btn>
           <Btn primary full onClick={handleRestrictedSave}>Save Changes</Btn>
         </div>
+        {partialPicker && <PartialDeliveryModal order={o} onCancel={()=>setPartialPicker(false)} onConfirm={confirmPartialDelivery}/>}
       </div>
     );
   }
@@ -2889,10 +3058,11 @@ function OrderFormScreen({ctx}) {
         <Field label="Follow-up Date" value={o.followUp} onChange={v=>setF('followUp',v)} mono type="date" hint="Auto-set to 2 days before planned delivery · reminder at 10:00 AM"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Delivery Status</div>
-          <select value={o.deliveryStatus||'Pending'} onChange={e=>setF('deliveryStatus',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+          <select value={o.deliveryStatus||'Pending'} onChange={e=>handleDeliveryChange(e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
             {DELIVERY_STATUSES.map(s=><option key={s}>{s}</option>)}
           </select>
           <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Order is Completed only when "Installation Done".</div>
+          {/partial/i.test(o.deliveryStatus||'') && <PartialDeliverySummary order={o} onEdit={()=>setPartialPicker(true)}/>}
         </div>
         <SectionHead n="07" label="Internal"/>
         <Field label="Salesperson" value={o.salesExec??''} onChange={v=>setF('salesExec',v)} mono hint="Pre-filled with your name — edit or clear freely (your name is used if left blank)."/>
@@ -2931,6 +3101,24 @@ function OrderFormScreen({ctx}) {
         <Btn onClick={handleSaveDraft}>Save Draft</Btn>
         <Btn primary full onClick={handleSave}>Save & PDF →</Btn>
       </div>
+      {partialPicker && <PartialDeliveryModal order={o} onCancel={()=>setPartialPicker(false)} onConfirm={confirmPartialDelivery}/>}
+    </div>
+  );
+}
+
+// Compact read-out of a partial delivery: delivered vs. pending items + an edit link.
+function PartialDeliverySummary({order, onEdit}) {
+  const items = order.items || [];
+  const del = order.deliveredItems || [];
+  const isDelivered = (it,i) => del.some(d => (d && typeof d==='object') ? (d.i===i || (d.code && d.code===it.code)) : (d===i));
+  const pending = items.filter((it,i)=>!isDelivered(it,i));
+  return (
+    <div style={{marginTop:8,padding:'9px 11px',background:T.warnSoft,border:`1px solid #e6cc95`,borderRadius:6}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <span style={{fontSize:11,fontWeight:700,color:T.warn}}>{items.length-pending.length} delivered · {pending.length} pending for delivery</span>
+        <span onClick={onEdit} style={{fontSize:11,fontWeight:700,color:T.green,cursor:'pointer'}}>Edit items</span>
+      </div>
+      {pending.length>0 && <div style={{fontSize:10.5,color:T.ink3,marginTop:4,lineHeight:1.5}}>Pending: {pending.map(it=>it.name||it.code).filter(Boolean).slice(0,6).join(', ')}{pending.length>6?' …':''}</div>}
     </div>
   );
 }
@@ -3052,18 +3240,26 @@ function PDFPreviewScreen({ctx}) {
 
 // ─── Order History ───────────────────────────────────────────
 function HistoryScreen({ctx}) {
-  const {orders,nav,loadOrders,doUpdateDelivery,doDeleteOrder,user} = ctx;
+  const {orders,mis,nav,loadOrders,loadMis,doUpdateDelivery,doDeleteOrder,user,misLoading} = ctx;
   const isAdmin = normRole(user?.role) === 'admin';
-  const [tab,setTab] = useState('all');
+  // Default view: Pending orders of ALL salespersons.
+  const [tab,setTab] = useState('pending');
   const [wonOrder,setWonOrder] = useState(null);
   const [query,setQuery] = useState('');
   const [salesFilter,setSalesFilter] = useState('');
-  useEffect(()=>{ loadOrders(); },[]);
+  const [partialOrder,setPartialOrder] = useState(null);   // order awaiting the partial-delivery picker
+  useEffect(()=>{ loadOrders(); loadMis({silent:true}); },[]);
+  // Delivery-status category helpers (Partial Delivery contains "Deliver", so match precisely).
+  const st = o => (o.deliveryStatus||'').toLowerCase();
+  const isCompleted = o => o.status==='completed' || /installation done/i.test(o.deliveryStatus||'');
   const tabs = [
+    {id:'pending',  label:'Pending',    filter:o=>!isCompleted(o) && (!st(o) || /^pending/.test(st(o)))},
+    {id:'pendwon',  label:'Pend WON',   filter:o=>!o.won&&o.status!=='draft'},
+    {id:'scheduled',label:'Scheduled',  filter:o=>/scheduled/.test(st(o))},
+    {id:'delivered',label:'Delivered',  filter:o=>/^delivered/.test(st(o))},
+    {id:'partial',  label:'Partial',    filter:o=>/partial/.test(st(o))},
+    {id:'completed',label:'Completed',  filter:o=>isCompleted(o)},
     {id:'all',      label:'All',        filter:()=>true},
-    {id:'pending',  label:'Pend WON',   filter:o=>!o.won&&o.status!=='draft'},
-    {id:'delivered',label:'Delivered',  filter:o=>/deliver/i.test(o.deliveryStatus||'')},
-    {id:'completed',label:'Completed',  filter:o=>o.status==='completed'||/installation done/i.test(o.deliveryStatus||'')},
   ];
   const active = tabs.find(t=>t.id===tab)||tabs[0];
 
@@ -3075,7 +3271,14 @@ function HistoryScreen({ctx}) {
   const shown = orders.filter(active.filter).filter(matchesQuery).filter(matchesSales);
 
   async function changeDelivery(o, val){
-    if(val && val!==(o.deliveryStatus||'Pending')) await doUpdateDelivery(o.no, o.internalNo, val);
+    if(!val || val===(o.deliveryStatus||'Pending')) return;
+    // Partial Delivery needs the item picker to record which items were delivered.
+    if(/partial/i.test(val)){ setPartialOrder(o); return; }
+    await doUpdateDelivery(o.no, o.internalNo, val);
+  }
+  async function confirmPartial(deliveredItems){
+    const o = partialOrder; setPartialOrder(null);
+    if(o) await doUpdateDelivery(o.no, o.internalNo, 'Partial Delivery', deliveredItems);
   }
 
   if(wonOrder) return <WONUpdateScreen ctx={ctx} orderOverride={wonOrder} onClose={()=>setWonOrder(null)}/>;
@@ -3093,7 +3296,7 @@ function HistoryScreen({ctx}) {
       <div style={{flexShrink:0}}>
         <div style={{padding:'14px 18px 8px',display:'flex',justifyContent:'space-between',alignItems:'flex-end'}}>
           <div><div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>LEDGER · {orders.length} ORDERS</div><div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2}}>Orders</div></div>
-          <Btn size="sm" icon={Icon.refresh(T.ink2,14)} onClick={loadOrders}>Refresh</Btn>
+          <Btn size="sm" icon={Icon.refresh(T.ink2,14)} onClick={()=>{loadOrders();loadMis({});}} disabled={misLoading}>Refresh</Btn>
         </div>
         {/* Search by Order ID or SO No (WON) */}
         <div style={{padding:'2px 18px 8px'}}>
@@ -3129,6 +3332,17 @@ function HistoryScreen({ctx}) {
               </div>
               <div style={{fontSize:14,fontWeight:700,color:T.ink}}>{o.customer}</div>
               <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.salesExec}</div>
+              {(() => {
+                const m = misForOrder(mis, o);
+                const partialPending = /partial/i.test(o.deliveryStatus||'') ? Math.max(0,(o.items||[]).length-(o.deliveryStatus?(o.deliveredItems||[]).length:0)) : 0;
+                return (
+                  <div style={{display:'flex',gap:5,marginTop:4,flexWrap:'wrap'}}>
+                    {m && m.anyCommitted && !isCompleted(o) && <Pill tone="green" size="sm">MIS ✓ {m.committedQty}/{m.totalQty}</Pill>}
+                    {partialPending>0 && <Pill tone="warn" size="sm">{partialPending} pending for delivery</Pill>}
+                    {(o.plannedDly||(m&&m.deliveryDate)) && !isCompleted(o) && (()=>{ const dl=(o.plannedDly&&o.plannedDly.length>=8?o.plannedDly:'')||(m&&m.deliveryDate)||''; const dd=daysFromToday(dl); if(dd==null) return null; if(dd<0) return <Pill tone="bad" size="sm">overdue {Math.abs(dd)}d</Pill>; if(dd<=DELIVERY_SOON_DAYS) return <Pill tone="warn" size="sm">{dd===0?'due today':'in '+dd+'d'}</Pill>; return null; })()}
+                  </div>
+                );
+              })()}
             </div>
             <div style={{textAlign:'right'}}>
               <div style={{fontSize:16,fontFamily:T.mono,fontWeight:700,color:T.ink,letterSpacing:-0.4}}>₹{(o.amt||0).toLocaleString('en-IN')}</div>
@@ -3148,6 +3362,7 @@ function HistoryScreen({ctx}) {
         {shown.length===0&&<div style={{padding:32,textAlign:'center',fontSize:13,color:T.ink4}}>No orders match.</div>}
         <div style={{height:24}}/>
       </div>
+      {partialOrder && <PartialDeliveryModal order={partialOrder} onCancel={()=>setPartialOrder(null)} onConfirm={confirmPartial}/>}
       <BottomNav screen="history" nav={nav}/>
     </div>
   );
@@ -3221,6 +3436,159 @@ function WONUpdateScreen({ctx,orderOverride,onClose}) {
         </div>
         <Btn primary full size="lg" onClick={submit}>Update SO No</Btn>
         <div style={{height:20}}/>
+      </div>
+    </div>
+  );
+}
+
+// ─── Notifications ───────────────────────────────────────────
+// Ask the OS for permission to show background notifications (delivery deadlines,
+// MIS commitments). Safe to call repeatedly — resolves immediately if already set.
+function requestNotifPermission() {
+  if (!('Notification' in window)) return Promise.resolve('unsupported');
+  if (Notification.permission !== 'default') return Promise.resolve(Notification.permission);
+  return Notification.requestPermission().catch(() => 'denied');
+}
+
+function NotificationsScreen({ctx}) {
+  const {notifications, mis, misSyncedAt, misUpdateUrl, misLoading, loadMis, loadOrders, markNotifsSeen, nav, setOrder, showToast} = ctx;
+  // Mark everything read when this screen opens.
+  useEffect(() => { markNotifsSeen(); }, []);
+  const [perm, setPerm] = useState(('Notification' in window) ? Notification.permission : 'unsupported');
+
+  const groups = [
+    {kind:'overdue', label:'Overdue deliveries', icon:Icon.clock(T.bad,16), tone:T.bad, soft:T.badSoft||'#fdecec'},
+    {kind:'soon',    label:'Delivery approaching', icon:Icon.truck(T.warn,16), tone:T.warn, soft:T.warnSoft},
+    {kind:'mis',     label:'Committed in MIS — plan delivery', icon:Icon.bolt(T.green,14), tone:T.green, soft:T.greenSoft},
+  ];
+
+  async function refreshMis() {
+    // Re-read MIS_Daily from the sheet; the CRM dashboard force-fetches from Gmail.
+    await loadMis({});
+    try { loadOrders(); } catch {}
+  }
+  function forceFetchFromGmail() {
+    // Trigger the CRM dashboard's Gmail → MIS_Daily import (same code that powers
+    // the CRM's MIS_Update page), then re-read once the user comes back.
+    try { window.open(misUpdateUrl || MIS_UPDATE_URL_DEFAULT, '_blank'); } catch {}
+    showToast('Opening CRM MIS refresh — tap "Update MIS" here when it finishes','warn');
+  }
+  const openOrder = o => { if (o) { setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)}); nav('order'); } };
+
+  return (
+    <div className="screen">
+      <div style={{flexShrink:0}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 8px'}}>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+          <div style={{flex:1}}>
+            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>ALERTS · {notifications.length}</div>
+            <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Notifications</div>
+          </div>
+        </div>
+        {/* MIS refresh controls */}
+        <div style={{margin:'2px 14px 8px',padding:'10px 12px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:8}}>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+            <div style={{minWidth:0}}>
+              <div style={{fontSize:12,fontWeight:700,color:T.ink}}>Godrej MIS feed</div>
+              <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{Object.keys(mis||{}).length} SO · {misSyncedAt?('synced '+new Date(misSyncedAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})):'not synced'}</div>
+            </div>
+            <Btn size="sm" icon={Icon.refresh(T.ink2,14)} onClick={refreshMis} disabled={misLoading}>{misLoading?'…':'Update MIS'}</Btn>
+          </div>
+          <button onClick={forceFetchFromGmail} style={{marginTop:8,width:'100%',display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'9px 12px',background:T.ink,color:'#fff',border:'none',borderRadius:6,fontSize:12,fontWeight:700,cursor:'pointer'}}>
+            {Icon.cloud('#fff',14)} Force-fetch latest MIS from Gmail (CRM)
+          </button>
+          <div style={{fontSize:10.5,color:T.ink4,marginTop:6,lineHeight:1.5}}>Opens the CRM dashboard's MIS refresh (pulls the newest Godrej MIS e-mail into the sheet). Then tap <b>Update MIS</b> above.</div>
+        </div>
+        {/* Native notification permission prompt */}
+        {perm==='default' && (
+          <div style={{margin:'0 14px 8px',padding:'10px 12px',background:T.greenSoft,border:`1px solid ${T.greenLine}`,borderRadius:8,display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+            <div style={{fontSize:11.5,color:T.ink2,fontWeight:600,flex:1}}>Turn on alerts so you never miss a delivery deadline.</div>
+            <Btn size="sm" primary onClick={()=>requestNotifPermission().then(p=>{setPerm(p); if(p==='granted') showToast('Alerts on ✓');})}>Enable</Btn>
+          </div>
+        )}
+      </div>
+      <div className="scroll">
+        {notifications.length===0 && (
+          <div style={{padding:40,textAlign:'center'}}>
+            <div style={{opacity:.4,display:'flex',justifyContent:'center',marginBottom:10}}>{Icon.bell(T.ink4,40)}</div>
+            <div style={{fontSize:13,color:T.ink4}}>You're all caught up. No pending deadlines or MIS commitments.</div>
+          </div>
+        )}
+        {groups.map(g=>{
+          const items = notifications.filter(n=>n.kind===g.kind);
+          if(!items.length) return null;
+          return (
+            <div key={g.kind} style={{marginBottom:6}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,padding:'10px 16px 6px'}}>
+                {g.icon}<span style={{fontSize:11,fontWeight:700,color:g.tone,letterSpacing:.3,textTransform:'uppercase'}}>{g.label}</span>
+                <span style={{fontFamily:T.mono,fontSize:11,color:T.ink4}}>{items.length}</span>
+              </div>
+              <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`}}>
+                {items.map((n,i)=>(
+                  <div key={n.id} onClick={()=>openOrder(n.order)} style={{display:'flex',gap:10,padding:'11px 16px',alignItems:'flex-start',borderBottom:i<items.length-1?`1px solid ${T.line}`:'none',cursor:'pointer',borderLeft:`3px solid ${g.tone}`}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:13,fontWeight:700,color:T.ink}}>{n.title}</div>
+                      <div style={{fontSize:11.5,color:T.ink3,marginTop:2,lineHeight:1.45}}>{n.body}</div>
+                    </div>
+                    {n.orderNo?<span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,flexShrink:0,marginTop:2}}>{n.orderNo}</span>:null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+        <div style={{height:24}}/>
+      </div>
+      <BottomNav screen="notifs" nav={nav}/>
+    </div>
+  );
+}
+
+// ─── Partial-delivery item picker ────────────────────────────
+// Shown when the delivery status is set to "Partial Delivery": pick the items
+// that have actually been delivered; the remaining items stay Pending for delivery.
+function PartialDeliveryModal({order, onCancel, onConfirm}) {
+  const items = order.items || [];
+  const already = order.deliveredItems || [];
+  // Pre-tick items previously marked delivered (match by index, else by code).
+  const [sel, setSel] = useState(() => items.map((it,i) =>
+    already.some(d => (d && typeof d==='object') ? (d.i===i || (d.code && d.code===it.code)) : (d===i))
+  ));
+  const toggle = i => setSel(prev => prev.map((v,j)=>j===i?!v:v));
+  const anySel = sel.some(Boolean);
+  const delivered = sel.filter(Boolean).length;
+
+  function confirm() {
+    const deliveredItems = items.map((it,i)=>({ i, code: it.code||'', name: it.name||it.code||('Item '+(i+1)) })).filter((_,i)=>sel[i]);
+    onConfirm(deliveredItems);
+  }
+  return (
+    <div style={{position:'fixed',inset:0,zIndex:9995,background:'rgba(10,15,13,.45)',display:'flex',alignItems:'flex-end',justifyContent:'center'}} onClick={onCancel}>
+      <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:430,background:T.paper,borderTopLeftRadius:16,borderTopRightRadius:16,maxHeight:'85vh',display:'flex',flexDirection:'column',animation:'slideUp .2s ease'}}>
+        <div style={{padding:'14px 18px 10px',borderBottom:`1px solid ${T.line}`}}>
+          <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.3}}>Partial Delivery</div>
+          <div style={{fontSize:11.5,color:T.ink4,marginTop:2}}>Tick the items that have been delivered. The rest stay <b>Pending for Delivery</b>.</div>
+        </div>
+        <div style={{overflowY:'auto',flex:1,padding:'6px 0'}}>
+          {items.length===0 && <div style={{padding:24,textAlign:'center',fontSize:13,color:T.ink4}}>This order has no line items to pick from.</div>}
+          {items.map((it,i)=>(
+            <label key={i} style={{display:'flex',alignItems:'center',gap:12,padding:'11px 18px',background:'#fff',borderBottom:`1px solid ${T.line}`,cursor:'pointer'}}>
+              <input type="checkbox" checked={!!sel[i]} onChange={()=>toggle(i)} style={{width:18,height:18,accentColor:T.green,cursor:'pointer'}}/>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:13,fontWeight:600,color:T.ink}}>{it.name||it.code||('Item '+(i+1))}</div>
+                <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:1}}>{it.code} · ×{it.qty}</div>
+              </div>
+              <Pill tone={sel[i]?'ok':'warn'} size="sm">{sel[i]?'Delivered':'Pending'}</Pill>
+            </label>
+          ))}
+        </div>
+        <div style={{padding:'10px 16px',borderTop:`1px solid ${T.line}`,background:'#fff'}}>
+          <div style={{fontSize:11,color:T.ink3,textAlign:'center',marginBottom:8}}>{delivered} delivered · {items.length-delivered} pending for delivery</div>
+          <div style={{display:'flex',gap:8}}>
+            <Btn onClick={onCancel}>Cancel</Btn>
+            <Btn primary full onClick={confirm} disabled={!anySel}>Save Partial Delivery</Btn>
+          </div>
+        </div>
       </div>
     </div>
   );

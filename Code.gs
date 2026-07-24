@@ -31,7 +31,13 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v37';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v38';   // bump this whenever you redeploy
+// MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
+// the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
+// Keyed by SO_NO (= the order's WON / Godrej SO number).
+var MIS_TAB_NAME    = 'MIS_Daily';
+// CRM MIS_Update page — force-fetches the latest MIS from Gmail into MIS_Daily.
+var CRM_MIS_UPDATE_URL = 'https://godrej-crm-app-4sinteriors.streamlit.app/MIS_Update';
 
 // Tabs in OPS sheet that are NOT price-list data
 var PRICE_SKIP = [
@@ -97,6 +103,7 @@ function doGet(e) {
       case 'stock':          result = handleStock();            break;
       case 'priceList':      result = handlePriceList(p);       break;
       case 'orders':         result = handleOrders(p);          break;
+      case 'mis':            result = handleMisData();          break;
       case 'nextReceipt':    result = handleNextReceipt();      break;
       case 'getAppSerial':   result = handleGetAppSerial();     break;
       case 'debugPriceList': result = handleDebugPriceList();   break;
@@ -928,6 +935,7 @@ function handleOrders(p) {
   var cOrdType = colOf(['ORDER TYPE','B2C/B2B','ORDER CATEGORY']);
   var cPoRef   = colOf(['REFERENCE ORDER NO.','REFERENCE ORDER NO']);
   var cDelvSt  = colOf(CRM_H.DELIVERY);
+  var cDelItems= colOf(['DELIVERED ITEMS DATA','DELIVERED ITEMS']);
   var cMr1n=colOf(['MONEY RECEIPT NO 1','MONEY RECEIPT NO','RECEIPT NO','RECEIPT NO.','RECEIPT NO & DATE']);
   var cMr1d=colOf(['MONEY RECEIPT DATE 1','MONEY RECEIPT DATE','RECEIPT DATE']);
   var cMr2n=colOf(['MONEY RECEIPT NO 2']), cMr2d=colOf(['MONEY RECEIPT DATE 2']);
@@ -1022,6 +1030,12 @@ function handleOrders(p) {
         orderType: sval(r, cOrdType) || 'B2C',
         poRef: sval(r, cPoRef),
         deliveryStatus: sval(r, cDelvSt) || 'Pending',
+        deliveredItems: (function () {
+          if (cDelItems < 0) return [];
+          var raw = sval(r, cDelItems);
+          if (!raw) return [];
+          try { var a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+        })(),
         moneyReceipts: [
           { no: sval(r, cMr1n), date: dstr(r, cMr1d) },
           { no: sval(r, cMr2n), date: dstr(r, cMr2d) },
@@ -1112,6 +1126,104 @@ function handleOrders(p) {
 
   return { ok: true, orders: orders };
 }
+
+// ─── MIS_DAILY (Godrej committed-stock feed) ─────────────────────────────────
+// Reads the "MIS_Daily" tab in the OPS sheet — the Godrej MIS export that the CRM
+// dashboard imports from the daily Godrej e-mail. One row per SO position; keyed
+// by SO_NO (= the order's WON). The app cross-references this by WON to tell the
+// sales team which ordered items Godrej has COMMITTED (SO_COMMITTED_QTY > 0), so
+// they can plan the delivery, and to surface the MIS delivery date.
+function handleMisData() {
+  var ss = _openOPS();
+  if (!ss) return { ok: false, error: 'Cannot open OPS sheet' };
+  var sh = ss.getSheetByName(MIS_TAB_NAME);
+  if (!sh) return { ok: true, mis: {}, count: 0, note: 'MIS_Daily tab not found', misUpdateUrl: CRM_MIS_UPDATE_URL };
+
+  var lastRow = sh.getLastRow(), lastCol = sh.getLastColumn();
+  if (lastRow < 2) return { ok: true, mis: {}, count: 0, misUpdateUrl: CRM_MIS_UPDATE_URL };
+
+  var values = sh.getRange(1, 1, lastRow, lastCol).getValues();
+  var header = values[0].map(function (h) { return String(h || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); });
+  function col(names) {
+    for (var i = 0; i < names.length; i++) {
+      var k = String(names[i]).toUpperCase().replace(/[^A-Z0-9]/g, '');
+      var idx = header.indexOf(k);
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  }
+  var cSo       = col(['SO_NO', 'SONO', 'WON', 'WONNO']);
+  var cPos      = col(['SO_POSITION', 'SOPOSITION', 'POSITION']);
+  var cCode     = col(['ITEM_CODE', 'ITEMCODE']);
+  var cDesc     = col(['ITEM_DESCRIPTION', 'ITEMDESCRIPTION', 'DESCRIPTION']);
+  var cQty      = col(['SO_QTY', 'SOQTY', 'QTY']);
+  var cCommQty  = col(['SO_COMMITTED_QTY', 'SOCOMMITTEDQTY', 'COMMITTEDQTY']);
+  var cCommDate = col(['INV_COMMITMENT_DATE', 'INVCOMMITMENTDATE', 'COMMITMENTDATE']);
+  var cDelDate  = col(['DELIVERY_DATE', 'DELIVERYDATE', '_DEL_DATE_STR', 'DELDATESTR']);
+  var cSales    = col(['SALES_EXECUTIVE', 'SALESEXECUTIVE', 'SALESEXEC']);
+  var cCust     = col(['CUSTOMER_NAME', 'CUSTOMERNAME', 'CUSTOMER']);
+  var cStatus   = col(['DELIVERY_STATUS', 'DELIVERYSTATUS']);
+
+  var tz = (function () {
+    try { return sh.getParent().getSpreadsheetTimeZone() || Session.getScriptTimeZone(); }
+    catch (e) { return Session.getScriptTimeZone(); }
+  })();
+  // Normalise dates to yyyy-MM-dd. Handles real Date cells, dd-mm-yyyy, dd-MMM-yyyy
+  // and yyyy-mm-dd strings (all appear in the MIS export).
+  function dnorm(v) {
+    if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+    var s = String(v || '').trim();
+    if (!s) return '';
+    var m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);            // yyyy-mm-dd[ hh:mm:ss]
+    if (m) return m[1] + '-' + m[2] + '-' + m[3];
+    m = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);           // dd-mm-yyyy
+    if (m) return m[3] + '-' + _pad2(m[2]) + '-' + _pad2(m[1]);
+    var mon = { JAN:'01',FEB:'02',MAR:'03',APR:'04',MAY:'05',JUN:'06',JUL:'07',AUG:'08',SEP:'09',OCT:'10',NOV:'11',DEC:'12' };
+    m = s.match(/^(\d{1,2})-([A-Za-z]{3})[A-Za-z]*-(\d{4})$/); // dd-MMM-yyyy
+    if (m) { var mm = mon[m[2].toUpperCase()]; if (mm) return m[3] + '-' + mm + '-' + _pad2(m[1]); }
+    return s;
+  }
+
+  var mis = {};
+  for (var r = 1; r < values.length; r++) {
+    var row = values[r];
+    var so = String(cSo >= 0 ? row[cSo] : '').trim().toUpperCase();
+    if (!so) continue;
+    if (!mis[so]) {
+      mis[so] = { so: so, customer: '', salesExec: '', deliveryDate: '', commitDate: '',
+                  deliveryStatus: '', totalQty: 0, committedQty: 0, items: [] };
+    }
+    var m = mis[so];
+    var qty = Number(cQty >= 0 ? row[cQty] : 0) || 0;
+    var cq  = Number(cCommQty >= 0 ? row[cCommQty] : 0) || 0;
+    m.totalQty += qty;
+    m.committedQty += cq;
+    if (!m.customer  && cCust  >= 0) m.customer  = String(row[cCust]  || '').trim();
+    if (!m.salesExec && cSales >= 0) m.salesExec = String(row[cSales] || '').trim();
+    var dd = cDelDate >= 0 ? dnorm(row[cDelDate]) : '';
+    if (dd && !m.deliveryDate) m.deliveryDate = dd;
+    var cd = cCommDate >= 0 ? dnorm(row[cCommDate]) : '';
+    if (cd) m.commitDate = cd;
+    if (cStatus >= 0 && String(row[cStatus] || '').trim()) m.deliveryStatus = String(row[cStatus]).trim();
+    m.items.push({
+      pos:  cPos  >= 0 ? String(row[cPos]  || '').trim() : '',
+      code: cCode >= 0 ? String(row[cCode] || '').trim() : '',
+      desc: cDesc >= 0 ? String(row[cDesc] || '').trim() : '',
+      qty: qty, committedQty: cq,
+    });
+  }
+
+  var out = {}, keys = Object.keys(mis);
+  keys.forEach(function (k) {
+    var m = mis[k];
+    m.anyCommitted = m.committedQty > 0;
+    m.allCommitted = m.totalQty > 0 && m.committedQty >= m.totalQty;
+    out[k] = m;
+  });
+  return { ok: true, mis: out, count: keys.length, syncedAt: new Date().toISOString(), misUpdateUrl: CRM_MIS_UPDATE_URL };
+}
+
+function _pad2(n) { n = String(n); return n.length < 2 ? '0' + n : n; }
 
 // ─── CRM SHEET HELPERS ───────────────────────────────────────────────────────
 // The CRM tab "B2C FRANCHISE APP ORDER DETAILS 26-27" is the ONE source of
@@ -1239,6 +1351,9 @@ var CRM_APP_COLUMNS = [
   ['MONEY RECEIPT NO 3'],
   ['MONEY RECEIPT DATE 3'],
   ['DELIVERY STATUS'],
+  // Partial-delivery tracking — JSON array of the item signatures that have been
+  // delivered when the delivery status is "Partial Delivery"; the rest are Pending.
+  ['DELIVERED ITEMS DATA', 'DELIVERED ITEMS'],
   ['ORDER FORM RECEIPT NO', 'ORDER FORM RECEIPT NO.', 'ORDER FORM RECEIPT'],
   ['SI NO', 'SI NO.'],
   ['MANUAL ORDER', 'IS MANUAL ORDER', 'MANUAL'],
@@ -1695,9 +1810,21 @@ function handleUpdateDelivery(body) {
   var updatedBy  = String(body.updatedBy  || '');
   if (!status) return { ok: false, error: 'Delivery status is required.' };
 
+  // Partial Delivery: the app sends `deliveredItems` — the list of item signatures
+  // that have physically been delivered. Persist it as JSON so the remaining items
+  // can be shown as "Pending for Delivery". Any non-partial status clears the list.
+  var isPartial = /partial/i.test(status);
+  var deliveredJson = '';
+  if (isPartial && body.deliveredItems != null) {
+    try { deliveredJson = JSON.stringify(body.deliveredItems); } catch (e) { deliveredJson = ''; }
+  }
+
   var sh;
   try { sh = _openCRMSheet(); }
   catch (e) { return { ok: false, error: e.message }; }
+
+  // Make sure the DELIVERED ITEMS column exists before we try to write to it.
+  if (isPartial) { try { _ensureCrmColumns(sh); } catch (e) {} }
 
   var C     = _crmCols(sh);
   var colOf = C.colOf;
@@ -1706,6 +1833,7 @@ function handleUpdateDelivery(body) {
   var cOrderNo = colOf(CRM_H.ORDER_NO);
   var cIntNo   = colOf(CRM_H.INT_NO);
   var cDeliv   = colOf(CRM_H.DELIVERY);
+  var cDelItems= colOf(['DELIVERED ITEMS DATA', 'DELIVERED ITEMS']);
   if (cDeliv < 0) return { ok: false, error: 'No "Delivery Remarks" column found in the CRM sheet.' };
 
   var lastRow = sh.getLastRow();
@@ -1718,6 +1846,8 @@ function handleUpdateDelivery(body) {
     var matchInt   = cIntNo   >= 0 && internalNo && Number(data[i][cIntNo]) === internalNo;
     if (matchOrder || matchInt) {
       sh.getRange(i + 2, cDeliv + 1).setValue(status);
+      // Store the delivered-items list on partial delivery; clear it otherwise.
+      if (cDelItems >= 0) sh.getRange(i + 2, cDelItems + 1).setValue(isPartial ? deliveredJson : '');
       updated++;
     }
   }
