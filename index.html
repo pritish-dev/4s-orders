@@ -3342,6 +3342,10 @@ function HistoryScreen({ctx}) {
               <div style={{fontSize:14,fontWeight:700,color:T.ink}}>{o.customer}</div>
               <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.salesExec}</div>
               {(() => {
+                const dlIso = (o.plannedDly&&o.plannedDly.length>=8?o.plannedDly:'')||(misForOrder(mis,o)?.deliveryDate)||'';
+                return dlIso ? <div style={{fontSize:11,color:T.ink3,marginTop:2}}>Delivery: <span style={{fontFamily:T.mono,fontWeight:600,color:T.ink2}}>{prettyDate(dlIso)}</span></div> : null;
+              })()}
+              {(() => {
                 const m = misForOrder(mis, o);
                 const partialPending = /partial/i.test(o.deliveryStatus||'') ? Math.max(0,(o.items||[]).length-(o.deliveryStatus?(o.deliveredItems||[]).length:0)) : 0;
                 return (
