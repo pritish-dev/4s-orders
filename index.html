@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '51';
+  var V = '52';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -654,12 +654,12 @@ function BottomNav({screen,nav}) {
 
 function StockRibbon({syncedAt}) {
   const stale = syncedAt && (Date.now()-new Date(syncedAt).getTime() > 12*60*60*1000);
-  const label = syncedAt ? new Date(syncedAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}) : 'Not synced';
+  const label = syncedAt ? istTime(syncedAt) : 'Not synced';
   return (
     <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'7px 14px',background:stale?T.warnSoft:T.greenSoft,borderBottom:`1px solid ${stale?'#e6cc95':T.greenLine}`,flexShrink:0}}>
       <div style={{display:'flex',alignItems:'center',gap:6}}>
         <span style={{width:7,height:7,borderRadius:99,background:stale?T.warn:T.ok,flexShrink:0}}/>
-        <span style={{fontSize:10,fontWeight:700,color:stale?T.warn:T.green,letterSpacing:.3,textTransform:'uppercase'}}>STOCK · {new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})}</span>
+        <span style={{fontSize:10,fontWeight:700,color:stale?T.warn:T.green,letterSpacing:.3,textTransform:'uppercase'}}>STOCK · {istToday({day:'2-digit',month:'short',year:'numeric'})}</span>
       </div>
       <div style={{display:'flex',alignItems:'center',gap:8}}>
         <span style={{fontFamily:T.mono,fontSize:10,color:stale?T.warn:T.green}}>{label}</span>
@@ -754,7 +754,7 @@ function generatePDF(order, copyType) {
   const slNo     = order.slNo||order.internalNo||'—';
   const rcptNo   = order.orderFormReceiptNo || order.internalNo || '—';
   const orderRef = slNo + ' / ' + rcptNo;
-  const oDate    = order.date||new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'2-digit',year:'numeric'});
+  const oDate    = order.date||istToday({day:'2-digit',month:'2-digit',year:'numeric'});
 
   const DRED=[180,0,0], NAVY=[20,20,80], INK=[20,20,20], BLK=[0,0,0], GR=[120,120,120], LGR=[200,200,200];
 
@@ -1432,6 +1432,10 @@ function followUpFromDelivery(deliveryDate) {
 // and when a scheduled delivery is approaching / overdue.
 const MIS_UPDATE_URL_DEFAULT = 'https://godrej-crm-app-4sinteriors.streamlit.app/MIS_Update';
 const DELIVERY_SOON_DAYS = 3;   // "approaching" window
+// The app always displays clock time in IST regardless of the device timezone.
+const IST_TZ = 'Asia/Kolkata';
+function istTime(d) { try { return new Date(d).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: IST_TZ }); } catch (e) { return ''; } }
+function istToday(opts) { return new Date().toLocaleDateString('en-IN', Object.assign({ timeZone: IST_TZ }, opts || {})); }
 // Whole-day difference between an ISO date (yyyy-mm-dd) and today (negative = past).
 function daysFromToday(iso) {
   if (!iso) return null;
@@ -1444,7 +1448,7 @@ function prettyDate(iso) {
   if (!iso) return '';
   const d = new Date(iso + 'T00:00:00');
   if (isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: IST_TZ });
 }
 // An order counts as "done" (no more delivery chasing) once fully delivered or installed.
 function isDeliveryDone(o) {
@@ -1464,14 +1468,14 @@ function buildNotifications(orders, mis) {
   const out = [];
   (orders || []).forEach(o => {
     const m = misForOrder(mis, o);
-    // 1) Items committed in MIS → plan the delivery.
-    if (m && m.anyCommitted && !isDeliveryDone(o)) {
+    // 1) Fully committed in MIS (SO_QTY == COMMITTED_QTY) → plan the delivery.
+    if (m && m.committed && !isDeliveryDone(o)) {
       out.push({
         id: 'mis|' + (o.no || o.won) + '|' + m.committedQty + '/' + m.totalQty,
         kind: 'mis', tone: 'green', orderNo: o.no, order: o,
         title: 'Committed in MIS — plan delivery',
-        body: (o.customer || m.customer || 'Order') + ' · ' + (o.won || m.so) + ' · ' +
-              m.committedQty + '/' + m.totalQty + ' item(s) committed' +
+        body: (o.customer || m.customer || 'Order') + ' · ' + (o.won || m.so) + ' · all ' +
+              m.totalQty + ' item(s) committed' +
               (m.deliveryDate ? ' · MIS delivery ' + prettyDate(m.deliveryDate) : ''),
         sortDate: m.commitDate || m.deliveryDate || '',
       });
@@ -1523,6 +1527,7 @@ function App() {
   const [misSyncedAt,   setMisSyncedAt]  = useState(localStorage.getItem('4s_mis_ts') ? new Date(Number(localStorage.getItem('4s_mis_ts'))).toISOString() : null);
   const [misUpdateUrl,  setMisUpdateUrl] = useState(MIS_UPDATE_URL_DEFAULT);
   const [misLoading,    setMisLoading]   = useState(false);
+  const [misDiag,       setMisDiag]      = useState(null);   // backend diagnostics (tab used, rows, etc.)
 
   const showToast = (msg,type='ok') => setToast({msg,type});
 
@@ -1701,11 +1706,15 @@ function App() {
       if (res && res.ok) {
         setMis(res.mis || {});
         localStorage.setItem('4s_mis', JSON.stringify(res.mis || {}));
+        setMisDiag(res.diag || null);
         const now = Date.now();
         setMisSyncedAt(new Date(now).toISOString());
         localStorage.setItem('4s_mis_ts', String(now));
         if (res.misUpdateUrl) setMisUpdateUrl(res.misUpdateUrl);
-        if (!silent) showToast('MIS updated · ' + (res.count || 0) + ' SO' + ((res.count||0)===1?'':'s') + ' ✓');
+        if (!silent) {
+          const committed = res.diag ? res.diag.fullyCommittedSOs : null;
+          showToast('MIS updated · ' + (res.count || 0) + ' SO' + ((res.count||0)===1?'':'s') + (committed!=null?(' · '+committed+' committed'):'') + ' ✓');
+        }
         return res.mis || {};
       } else if (!silent) showToast((res && res.error) || 'MIS fetch failed', 'bad');
     } catch (e) { if (!silent) showToast(e.message, 'bad'); }
@@ -1858,7 +1867,7 @@ function App() {
   }, [notifications]);
 
   const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doDeleteOrder, doSignOut, syncStock, syncPriceList, loadOrders, getNextReceipt,
-    mis, misSyncedAt, misUpdateUrl, misLoading, loadMis, notifications, unreadCount, markNotifsSeen };
+    mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -2018,7 +2027,7 @@ function LoginScreen({ctx}) {
 // ─── Home ───────────────────────────────────────────────────
 function HomeScreen({ctx}) {
   const {user,orders,syncedAt,priceItems,priceSyncError,nav,loadOrders,syncPriceList,loading,unreadCount,loadMis} = ctx;
-  const todayOrders = orders.filter(o=>o.date===new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'2-digit',year:'2-digit'}).replace(/\//g,'.'));
+  const todayOrders = orders.filter(o=>o.date===istToday({day:'2-digit',month:'2-digit',year:'2-digit'}).replace(/\//g,'.'));
   const pendingWON  = orders.filter(o=>!o.won&&o.status!=='draft').length;
   const mtd         = orders.reduce((s,o)=>s+o.amt,0);
   useEffect(()=>{ loadOrders(); loadMis({silent:true}); requestNotifPermission(); },[]);
@@ -2028,7 +2037,7 @@ function HomeScreen({ctx}) {
         <StockRibbon syncedAt={syncedAt}/>
         <div style={{padding:'14px 18px 6px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
           <div>
-            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>{new Date().toLocaleDateString('en-IN',{weekday:'short',day:'2-digit',month:'short'}).toUpperCase()}</div>
+            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>{istToday({weekday:'short',day:'2-digit',month:'short'}).toUpperCase()}</div>
             <div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2,display:'flex',alignItems:'center',gap:8}}>Hi, {user?.name||'there'}
               {hasManagerAccess(user)&&<span style={{fontSize:9,fontWeight:800,letterSpacing:.6,color:'#fff',background:T.ink,padding:'2px 7px',borderRadius:99,textTransform:'uppercase'}}>{normRole(user?.role)}</span>}
             </div>
@@ -2225,7 +2234,7 @@ function SearchScreen({ctx}) {
             <div style={{minWidth:0}}>
               <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>
                 {hasPriceList
-                  ? <>PRICE LIST · {allItems.length} SKUs {priceSyncedAt&&<span style={{color:T.ok}}>· synced {new Date(priceSyncedAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}</span>}</>
+                  ? <>PRICE LIST · {allItems.length} SKUs {priceSyncedAt&&<span style={{color:T.ok}}>· synced {istTime(priceSyncedAt)}</span>}</>
                   : <span style={{color:T.warn,fontWeight:700}}>PRICE LIST NOT LOADED</span>}
               </div>
               <div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2}}>{cartCount>0?'Add item':'Search items'}</div>
@@ -3165,7 +3174,7 @@ function PDFPreviewScreen({ctx}) {
           <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.08)',border:'1px solid rgba(255,255,255,.15)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.home('#fff',18)}</button>
           <div>
             <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>Order PDF</div>
-            <div style={{fontSize:10,color:'rgba(255,255,255,.55)',fontFamily:T.mono}}>{o.no||'Draft'} · {new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}</div>
+            <div style={{fontSize:10,color:'rgba(255,255,255,.55)',fontFamily:T.mono}}>{o.no||'Draft'} · {istTime(Date.now())}</div>
           </div>
         </div>
         <Pill tone="ok" size="sm">SAVED ✓</Pill>
@@ -3337,7 +3346,8 @@ function HistoryScreen({ctx}) {
                 const partialPending = /partial/i.test(o.deliveryStatus||'') ? Math.max(0,(o.items||[]).length-(o.deliveryStatus?(o.deliveredItems||[]).length:0)) : 0;
                 return (
                   <div style={{display:'flex',gap:5,marginTop:4,flexWrap:'wrap'}}>
-                    {m && m.anyCommitted && !isCompleted(o) && <Pill tone="green" size="sm">MIS ✓ {m.committedQty}/{m.totalQty}</Pill>}
+                    {m && m.committed && !isCompleted(o) && <Pill tone="green" size="sm">MIS ✓ committed {m.totalQty}/{m.totalQty}</Pill>}
+                    {m && !m.committed && m.anyCommitted && !isCompleted(o) && <Pill tone="neutral" size="sm">MIS {m.committedQty}/{m.totalQty} committing</Pill>}
                     {partialPending>0 && <Pill tone="warn" size="sm">{partialPending} pending for delivery</Pill>}
                     {(o.plannedDly||(m&&m.deliveryDate)) && !isCompleted(o) && (()=>{ const dl=(o.plannedDly&&o.plannedDly.length>=8?o.plannedDly:'')||(m&&m.deliveryDate)||''; const dd=daysFromToday(dl); if(dd==null) return null; if(dd<0) return <Pill tone="bad" size="sm">overdue {Math.abs(dd)}d</Pill>; if(dd<=DELIVERY_SOON_DAYS) return <Pill tone="warn" size="sm">{dd===0?'due today':'in '+dd+'d'}</Pill>; return null; })()}
                   </div>
@@ -3451,10 +3461,13 @@ function requestNotifPermission() {
 }
 
 function NotificationsScreen({ctx}) {
-  const {notifications, mis, misSyncedAt, misUpdateUrl, misLoading, loadMis, loadOrders, markNotifsSeen, nav, setOrder, showToast} = ctx;
+  const {notifications, mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, loadOrders, markNotifsSeen, nav, setOrder, showToast} = ctx;
   // Mark everything read when this screen opens.
   useEffect(() => { markNotifsSeen(); }, []);
   const [perm, setPerm] = useState(('Notification' in window) ? Notification.permission : 'unsupported');
+  const [showDiag, setShowDiag] = useState(false);
+  const misList = Object.values(mis||{});
+  const committedCount = misList.filter(m=>m.committed).length;
 
   const groups = [
     {kind:'overdue', label:'Overdue deliveries', icon:Icon.clock(T.bad,16), tone:T.bad, soft:T.badSoft||'#fdecec'},
@@ -3490,7 +3503,7 @@ function NotificationsScreen({ctx}) {
           <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
             <div style={{minWidth:0}}>
               <div style={{fontSize:12,fontWeight:700,color:T.ink}}>Godrej MIS feed</div>
-              <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{Object.keys(mis||{}).length} SO · {misSyncedAt?('synced '+new Date(misSyncedAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})):'not synced'}</div>
+              <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{misList.length} SO · {committedCount} committed · {misSyncedAt?('synced '+istTime(misSyncedAt)+' IST'):'not synced'}</div>
             </div>
             <Btn size="sm" icon={Icon.refresh(T.ink2,14)} onClick={refreshMis} disabled={misLoading}>{misLoading?'…':'Update MIS'}</Btn>
           </div>
@@ -3498,6 +3511,19 @@ function NotificationsScreen({ctx}) {
             {Icon.cloud('#fff',14)} Force-fetch latest MIS from Gmail (CRM)
           </button>
           <div style={{fontSize:10.5,color:T.ink4,marginTop:6,lineHeight:1.5}}>Opens the CRM dashboard's MIS refresh (pulls the newest Godrej MIS e-mail into the sheet). Then tap <b>Update MIS</b> above.</div>
+          {/* Diagnostics — lets you confirm the feed is being read correctly */}
+          <div onClick={()=>setShowDiag(v=>!v)} style={{marginTop:8,fontSize:11,fontWeight:700,color:T.green,cursor:'pointer'}}>{showDiag?'▾ Hide diagnostics':'▸ Diagnostics (confirm the feed)'}</div>
+          {showDiag && (
+            <div style={{marginTop:6,padding:'8px 10px',background:T.paper2,borderRadius:6,fontSize:10.5,fontFamily:T.mono,color:T.ink3,lineHeight:1.7}}>
+              {!misDiag && <div>Tap <b>Update MIS</b> to run a live read.</div>}
+              {misDiag && <>
+                <div>Tab used: <b style={{color: misDiag.tabUsed?T.ink:T.bad}}>{misDiag.tabUsed||'NOT FOUND'}</b>{misDiag.tabMatch?(' ('+misDiag.tabMatch+')'):''}</div>
+                <div>Rows read: <b style={{color:T.ink}}>{misDiag.rows}</b> · SOs: <b style={{color:T.ink}}>{misList.length}</b> · committed: <b style={{color:T.ink}}>{committedCount}</b></div>
+                <div>SO_NO column: {misDiag.soDetected?'✓':'✗'} · Committed-qty column: {misDiag.committedColDetected?'✓':'✗'}</div>
+                {!misDiag.tabUsed && <div style={{color:T.bad,marginTop:4}}>MIS tab not found. Tabs in sheet: {(misDiag.sheetsAvailable||[]).join(', ')}</div>}
+              </>}
+            </div>
+          )}
         </div>
         {/* Native notification permission prompt */}
         {perm==='default' && (
@@ -3885,7 +3911,7 @@ function SettingsScreen({ctx}) {
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12}}>
               <div>
                 <div style={{fontSize:15,fontWeight:700,letterSpacing:-0.3}}>Stock Master</div>
-                <div style={{fontSize:11,color:T.ink3,marginTop:4}}>Last synced: {syncedAt?new Date(syncedAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}):'Never'}</div>
+                <div style={{fontSize:11,color:T.ink3,marginTop:4}}>Last synced: {syncedAt?istTime(syncedAt):'Never'}</div>
               </div>
               <Pill tone={syncedAt?'ok':'warn'} mono>{syncedAt?'FRESH':'STALE'}</Pill>
             </div>

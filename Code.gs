@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v38';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v39';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -1136,11 +1136,41 @@ function handleOrders(p) {
 function handleMisData() {
   var ss = _openOPS();
   if (!ss) return { ok: false, error: 'Cannot open OPS sheet' };
+
+  var allSheets = ss.getSheets();
+  var sheetNames = allSheets.map(function (s) { return s.getName(); });
+  var norm = function (s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); };
+
+  // Locate the MIS tab robustly:
+  //  1) exact name, 2) normalised-name match (case / spaces / underscores),
+  //  3) by column signature — the tab whose header carries SO_NO + SO_COMMITTED_QTY
+  //     (finds it even if the tab is renamed).
   var sh = ss.getSheetByName(MIS_TAB_NAME);
-  if (!sh) return { ok: true, mis: {}, count: 0, note: 'MIS_Daily tab not found', misUpdateUrl: CRM_MIS_UPDATE_URL };
+  var how = 'exact';
+  if (!sh) {
+    var want = norm(MIS_TAB_NAME);
+    for (var i = 0; i < allSheets.length; i++) {
+      if (norm(sheetNames[i]) === want || norm(sheetNames[i]) === 'MISDAILY') { sh = allSheets[i]; how = 'normalised'; break; }
+    }
+  }
+  if (!sh) {
+    for (var j = 0; j < allSheets.length; j++) {
+      var s2 = allSheets[j];
+      if (s2.getLastRow() < 1 || s2.getLastColumn() < 1) continue;
+      var h2 = s2.getRange(1, 1, 1, s2.getLastColumn()).getValues()[0].map(norm);
+      if (h2.indexOf('SONO') >= 0 && h2.indexOf('SOCOMMITTEDQTY') >= 0) { sh = s2; how = 'by-columns'; break; }
+    }
+  }
+  if (!sh) {
+    return { ok: true, mis: {}, count: 0, misUpdateUrl: CRM_MIS_UPDATE_URL,
+             diag: { tabUsed: '', tabMatch: 'not-found', sheetsAvailable: sheetNames, rows: 0, soDetected: false, committedColDetected: false } };
+  }
 
   var lastRow = sh.getLastRow(), lastCol = sh.getLastColumn();
-  if (lastRow < 2) return { ok: true, mis: {}, count: 0, misUpdateUrl: CRM_MIS_UPDATE_URL };
+  if (lastRow < 2) {
+    return { ok: true, mis: {}, count: 0, misUpdateUrl: CRM_MIS_UPDATE_URL,
+             diag: { tabUsed: sh.getName(), tabMatch: how, sheetsAvailable: sheetNames, rows: 0, soDetected: false, committedColDetected: false } };
+  }
 
   var values = sh.getRange(1, 1, lastRow, lastCol).getValues();
   var header = values[0].map(function (h) { return String(h || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); });
@@ -1213,14 +1243,25 @@ function handleMisData() {
     });
   }
 
-  var out = {}, keys = Object.keys(mis);
+  var out = {}, keys = Object.keys(mis), fullyCommitted = 0;
   keys.forEach(function (k) {
     var m = mis[k];
     m.anyCommitted = m.committedQty > 0;
+    // "Committed" for the order = every ordered qty is committed (SO_QTY == COMMITTED_QTY).
     m.allCommitted = m.totalQty > 0 && m.committedQty >= m.totalQty;
+    m.committed = m.allCommitted;   // canonical flag the app keys on
+    if (m.allCommitted) fullyCommitted++;
     out[k] = m;
   });
-  return { ok: true, mis: out, count: keys.length, syncedAt: new Date().toISOString(), misUpdateUrl: CRM_MIS_UPDATE_URL };
+  return {
+    ok: true, mis: out, count: keys.length,
+    syncedAt: new Date().toISOString(), misUpdateUrl: CRM_MIS_UPDATE_URL,
+    diag: {
+      tabUsed: sh.getName(), tabMatch: how, sheetsAvailable: sheetNames,
+      rows: values.length - 1, soDetected: cSo >= 0, committedColDetected: cCommQty >= 0,
+      fullyCommittedSOs: fullyCommitted,
+    },
+  };
 }
 
 function _pad2(n) { n = String(n); return n.length < 2 ? '0' + n : n; }
