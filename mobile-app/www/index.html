@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '55';
+  var V = '56';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -77,6 +77,34 @@
       localStorage.setItem('4s_api_pin', '1');
     }
   } catch(e){}
+})();
+</script>
+
+<!-- Self-update: force the newest code onto every device, even when the
+     WebView / browser has cached an old page. We compare this build's version
+     to version.json (fetched with no-store); on a mismatch we navigate to a
+     cache-busted URL (?v=NEW) so the entry HTML is re-fetched fresh. Runs on
+     load and whenever the app is brought to the foreground. -->
+<script>
+(function(){
+  var RUNV = '56';   // keep in sync with V above and version.json
+  function checkUpdate(){
+    try {
+      fetch('version.json?ts=' + Date.now(), { cache: 'no-store' })
+        .then(function(r){ return r && r.ok ? r.json() : null; })
+        .then(function(j){
+          if (!j || !j.v || String(j.v) === RUNV) return;
+          var tried = sessionStorage.getItem('4s_upd_try');
+          if (tried === String(j.v)) return;            // avoid reload loops
+          sessionStorage.setItem('4s_upd_try', String(j.v));
+          var base = location.pathname.replace(/index\.html$/, '');
+          location.replace(base + '?v=' + encodeURIComponent(j.v));
+        })
+        .catch(function(){});
+    } catch(e){}
+  }
+  window.addEventListener('load', checkUpdate);
+  document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible') checkUpdate(); });
 })();
 </script>
 
@@ -1998,42 +2026,9 @@ function LoadingScreen() {
 }
 
 // ─── Setup ──────────────────────────────────────────────────
-function SetupScreen({ctx}) {
-  const [url,setUrl] = useState(localStorage.getItem('4s_api_url')||'');
-  function save() {
-    if (!url.trim()) return ctx.showToast('Paste the Apps Script URL first','bad');
-    localStorage.setItem('4s_api_url', url.trim());
-    ctx.showToast('API URL saved ✓');
-    ctx.nav('login');
-  }
-  return (
-    <div className="screen" style={{padding:'40px 24px',background:T.paper}}>
-      <FSLogo size={36}/>
-      <h1 style={{fontSize:28,fontWeight:700,letterSpacing:-1,lineHeight:1.1,marginTop:24,color:T.ink}}>First-time setup</h1>
-      <p style={{fontSize:13,color:T.ink3,lineHeight:1.6,marginTop:8}}>Paste your Google Apps Script Web App URL below. You only need to do this once per device.</p>
-      <div style={{marginTop:24,background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,overflow:'hidden'}}>
-        <div style={{padding:'12px 14px',borderBottom:`1px solid ${T.line}`}}>
-          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.8,textTransform:'uppercase',marginBottom:6}}>APPS SCRIPT URL</div>
-          <input value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/…/exec" style={{width:'100%',border:'none',outline:'none',fontSize:13,fontFamily:T.mono,color:T.ink,padding:0,background:'transparent'}}/>
-        </div>
-      </div>
-      <div style={{marginTop:16,padding:14,background:T.greenSoft,border:`1px solid ${T.greenLine}`,borderRadius:8,fontSize:12,color:T.ink3,lineHeight:1.6}}>
-        <b style={{color:T.green}}>How to get this URL:</b><br/>
-        1. Open script.google.com → paste Code.gs<br/>
-        2. Run → ensureSheets (one-time)<br/>
-        3. Deploy → New deployment → Web app<br/>
-        4. Execute as: Me | Anyone can access<br/>
-        5. Copy the URL here
-      </div>
-      <div style={{marginTop:20}}>
-        <Btn primary full size="lg" onClick={save}>Save & Continue →</Btn>
-      </div>
-      <div style={{marginTop:12,textAlign:'center'}}>
-        <span onClick={()=>ctx.nav('login')} style={{fontSize:12,color:T.ink4,cursor:'pointer',textDecoration:'underline'}}>Skip (use existing URL)</span>
-      </div>
-    </div>
-  );
-}
+// The first-time URL-setup screen was removed: the backend URL is baked in and
+// enforced in the background, so users are never asked for it. The router maps
+// any stray 'setup' route to the Login screen.
 
 // ─── Login ──────────────────────────────────────────────────
 function LoginScreen({ctx}) {
