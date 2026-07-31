@@ -1,0 +1,20 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Capacitor / build outputs
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+android/app/release/
+*.apk
+*.aab
+
+# Signing (never commit keystores or their passwords)
+*.keystore
+*.jks
+keystore.properties
+
+# OS
+.DS_Store
