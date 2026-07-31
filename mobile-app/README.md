@@ -12,10 +12,25 @@ Nothing here touches your live app:
 - The web frontend (`/index.html`, `/sw.js`, `/manifest.json`, …) at the repo
   root and its GitHub Pages deployment are **untouched**. This folder has its
   own copy under `mobile-app/www/`.
-- The Apps Script backend is **untouched**. The app is just another client: on
-  first launch you paste the same `…/exec` URL into **Settings**, exactly like
-  the web app, and it reads/writes the same data. (Point it at a test backend
-  instead if you prefer.)
+- The Apps Script backend is **untouched**. The app is just another client of
+  the same `…/exec` URL, so it reads/writes the same data. (Point it at a test
+  backend instead if you prefer.)
+
+## One-time setup: pre-fill the backend URL
+
+So nobody has to paste the `/exec` URL after installing, the build injects it
+from a repository **secret** (this keeps the URL out of the public repo):
+
+1. Repo → **Settings → Secrets and variables → Actions → New repository secret**.
+2. Name it **`API_URL`**, value = your full `https://script.google.com/macros/s/…/exec` URL.
+3. Re-run **Build Android APK**. Every install is now pre-configured — new users
+   land straight on the login screen, no URL entry.
+
+Notes:
+- No secret set → the app simply asks for the URL on first launch (old behavior).
+- Users can still change it under **Settings**; their override is respected.
+- If the backend URL ever changes, update the `API_URL` secret **and** bump
+  `PIN` in `www/index.html` (the seed script) to push the new URL to installs.
 
 ## How you get the APK
 

@@ -35,7 +35,7 @@
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
-    var KEEP = ['4s_api_url','4s_review_url','4s_user','4s_queue','4s_draft'];
+    var KEEP = ['4s_api_url','4s_api_pin','4s_review_url','4s_user','4s_queue','4s_draft'];
     var saved = {};
     for (var ki = 0; ki < KEEP.length; ki++) {
       try { var kv = localStorage.getItem(KEEP[ki]); if (kv !== null) saved[KEEP[ki]] = kv; } catch(e) {}
@@ -58,6 +58,31 @@
       location.reload(true);
     }
   }
+})();
+</script>
+
+<!-- Pre-configured backend URL.
+     '__BAKED_API_URL__' is replaced at build time with the API_URL GitHub
+     secret (see mobile-app/README.md). This seeds the app so users never have
+     to paste the /exec URL. If the placeholder is left unreplaced (no secret),
+     the guard below is skipped and the app falls back to manual Settings entry.
+     Bump PIN when the backend URL changes to push the new URL to installs. -->
+<script>
+(function(){
+  var BAKED_API_URL = '__BAKED_API_URL__';
+  var PIN = '1';
+  try {
+    if (BAKED_API_URL.indexOf('http') === 0) {
+      var cur = localStorage.getItem('4s_api_url');
+      var pin = localStorage.getItem('4s_api_pin');
+      // Seed on first launch; re-apply only when PIN changes (a pushed URL
+      // update). A user's own Settings override is otherwise left untouched.
+      if (!cur || pin !== PIN) {
+        localStorage.setItem('4s_api_url', BAKED_API_URL);
+        localStorage.setItem('4s_api_pin', PIN);
+      }
+    }
+  } catch(e){}
 })();
 </script>
 

@@ -55,6 +55,22 @@ jobs:
       - name: Install JS dependencies
         run: npm ci
 
+      - name: Inject backend URL from the API_URL secret
+        env:
+          API_URL: ${{ secrets.API_URL }}
+        run: |
+          node -e "
+          const fs = require('fs');
+          const u = (process.env.API_URL || '').trim();
+          const f = 'www/index.html';
+          if (!u) { console.log('::warning::No API_URL secret set — app will ask for the URL on first launch.'); process.exit(0); }
+          let s = fs.readFileSync(f, 'utf8');
+          if (!s.includes('__BAKED_API_URL__')) { console.log('::warning::Placeholder __BAKED_API_URL__ not found; skipping.'); process.exit(0); }
+          s = s.split('__BAKED_API_URL__').join(u);
+          fs.writeFileSync(f, s);
+          console.log('Injected backend URL into www/index.html.');
+          "
+
       - name: Sync web assets into the native project
         run: npx cap sync android
 
