@@ -61,15 +61,13 @@
 })();
 </script>
 
-<!-- Pre-configured backend URL.
-     '__BAKED_API_URL__' is replaced at build time with the API_URL GitHub
-     secret (see mobile-app/README.md). This seeds the app so users never have
-     to paste the /exec URL. If the placeholder is left unreplaced (no secret),
-     the guard below is skipped and the app falls back to manual Settings entry.
-     Bump PIN when the backend URL changes to push the new URL to installs. -->
+<!-- Pre-configured backend URL. Seeds the app on first launch so users never
+     have to paste the /exec URL. To change the backend later, update the URL
+     below AND bump PIN, then merge — the new URL is pushed to all installs.
+     (A non-http value here disables the guard and falls back to manual entry.) -->
 <script>
 (function(){
-  var BAKED_API_URL = '__BAKED_API_URL__';
+  var BAKED_API_URL = 'https://script.google.com/macros/s/AKfycbzKocxzCGzHlx9ycP1g2G8e7fijQdAve-jA05p0rMNVbmoP6BXku6WBB9Hw4eCqRTMa/exec';
   var PIN = '1';
   try {
     if (BAKED_API_URL.indexOf('http') === 0) {

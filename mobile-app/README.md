@@ -1,9 +1,29 @@
 # 4S Orders — Android app (APK)
 
 A native Android wrapper around the 4S Interiors Orders app, built with
-[Capacitor](https://capacitorjs.com/). It packages a **copy** of the web
-frontend inside an Android WebView shell so it can be installed as a real app
-(`.apk`) and shared to phones.
+[Capacitor](https://capacitorjs.com/). It installs as a real app (`.apk`) and
+shared to phones, and **loads its screens from a live web copy so updates reach
+every installed app without reinstalling**.
+
+## Over-the-air updates (no reinstalling)
+
+The app is configured (`capacitor.config.json` → `server.url`) to load the
+mobile web copy hosted on GitHub Pages:
+
+```
+https://pritish-dev.github.io/4s-orders/mobile-app/www/
+```
+
+Because this folder is part of the repo, **every merge to `master` redeploys it**
+via GitHub Pages, and every installed app picks up the new version the next time
+it's opened. You do **not** rebuild or reshare the APK for screen/logic changes.
+
+Rebuild the APK only for **native** changes — app icon, splash, Capacitor
+plugins/version, or the `server.url` itself.
+
+- The bundled `www/` copy still ships inside the APK as an offline fallback.
+- This mobile copy is separate from the production website (`/index.html` at the
+  repo root), so the app can evolve its own look without affecting the web app.
 
 ## This is isolated from production
 
@@ -16,21 +36,19 @@ Nothing here touches your live app:
   the same `…/exec` URL, so it reads/writes the same data. (Point it at a test
   backend instead if you prefer.)
 
-## One-time setup: pre-fill the backend URL
+## Pre-filled backend URL
 
-So nobody has to paste the `/exec` URL after installing, the build injects it
-from a repository **secret** (this keeps the URL out of the public repo):
+So nobody has to paste the `/exec` URL after installing, it is baked into the
+hosted copy: the `BAKED_API_URL` constant near the top of `www/index.html`
+seeds it on first launch. New users land straight on the login screen.
 
-1. Repo → **Settings → Secrets and variables → Actions → New repository secret**.
-2. Name it **`API_URL`**, value = your full `https://script.google.com/macros/s/…/exec` URL.
-3. Re-run **Build Android APK**. Every install is now pre-configured — new users
-   land straight on the login screen, no URL entry.
-
-Notes:
-- No secret set → the app simply asks for the URL on first launch (old behavior).
+- The value lives in this (public) hosted copy — acceptable because the same URL
+  already ships inside every distributed APK, and the backend is anonymous-access.
 - Users can still change it under **Settings**; their override is respected.
-- If the backend URL ever changes, update the `API_URL` secret **and** bump
-  `PIN` in `www/index.html` (the seed script) to push the new URL to installs.
+- To change the backend URL later: update `BAKED_API_URL` **and** bump `PIN` in
+  `www/index.html`, then merge — the new URL is pushed to all installs.
+- The GitHub Actions build also still honours an `API_URL` secret for the APK's
+  bundled offline-fallback copy, if set.
 
 ## How you get the APK
 

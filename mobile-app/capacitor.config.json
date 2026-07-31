@@ -2,6 +2,11 @@
   "appId": "com.foursinteriors.orders",
   "appName": "4S Orders",
   "webDir": "www",
+  "server": {
+    "url": "https://pritish-dev.github.io/4s-orders/mobile-app/www/",
+    "androidScheme": "https",
+    "cleartext": false
+  },
   "android": {
     "allowMixedContent": false,
     "backgroundColor": "#F04040"
