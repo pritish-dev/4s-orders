@@ -62,24 +62,19 @@
 })();
 </script>
 
-<!-- Pre-configured backend URL. Seeds the app on first launch so users never
-     have to paste the /exec URL. To change the backend later, update the URL
-     below AND bump PIN, then merge — the new URL is pushed to all installs.
-     (A non-http value here disables the guard and falls back to manual entry.) -->
+<!-- Pre-configured backend URL — enforced silently in the background.
+     The app NEVER asks anyone for the /exec URL; it is fixed to the value
+     below on every launch. To change the backend later, update this one URL
+     and merge — it is pushed to all installs automatically. -->
 <script>
 (function(){
   var BAKED_API_URL = 'https://script.google.com/macros/s/AKfycbzKocxzCGzHlx9ycP1g2G8e7fijQdAve-jA05p0rMNVbmoP6BXku6WBB9Hw4eCqRTMa/exec';
-  var PIN = '1';
   try {
     if (BAKED_API_URL.indexOf('http') === 0) {
-      var cur = localStorage.getItem('4s_api_url');
-      var pin = localStorage.getItem('4s_api_pin');
-      // Seed on first launch; re-apply only when PIN changes (a pushed URL
-      // update). A user's own Settings override is otherwise left untouched.
-      if (!cur || pin !== PIN) {
-        localStorage.setItem('4s_api_url', BAKED_API_URL);
-        localStorage.setItem('4s_api_pin', PIN);
-      }
+      // Always pin the URL (background). Guarantees the setup/URL screens are
+      // never needed — there is nothing for a user to configure.
+      localStorage.setItem('4s_api_url', BAKED_API_URL);
+      localStorage.setItem('4s_api_pin', '1');
     }
   } catch(e){}
 })();
@@ -1594,12 +1589,13 @@ function App() {
   // Restore session
   useEffect(() => {
     const saved = localStorage.getItem('4s_user');
-    const apiUrl = localStorage.getItem('4s_api_url');
+    // The backend URL is always pre-configured in the background, so we never
+    // route to a setup/URL screen — signed-in users go home, everyone else logs in.
     if (saved) {
-      try { setUser(JSON.parse(saved)); setScreen(apiUrl ? 'home' : 'settings'); }
-      catch { setScreen(apiUrl ? 'login' : 'setup'); }
+      try { setUser(JSON.parse(saved)); setScreen('home'); }
+      catch { setScreen('login'); }
     } else {
-      setScreen(apiUrl ? 'login' : 'setup');
+      setScreen('login');
     }
   }, []);
 
@@ -1895,7 +1891,7 @@ function App() {
 
   const screens = {
     loading: <LoadingScreen/>,
-    setup:   <SetupScreen   ctx={ctx}/>,
+    setup:   <LoginScreen   ctx={ctx}/>,  // URL setup removed — never shown
     login:   <LoginScreen   ctx={ctx}/>,
     home:    <HomeScreen    ctx={ctx}/>,
     search:  <SearchScreen  ctx={ctx}/>,
@@ -2040,9 +2036,6 @@ function LoginScreen({ctx}) {
             <Btn primary full size="lg" type="submit" disabled={!username||!password}>Sign in →</Btn>
           </div>
         </form>
-      </div>
-      <div style={{padding:'16px 28px 28px',textAlign:'center'}}>
-        <span onClick={()=>ctx.nav('setup')} style={{fontSize:12,color:T.ink4,cursor:'pointer',textDecoration:'underline'}}>Change API URL</span>
       </div>
     </div>
   );
@@ -3734,23 +3727,9 @@ function SettingsScreen({ctx}) {
       </div>
       <div className="scroll">
 
-        {/* ── Apps Script URL card (moved to top) ── */}
+        {/* Apps Script URL is fixed in the background — no setup UI is shown. */}
         <div style={{padding:'0 18px 14px'}}>
-          <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>APPS SCRIPT URL</div>
-          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,overflow:'hidden'}}>
-            <div style={{padding:'12px 14px',borderBottom:`1px solid ${T.line}`}}>
-              <input value={apiUrl} onChange={e=>setApiUrl(e.target.value)}
-                style={{width:'100%',border:'none',outline:'none',fontFamily:T.mono,fontSize:11,color:T.ink,background:'transparent'}}
-                placeholder="https://script.google.com/macros/s/…/exec"/>
-            </div>
-            <div style={{display:'flex',gap:8,padding:'10px 12px'}}>
-              <Btn full onClick={saveUrl}>Save URL</Btn>
-              <Btn full primary onClick={testConnection} disabled={pinging}>
-                {pinging ? 'Testing…' : 'Test connection'}
-              </Btn>
-            </div>
-          </div>
-          <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,margin:'14px 0 6px'}}>GOOGLE REVIEW LINK (for PDF QR)</div>
+          <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,margin:'0 0 6px'}}>GOOGLE REVIEW LINK (for PDF QR)</div>
           <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
             <input defaultValue={localStorage.getItem('4s_review_url')||''}
               onBlur={e=>{ localStorage.setItem('4s_review_url', e.target.value.trim()); showToast('Review link saved ✓'); }}
