@@ -475,7 +475,11 @@ function handlePriceList(p) {
   }
 
   // Annotate items using the "Discontinued Products" tab (matched by item code):
-  //   REMARKS "Discontinued" → item.discontinued + item.discSince (date)
+  //   Listed at all → item.discontinued + item.discSince (DATE OF DISCONTINUATION).
+  //     The tab is the source of truth, so presence is enough — we do NOT require
+  //     the REMARKS cell to spell out "discontinued". (It used to, which silently
+  //     missed newly-added rows that only filled in the date, changed the wording,
+  //     or left REMARKS blank.)
   //   Any row that carries an Alt item code → item.altCode, which the order
   //   form / PDF / CRM use in place of the (old) price-list code. The alt code
   //   is applied whenever it exists, regardless of the exact REMARKS wording.
@@ -491,11 +495,12 @@ function handlePriceList(p) {
         haveCode[all[d].code] = true;
         var info = discMap[all[d].code];
         if (!info) continue;
-        if (info.remarks.indexOf('discontinu') !== -1) {
-          all[d].discontinued = true;
-          all[d].discSince    = info.date || '';
-          annDiscontinued++;
-        }
+        // Presence in the Discontinued Products tab = discontinued. The date is
+        // shown when available ("DISCONTINUED since <date>"), otherwise the pill
+        // still appears without a date.
+        all[d].discontinued = true;
+        all[d].discSince    = info.date || '';
+        annDiscontinued++;
         if (info.altCode) {
           all[d].altCode = info.altCode;
           if (info.altName) all[d].altName = info.altName;
