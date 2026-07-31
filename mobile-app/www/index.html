@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '57';
+  var V = '58';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -87,7 +87,7 @@
      load and whenever the app is brought to the foreground. -->
 <script>
 (function(){
-  var RUNV = '57';   // keep in sync with V above and version.json
+  var RUNV = '58';   // keep in sync with V above and version.json
   function checkUpdate(){
     try {
       fetch('version.json?ts=' + Date.now(), { cache: 'no-store' })
@@ -122,6 +122,11 @@ html,body{margin:0;padding:0;background:#f4f2ee;font-family:'Inter',system-ui,sa
 #root{min-height:100vh;display:flex;justify-content:center;background:#d9d5cc}
 @media(max-width:430px){#root{background:#f4f2ee}}
 .app-shell{width:100%;max-width:430px;min-height:100vh;background:#f4f2ee;position:relative;display:flex;flex-direction:column;overflow:hidden}
+/* Tablets / large screens: let the app breathe instead of a cramped 430px column.
+   Content stays single-column (grids are fluid) but gains usable width, and the
+   shell reads as a centered card. Phones (<600px) are untouched. */
+@media(min-width:600px){.app-shell{max-width:600px;box-shadow:0 12px 48px rgba(0,0,0,.12)}}
+@media(min-width:1024px){.app-shell{max-width:680px}}
 /* Respect notch / Dynamic Island */
 .app-shell{padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
 input,textarea,select{font-family:'Inter',system-ui,sans-serif;font-size:15px}
@@ -131,6 +136,7 @@ button{font-family:'Inter',system-ui,sans-serif;cursor:pointer}
 @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 @keyframes slideUp{from{opacity:0;transform:translateY(30px)}to{opacity:1;transform:translateY(0)}}
 @keyframes blink{50%{opacity:0}}
+@keyframes shimmer{0%{background-position:100% 0}100%{background-position:0 0}}
 .screen{flex:1;display:flex;flex-direction:column;overflow:hidden;animation:fadeIn .18s ease}
 .scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
 
@@ -671,6 +677,28 @@ function SectionHead({n,label,action,onAction}) {
 
 function Spinner({size=20,color=T.green}) {
   return <div style={{width:size,height:size,border:`2px solid ${color}22`,borderTopColor:color,borderRadius:'50%',animation:'spin .7s linear infinite',flexShrink:0}}/>;
+}
+
+// Shimmering placeholder bar — used to build skeleton screens so the app looks
+// alive while data loads, instead of a blank pane or a lone spinner.
+function Skeleton({h=14,w='100%',r=6,mb=0,style}) {
+  return <div style={{height:h,width:w,borderRadius:r,marginBottom:mb,background:`linear-gradient(90deg,${T.paper2} 25%,${T.line} 37%,${T.paper2} 63%)`,backgroundSize:'400% 100%',animation:'shimmer 1.4s ease infinite',...style}}/>;
+}
+// One skeleton row shaped like an order card in the history / recent-orders lists.
+function SkeletonOrderRow() {
+  return (
+    <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`,padding:'12px 18px',display:'grid',gridTemplateColumns:'1fr auto',gap:10,alignItems:'center'}}>
+      <div style={{minWidth:0}}>
+        <Skeleton h={11} w={90} mb={7}/>
+        <Skeleton h={14} w={'60%'} mb={6}/>
+        <Skeleton h={10} w={110}/>
+      </div>
+      <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:8}}>
+        <Skeleton h={16} w={70}/>
+        <Skeleton h={18} w={90} r={99}/>
+      </div>
+    </div>
+  );
 }
 
 function Toast({msg,type='ok',onClose}) {
@@ -2338,7 +2366,8 @@ function HomeScreen({ctx}) {
               </div>
             </div>
           ))}
-          {orders.length===0&&<div style={{padding:24,textAlign:'center',fontSize:13,color:T.ink4}}>No orders yet. Tap "Book an order" to start.</div>}
+          {loading && orders.length===0 && [0,1,2].map(i=><SkeletonOrderRow key={i}/>)}
+          {!loading && orders.length===0 && <div style={{padding:24,textAlign:'center',fontSize:13,color:T.ink4}}>No orders yet. Tap "Book an order" to start.</div>}
         </div>
         <div style={{height:24}}/>
       </div>
@@ -3352,9 +3381,44 @@ function PartialDeliverySummary({order, onEdit}) {
   );
 }
 
+// The WhatsApp order-confirmation message, shared by the PDF preview and the
+// order-history row so the wording stays identical everywhere.
+function orderWhatsAppMessage(o) {
+  const {total, earnest, balance} = orderTotals(o);
+  return `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${gstInclLine(i).toLocaleString('en-IN')}`).join('\n')}\n\n*Total (incl. GST):* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${earnest.toLocaleString('en-IN')}\n*Balance:* ₹${balance.toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
+}
+
+// Share the order PDF through the device share sheet (WhatsApp, Gmail, Drive…)
+// with the confirmation message as the caption — the salesperson taps once and
+// the actual PDF is attached. Devices without file-share support (most desktops)
+// fall back to downloading the PDF and opening a WhatsApp chat with the text, so
+// the file can be attached manually. A dismissed share sheet is a no-op.
+async function shareOrderPDF(o, copyType, showToast) {
+  const safeNo = (o.no||'draft').replace('/','‑');
+  const fname  = 'Order-'+safeNo+'-'+(copyType==='sales'?'Sales':'Customer')+'.pdf';
+  const text   = orderWhatsAppMessage(o);
+  let doc;
+  try { doc = generatePDF(o, copyType); }
+  catch(e) { if (showToast) showToast('Could not build the PDF','bad'); return; }
+  try {
+    const file = new File([doc.output('blob')], fname, {type:'application/pdf'});
+    if (navigator.canShare && navigator.canShare({files:[file]})) {
+      await navigator.share({files:[file], text});
+      return;
+    }
+  } catch(e) {
+    if (e && e.name === 'AbortError') return;   // user closed the share sheet
+    // any other error → fall through to the download + chat fallback
+  }
+  try { doc.save(fname); } catch(e) {}
+  const phone = (o.phone||'').replace(/\D/g,'');
+  window.open('https://wa.me/'+(phone?'91'+phone:'')+'?text='+encodeURIComponent(text), '_blank');
+  if (showToast) showToast('PDF saved — attach it in the WhatsApp chat','ok');
+}
+
 // ─── PDF Preview ─────────────────────────────────────────────
 function PDFPreviewScreen({ctx}) {
-  const {order,nav,back} = ctx;
+  const {order,nav,back,showToast} = ctx;
   const o = order;
   const {itemsSubtotal, orderDiscPct, orderDiscAmt, cgst, sgst, total, earnest, balance} = orderTotals(o);
   const qrRef = useRef(null);
@@ -3380,11 +3444,9 @@ function PDFPreviewScreen({ctx}) {
     generatePDF(o, 'sales').save('Order-'+safeNo+'-Sales.pdf');
   }
 
-  function whatsapp() {
-    const msg = `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${gstInclLine(i).toLocaleString('en-IN')}`).join('\n')}\n\n*Total (incl. GST):* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${earnest.toLocaleString('en-IN')}\n*Balance:* ₹${balance.toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
-    const phone = (o.phone||'').replace(/\D/g,'');
-    window.open('https://wa.me/91'+phone+'?text='+encodeURIComponent(msg),'_blank');
-  }
+  // Attach the customer PDF and open the device share sheet (WhatsApp is one tap
+  // away, with the file already attached). See shareOrderPDF for the fallback.
+  function whatsapp() { shareOrderPDF(o, 'customer', showToast); }
 
   return (
     <div className="screen" style={{background:T.ink2}}>
@@ -3459,7 +3521,7 @@ function PDFPreviewScreen({ctx}) {
           <button onClick={downloadSales} style={{flex:1,height:46,borderRadius:6,background:'rgba(255,255,255,.08)',border:'1px solid rgba(255,255,255,.15)',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',gap:6,cursor:'pointer',fontSize:13,fontWeight:600,fontFamily:T.sans}}>{Icon.download('#fff',16)}Sales PDF</button>
         </div>
         <div style={{display:'flex',gap:8}}>
-          <button onClick={whatsapp} style={{flex:2,height:46,borderRadius:6,background:'#25d366',border:'none',color:'#fff',fontWeight:700,fontFamily:T.sans,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:7,cursor:'pointer'}}>{Icon.whatsapp()}WhatsApp</button>
+          <button onClick={whatsapp} style={{flex:2,height:46,borderRadius:6,background:'#25d366',border:'none',color:'#fff',fontWeight:700,fontFamily:T.sans,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:7,cursor:'pointer'}}>{Icon.whatsapp()}Share PDF</button>
           <button onClick={()=>nav('home')} style={{flex:1,height:46,borderRadius:6,background:'#fff',border:'none',color:T.ink,fontWeight:700,fontFamily:T.sans,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>Done</button>
         </div>
       </div>
@@ -3469,7 +3531,7 @@ function PDFPreviewScreen({ctx}) {
 
 // ─── Order History ───────────────────────────────────────────
 function HistoryScreen({ctx}) {
-  const {orders,mis,nav,loadOrders,loadMis,doUpdateDelivery,doDeleteOrder,user,misLoading} = ctx;
+  const {orders,mis,nav,loadOrders,loadMis,doUpdateDelivery,doDeleteOrder,user,misLoading,loading} = ctx;
   const isAdmin = normRole(user?.role) === 'admin';
   // Default view: Pending orders of ALL salespersons.
   const [tab,setTab] = useState('pending');
@@ -3585,15 +3647,23 @@ function HistoryScreen({ctx}) {
                   style={{padding:'4px 6px',borderRadius:4,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:11,fontWeight:600,cursor:'pointer',WebkitAppearance:'none',appearance:'none',maxWidth:130}}>
                   {DELIVERY_STATUSES.map(s=><option key={s} value={s}>{s}</option>)}
                 </select>
-                <span title="Edit order" onClick={e=>{e.stopPropagation();openOrder(o);}} style={{width:28,height:24,borderRadius:4,background:T.greenSoft,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.edit(T.green,13)}</span>
-                <span title="Order PDF" onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)});nav('pdf');}} style={{width:28,height:24,borderRadius:4,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,13)}</span>
-                <span onClick={e=>{e.stopPropagation();const phone=(o.phone||'').replace(/\D/g,'');if(phone)window.open('https://wa.me/91'+phone);}} style={{width:28,height:24,borderRadius:4,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',13)}</span>
-                {isAdmin&&<span title="Delete order (admin)" onClick={e=>{e.stopPropagation();deleteOrder(o);}} style={{width:28,height:24,borderRadius:4,background:T.badSoft||'#fdecec',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.trash(T.bad,13)}</span>}
+                <span title="Edit order" onClick={e=>{e.stopPropagation();openOrder(o);}} style={{width:32,height:28,borderRadius:5,background:T.greenSoft,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.edit(T.green,14)}</span>
+                <span title="Order PDF" onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)});nav('pdf');}} style={{width:32,height:28,borderRadius:5,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,14)}</span>
+                <span title="Share PDF on WhatsApp" onClick={e=>{e.stopPropagation();shareOrderPDF(o,'customer',ctx.showToast);}} style={{width:32,height:28,borderRadius:5,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',14)}</span>
+                {isAdmin&&<span title="Delete order (admin)" onClick={e=>{e.stopPropagation();deleteOrder(o);}} style={{width:32,height:28,borderRadius:5,background:T.badSoft||'#fdecec',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.trash(T.bad,14)}</span>}
               </div>
             </div>
           </div>
         ))}
-        {shown.length===0&&<div style={{padding:32,textAlign:'center',fontSize:13,color:T.ink4}}>No orders match.</div>}
+        {loading && orders.length===0
+          ? [0,1,2,3,4].map(i=><SkeletonOrderRow key={i}/>)
+          : shown.length===0 && (
+              <div style={{padding:'48px 24px',textAlign:'center'}}>
+                <div style={{width:52,height:52,borderRadius:14,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12}}>{Icon.doc(T.ink4,24)}</div>
+                <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No orders here</div>
+                <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>{query||salesFilter?'Try clearing the search or the salesperson filter.':'Orders you book will appear here.'}</div>
+              </div>
+            )}
         <div style={{height:24}}/>
       </div>
       {partialOrder && <PartialDeliveryModal order={partialOrder} onCancel={()=>setPartialOrder(null)} onConfirm={confirmPartial}/>}
