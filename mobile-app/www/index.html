@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '54';
+  var V = '55';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -2123,26 +2123,56 @@ function LoginScreen({ctx}) {
 // Order date is "dd.mm.yy"; drafts are excluded from the counts.
 const _MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 function _fmtAmt(n){ n = n||0; return n>99999 ? ('₹'+(n/100000).toFixed(2)+'L') : ('₹'+n.toLocaleString('en-IN')); }
+// "dd.mm.yy" → sortable/comparable ISO "20yy-mm-dd" (matches <input type=date> values).
+function _toISO(dmy){ const p = String(dmy||'').split('.'); return p.length===3 ? ('20'+p[2]+'-'+p[1]+'-'+p[0]) : ''; }
 function ReportsScreen({ctx}) {
   const {orders,nav} = ctx;
-  const booked = (orders||[]).filter(o => o && o.status !== 'draft');
+  const [from,setFrom]     = useState('');
+  const [to,setTo]         = useState('');
+  const [preset,setPreset] = useState('all');
+
+  const _pad = n => String(n).padStart(2,'0');
+  const _iso = d => d.getFullYear()+'-'+_pad(d.getMonth()+1)+'-'+_pad(d.getDate());
+  function applyPreset(id){
+    const now = new Date(), y = now.getFullYear(), m = now.getMonth();
+    setPreset(id);
+    if (id==='all')       { setFrom(''); setTo(''); }
+    else if (id==='month'){ setFrom(_iso(new Date(y,m,1)));  setTo(_iso(now)); }
+    else if (id==='year') { setFrom(_iso(new Date(y,0,1)));  setTo(_iso(now)); }
+  }
+
+  const booked = (orders||[]).filter(o => o && o.status !== 'draft').filter(o => {
+    const iso = _toISO(o.date);
+    if (!iso) return !from && !to;                 // undated: only when no range set
+    if (from && iso < from) return false;
+    if (to   && iso > to)   return false;
+    return true;
+  });
   const totalCount = booked.length;
   const totalAmt   = booked.reduce((s,o)=>s+(o.amt||0),0);
 
-  const monthMap = {}, dayMap = {};
+  const monthMap = {}, dayMap = {}, salesMap = {}, branchMap = {};
   booked.forEach(o => {
-    const p = String(o.date||'').split('.');   // [dd, mm, yy]
+    const p = String(o.date||'').split('.');       // [dd, mm, yy]
     if (p.length === 3) {
-      const mk = p[2] + '.' + p[1];            // yy.mm — sorts chronologically
+      const mk = p[2] + '.' + p[1];                // yy.mm — sorts chronologically
       if (!monthMap[mk]) monthMap[mk] = { count:0, amt:0, label:(_MONTHS[(parseInt(p[1],10)||1)-1]||p[1])+' 20'+p[2] };
       monthMap[mk].count++; monthMap[mk].amt += (o.amt||0);
       const dk = p[2] + '.' + p[1] + '.' + p[0];
       if (!dayMap[dk]) dayMap[dk] = { count:0, amt:0, label:o.date };
       dayMap[dk].count++; dayMap[dk].amt += (o.amt||0);
     }
+    const sp = (o.salesExec||'').trim() || '(unassigned)';
+    if (!salesMap[sp]) salesMap[sp] = { count:0, amt:0, label:sp };
+    salesMap[sp].count++; salesMap[sp].amt += (o.amt||0);
+    const br = (o.branch||'').trim();              // only present if the sheet carries it
+    if (br) { if (!branchMap[br]) branchMap[br] = { count:0, amt:0, label:br }; branchMap[br].count++; branchMap[br].amt += (o.amt||0); }
   });
+  const byAmt  = (a,b)=> b[1].amt - a[1].amt;
   const months = Object.entries(monthMap).sort((a,b)=>b[0].localeCompare(a[0]));
   const days   = Object.entries(dayMap).sort((a,b)=>b[0].localeCompare(a[0])).slice(0, 60);
+  const sales  = Object.entries(salesMap).sort(byAmt);
+  const branches = Object.entries(branchMap).sort(byAmt);
 
   const Row = ({label, sub, count, amt}) => (
     <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 14px',borderBottom:`1px solid ${T.line}`}}>
@@ -2152,6 +2182,18 @@ function ReportsScreen({ctx}) {
         <div style={{fontSize:10,color:T.ink4,marginTop:1}}>{count} order{count===1?'':'s'}</div>
       </div>
     </div>
+  );
+  const Section = ({title, rows, empty}) => (
+    <>
+      <div style={{padding:'14px 18px 6px',fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:1.2,textTransform:'uppercase'}}>{title}</div>
+      <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`}}>
+        {rows.map(([k,v]) => <Row key={k} label={v.label} count={v.count} amt={v.amt}/>)}
+        {rows.length===0 && <div style={{padding:20,textAlign:'center',fontSize:12,color:T.ink4}}>{empty||'No booked orders in this range.'}</div>}
+      </div>
+    </>
+  );
+  const chip = (id,label) => (
+    <span onClick={()=>applyPreset(id)} style={{padding:'6px 12px',borderRadius:99,background:preset===id?T.ink:'#fff',color:preset===id?'#fff':T.ink2,border:`1px solid ${preset===id?T.ink:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0}}>{label}</span>
   );
 
   return (
@@ -2164,7 +2206,18 @@ function ReportsScreen({ctx}) {
             <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Orders &amp; amount</div>
           </div>
         </div>
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,padding:'6px 14px 12px'}}>
+        {/* Date-range filter */}
+        <div style={{display:'flex',gap:6,padding:'2px 14px 8px',overflowX:'auto'}}>
+          {chip('all','All time')}{chip('month','This month')}{chip('year','This year')}{chip('custom','Custom')}
+        </div>
+        {preset==='custom' && (
+          <div style={{display:'flex',gap:8,alignItems:'center',padding:'0 14px 10px'}}>
+            <input type="date" value={from} onChange={e=>{setFrom(e.target.value);}} style={{flex:1,border:`1px solid ${T.line}`,borderRadius:6,padding:'8px 10px',fontFamily:T.mono,fontSize:12,color:T.ink,background:'#fff'}}/>
+            <span style={{fontSize:12,color:T.ink4}}>to</span>
+            <input type="date" value={to} onChange={e=>{setTo(e.target.value);}} style={{flex:1,border:`1px solid ${T.line}`,borderRadius:6,padding:'8px 10px',fontFamily:T.mono,fontSize:12,color:T.ink,background:'#fff'}}/>
+          </div>
+        )}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,padding:'2px 14px 12px'}}>
           <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
             <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TOTAL ORDERS</div>
             <div style={{fontSize:26,fontWeight:800,letterSpacing:-1,color:T.ink,lineHeight:1.1,marginTop:4}}>{totalCount}</div>
@@ -2176,16 +2229,10 @@ function ReportsScreen({ctx}) {
         </div>
       </div>
       <div className="scroll">
-        <div style={{padding:'4px 18px 6px',fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:1.2,textTransform:'uppercase'}}>Month-wise</div>
-        <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`}}>
-          {months.map(([k,v]) => <Row key={k} label={v.label} count={v.count} amt={v.amt}/>)}
-          {months.length===0 && <div style={{padding:24,textAlign:'center',fontSize:13,color:T.ink4}}>No booked orders yet.</div>}
-        </div>
-        <div style={{padding:'14px 18px 6px',fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:1.2,textTransform:'uppercase'}}>Day-wise (latest 60)</div>
-        <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`}}>
-          {days.map(([k,v]) => <Row key={k} label={v.label} count={v.count} amt={v.amt}/>)}
-          {days.length===0 && <div style={{padding:24,textAlign:'center',fontSize:13,color:T.ink4}}>No booked orders yet.</div>}
-        </div>
+        <Section title="By salesperson" rows={sales}/>
+        {branches.length>0 && <Section title="By branch" rows={branches}/>}
+        <Section title="Month-wise" rows={months}/>
+        <Section title="Day-wise (latest 60)" rows={days}/>
         <div style={{height:24}}/>
       </div>
       <BottomNav screen="home" nav={nav}/>
