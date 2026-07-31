@@ -36,6 +36,33 @@ Nothing here touches your live app:
   the same `…/exec` URL, so it reads/writes the same data. (Point it at a test
   backend instead if you prefer.)
 
+## iPhone / iPad (iOS)
+
+Android and iOS are different platforms — the `.apk` does not run on iOS, and
+Apple does not allow installing app files directly (no sideloading). A native
+iOS app can only be distributed through the **App Store or TestFlight**, which
+needs a paid **Apple Developer account ($99/year)** and a Mac-signed build.
+
+Because the app now loads from a live URL, iPhone/iPad users get the same app —
+same screens, same auto-updates, backend pre-filled — with **no App Store and no
+cost**, via Safari's *Add to Home Screen*:
+
+1. Open **https://pritish-dev.github.io/4s-orders/mobile-app/www/** in **Safari**
+   (must be Safari, not Chrome).
+2. Tap the **Share** button → **Add to Home Screen** → **Add**.
+3. A **4S Orders** icon appears on the home screen and opens full-screen like a
+   native app. It updates automatically whenever the hosted copy changes.
+
+For iOS the shareable thing is the **link** (not a file). A native App Store /
+TestFlight build can be added later if desired — see "Native iOS build" below.
+
+### Native iOS build (optional, needs Apple Developer account)
+
+The Capacitor project can also target iOS (`npx cap add ios`) and be built on a
+macOS runner, but it can only be installed on devices once you enrol in the
+Apple Developer Program and provide signing credentials (certificate +
+provisioning profile). Ask and this can be scaffolded with a macOS CI workflow.
+
 ## Pre-filled backend URL
 
 So nobody has to paste the `/exec` URL after installing, it is baked into the
