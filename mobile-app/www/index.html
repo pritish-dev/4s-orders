@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '53';
+  var V = '54';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -251,13 +251,15 @@ async function apiPost(body, tries = 3) {
 // ═══════════════════════════════════════════════════════════
 const OPS_SHEET_ID = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 
-async function loadPriceListItems(forceFresh = false) {
+async function loadPriceListItems(forceFresh = false, skipLocalCache = false) {
   const CACHE_KEY = '4s_price_items_v9';
   const CACHE_TS  = '4s_price_items_v9_ts';
   const AGE_MS    = 6 * 60 * 60 * 1000; // 6 hours
 
-  // Serve from the local cache if fresh (skipped on a manual Sync)
-  if (!forceFresh) {
+  // Serve from the local cache if fresh (skipped on a manual Sync, and on a
+  // background reopen-sync where we want whatever another user last pushed to
+  // the shared server cache — cheap because the server serves its own cache).
+  if (!forceFresh && !skipLocalCache) {
     const cached   = localStorage.getItem(CACHE_KEY);
     const cachedAt = localStorage.getItem(CACHE_TS);
     if (cached && cachedAt && Date.now() - Number(cachedAt) < AGE_MS) {
@@ -1528,6 +1530,39 @@ function buildNotifications(orders, mis) {
   return out;
 }
 
+// ── Notification chime ───────────────────────────────────────────────────────
+// A short two-tone bell played via the Web Audio API (no asset needed) whenever
+// a new notification arrives. Browsers require a prior user gesture before audio
+// can play, so we lazily create/resume the AudioContext on the first tap.
+let _audioCtx = null;
+function _getAudioCtx() {
+  try {
+    if (!_audioCtx) { const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return null; _audioCtx = new AC(); }
+    if (_audioCtx.state === 'suspended') _audioCtx.resume();
+    return _audioCtx;
+  } catch (e) { return null; }
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('pointerdown', () => { _getAudioCtx(); }, { once: true });
+}
+function playBell() {
+  const ctx = _getAudioCtx();
+  if (!ctx) return;
+  try {
+    const now = ctx.currentTime;
+    [ [880, 0], [1174, 0.14] ].forEach(([freq, dt]) => {
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.type = 'sine'; osc.frequency.value = freq;
+      osc.connect(gain); gain.connect(ctx.destination);
+      const t = now + dt;
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.35, t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.45);
+      osc.start(t); osc.stop(t + 0.5);
+    });
+  } catch (e) {}
+}
+
 function App() {
   const [screen,        setScreen]       = useState('loading');
   const [user,          setUser]         = useState(null);
@@ -1622,6 +1657,39 @@ function App() {
       // slow background refresh. Only surface an error when there's nothing to show.
       .catch(e => { if (!hadCachedPL) setPriceSyncError(e.message); });
     loadMis({ silent: true });
+  }, [user]);
+
+  // Re-sync shared data every time the app is reopened / brought to the
+  // foreground. All devices read the same backend, so whatever price list,
+  // stock, MIS or orders ANY user last synced shows up for everyone on open —
+  // the manual Sync buttons stay available for an on-demand refresh.
+  useEffect(() => {
+    if (!user) return;
+    let last = 0;
+    const resync = () => {
+      if (document.visibilityState && document.visibilityState !== 'visible') return;
+      const now = Date.now();
+      if (now - last < 15000) return;   // debounce rapid focus/visibility churn
+      last = now;
+      syncStock({ silent: true });
+      loadMis({ silent: true });
+      loadOrders();
+      loadPriceListItems(false, true)   // skip local cache, use shared server cache
+        .then(pi => {
+          if (pi && pi.length) {
+            setPriceItems(pi);
+            const ts = localStorage.getItem('4s_price_items_v9_ts');
+            if (ts) setPriceSyncedAt(new Date(Number(ts)).toISOString());
+          }
+        })
+        .catch(() => {});
+    };
+    document.addEventListener('visibilitychange', resync);
+    window.addEventListener('focus', resync);
+    return () => {
+      document.removeEventListener('visibilitychange', resync);
+      window.removeEventListener('focus', resync);
+    };
   }, [user]);
 
   // Restore an unsaved order draft once, right after login
@@ -1862,6 +1930,14 @@ function App() {
     localStorage.setItem('4s_notif_seen', JSON.stringify(ids));
   }, [orders, mis]);
 
+  // Ring the bell when the unread count goes up (a genuinely new alert). The
+  // initial value is skipped so it doesn't chime just for pre-existing alerts.
+  const prevUnreadRef = useRef(null);
+  useEffect(() => {
+    if (prevUnreadRef.current !== null && unreadCount > prevUnreadRef.current) playBell();
+    prevUnreadRef.current = unreadCount;
+  }, [unreadCount]);
+
   // Fire a native (OS) notification once per new event, so the sales team is
   // alerted even when the app is only in the background. Guarded by permission.
   const pushedRef = useRef(null);
@@ -1901,6 +1977,7 @@ function App() {
     won:     <WONUpdateScreen ctx={ctx}/>,
     notifs:  <NotificationsScreen ctx={ctx}/>,
     settings:<SettingsScreen ctx={ctx}/>,
+    reports: <ReportsScreen ctx={ctx}/>,
   };
 
   return (
@@ -2041,9 +2118,85 @@ function LoginScreen({ctx}) {
   );
 }
 
+// ─── Reports / Sales summary ─────────────────────────────────
+// Booked orders grouped by day and by month, from the already-loaded orders.
+// Order date is "dd.mm.yy"; drafts are excluded from the counts.
+const _MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function _fmtAmt(n){ n = n||0; return n>99999 ? ('₹'+(n/100000).toFixed(2)+'L') : ('₹'+n.toLocaleString('en-IN')); }
+function ReportsScreen({ctx}) {
+  const {orders,nav} = ctx;
+  const booked = (orders||[]).filter(o => o && o.status !== 'draft');
+  const totalCount = booked.length;
+  const totalAmt   = booked.reduce((s,o)=>s+(o.amt||0),0);
+
+  const monthMap = {}, dayMap = {};
+  booked.forEach(o => {
+    const p = String(o.date||'').split('.');   // [dd, mm, yy]
+    if (p.length === 3) {
+      const mk = p[2] + '.' + p[1];            // yy.mm — sorts chronologically
+      if (!monthMap[mk]) monthMap[mk] = { count:0, amt:0, label:(_MONTHS[(parseInt(p[1],10)||1)-1]||p[1])+' 20'+p[2] };
+      monthMap[mk].count++; monthMap[mk].amt += (o.amt||0);
+      const dk = p[2] + '.' + p[1] + '.' + p[0];
+      if (!dayMap[dk]) dayMap[dk] = { count:0, amt:0, label:o.date };
+      dayMap[dk].count++; dayMap[dk].amt += (o.amt||0);
+    }
+  });
+  const months = Object.entries(monthMap).sort((a,b)=>b[0].localeCompare(a[0]));
+  const days   = Object.entries(dayMap).sort((a,b)=>b[0].localeCompare(a[0])).slice(0, 60);
+
+  const Row = ({label, sub, count, amt}) => (
+    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 14px',borderBottom:`1px solid ${T.line}`}}>
+      <div><div style={{fontSize:13,fontWeight:700,color:T.ink}}>{label}</div>{sub?<div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:1}}>{sub}</div>:null}</div>
+      <div style={{textAlign:'right'}}>
+        <div style={{fontSize:14,fontFamily:T.mono,fontWeight:700,color:T.ink}}>{_fmtAmt(amt)}</div>
+        <div style={{fontSize:10,color:T.ink4,marginTop:1}}>{count} order{count===1?'':'s'}</div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="screen">
+      <div style={{flexShrink:0}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 8px'}}>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+          <div style={{flex:1}}>
+            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>SALES SUMMARY</div>
+            <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Orders &amp; amount</div>
+          </div>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,padding:'6px 14px 12px'}}>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TOTAL ORDERS</div>
+            <div style={{fontSize:26,fontWeight:800,letterSpacing:-1,color:T.ink,lineHeight:1.1,marginTop:4}}>{totalCount}</div>
+          </div>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TOTAL AMOUNT</div>
+            <div style={{fontSize:26,fontWeight:800,letterSpacing:-1,color:T.green,lineHeight:1.1,marginTop:4}}>{_fmtAmt(totalAmt)}</div>
+          </div>
+        </div>
+      </div>
+      <div className="scroll">
+        <div style={{padding:'4px 18px 6px',fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:1.2,textTransform:'uppercase'}}>Month-wise</div>
+        <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`}}>
+          {months.map(([k,v]) => <Row key={k} label={v.label} count={v.count} amt={v.amt}/>)}
+          {months.length===0 && <div style={{padding:24,textAlign:'center',fontSize:13,color:T.ink4}}>No booked orders yet.</div>}
+        </div>
+        <div style={{padding:'14px 18px 6px',fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:1.2,textTransform:'uppercase'}}>Day-wise (latest 60)</div>
+        <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`}}>
+          {days.map(([k,v]) => <Row key={k} label={v.label} count={v.count} amt={v.amt}/>)}
+          {days.length===0 && <div style={{padding:24,textAlign:'center',fontSize:13,color:T.ink4}}>No booked orders yet.</div>}
+        </div>
+        <div style={{height:24}}/>
+      </div>
+      <BottomNav screen="home" nav={nav}/>
+    </div>
+  );
+}
+
 // ─── Home ───────────────────────────────────────────────────
 function HomeScreen({ctx}) {
   const {user,orders,syncedAt,priceItems,priceSyncError,nav,loadOrders,syncPriceList,loading,unreadCount,loadMis} = ctx;
+  const isAdmin = normRole(user?.role) === 'admin';
   const todayOrders = orders.filter(o=>o.date===istToday({day:'2-digit',month:'2-digit',year:'2-digit'}).replace(/\//g,'.'));
   const pendingWON  = orders.filter(o=>!o.won&&o.status!=='draft').length;
   const mtd         = orders.reduce((s,o)=>s+o.amt,0);
@@ -2083,15 +2236,17 @@ function HomeScreen({ctx}) {
             <div style={{width:40,height:40,borderRadius:99,background:'#fff',display:'flex',alignItems:'center',justifyContent:'center'}}>{Icon.plus(T.green)}</div>
           </button>
         </div>
-        {/* Manual Order — same booking flow as "Book an order", but the booking
-            date is settable and 18% GST is baked into each item's price. Used to
-            replicate orders that were booked manually (on paper). */}
+        {/* Manual Order — admin only. Same booking flow as "Book an order", but
+            the booking date is settable and 18% GST is baked into each item's
+            price. Used to replicate orders that were booked manually (on paper). */}
+        {isAdmin && (
         <div style={{padding:'0 18px 12px'}}>
           <button onClick={()=>{ctx.setOrder({...BLANK_ORDER(),manualOrder:true,salesExec:user?.name||''});nav('order');}} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 18px',background:T.ink,color:'#fff',border:'none',borderRadius:8,cursor:'pointer',textAlign:'left'}}>
             <div><div style={{fontSize:11,fontWeight:600,opacity:.7,letterSpacing:.5,textTransform:'uppercase'}}>MANUAL</div><div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4,marginTop:2}}>Manual Order</div></div>
             <div style={{width:40,height:40,borderRadius:99,background:'#fff',display:'flex',alignItems:'center',justifyContent:'center'}}>{Icon.plus(T.ink)}</div>
           </button>
         </div>
+        )}
         {/* Price list status banner */}
         {!priceItems?.length && (
           <div style={{margin:'0 18px 10px',padding:'10px 14px',background:priceSyncError?T.badSoft:T.warnSoft,border:`1.5px solid ${priceSyncError?T.bad:T.warn}`,borderRadius:8,display:'flex',alignItems:'center',justifyContent:'space-between',gap:10}}>
@@ -2111,6 +2266,15 @@ function HomeScreen({ctx}) {
               {q.sub?<div style={{fontSize:10,fontWeight:700,fontFamily:T.mono,color:q.tone}}>{q.sub}</div>:null}
             </div>
           ))}
+        </div>
+        <div style={{padding:'0 18px 12px'}}>
+          <button onClick={()=>nav('reports')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 18px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,cursor:'pointer',textAlign:'left'}}>
+            <div style={{display:'flex',alignItems:'center',gap:12}}>
+              {Icon.doc(T.green,18)}
+              <div><div style={{fontSize:14,fontWeight:700,color:T.ink,letterSpacing:-0.2}}>Sales summary</div><div style={{fontSize:11,color:T.ink4}}>Orders &amp; amount · daily and month-wise</div></div>
+            </div>
+            <div style={{fontSize:18,color:T.ink4}}>→</div>
+          </button>
         </div>
         <div style={{padding:'0 18px 6px',display:'flex',alignItems:'baseline',justifyContent:'space-between'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:1.2,textTransform:'uppercase'}}>RECENT ORDERS</div>
@@ -3482,7 +3646,8 @@ function requestNotifPermission() {
 }
 
 function NotificationsScreen({ctx}) {
-  const {notifications, mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, loadOrders, markNotifsSeen, nav, setOrder, showToast} = ctx;
+  const {user, notifications, mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, loadOrders, markNotifsSeen, nav, setOrder, showToast} = ctx;
+  const isAdmin = normRole(user?.role) === 'admin';
   // Mark everything read when this screen opens.
   useEffect(() => { markNotifsSeen(); }, []);
   const [perm, setPerm] = useState(('Notification' in window) ? Notification.permission : 'unsupported');
@@ -3532,7 +3697,8 @@ function NotificationsScreen({ctx}) {
             {Icon.cloud('#fff',14)} Force-fetch latest MIS from Gmail (CRM)
           </button>
           <div style={{fontSize:10.5,color:T.ink4,marginTop:6,lineHeight:1.5}}>Opens the CRM dashboard's MIS refresh (pulls the newest Godrej MIS e-mail into the sheet). Then tap <b>Update MIS</b> above.</div>
-          {/* Diagnostics — lets you confirm the feed is being read correctly */}
+          {/* Diagnostics — admin only; confirms the feed is being read correctly */}
+          {isAdmin && (<>
           <div onClick={()=>setShowDiag(v=>!v)} style={{marginTop:8,fontSize:11,fontWeight:700,color:T.green,cursor:'pointer'}}>{showDiag?'▾ Hide diagnostics':'▸ Diagnostics (confirm the feed)'}</div>
           {showDiag && (
             <div style={{marginTop:6,padding:'8px 10px',background:T.paper2,borderRadius:6,fontSize:10.5,fontFamily:T.mono,color:T.ink3,lineHeight:1.7}}>
@@ -3545,6 +3711,7 @@ function NotificationsScreen({ctx}) {
               </>}
             </div>
           )}
+          </>)}
         </div>
         {/* Native notification permission prompt */}
         {perm==='default' && (
@@ -3727,35 +3894,8 @@ function SettingsScreen({ctx}) {
       </div>
       <div className="scroll">
 
-        {/* Apps Script URL is fixed in the background — no setup UI is shown. */}
-        <div style={{padding:'0 18px 14px'}}>
-          <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,margin:'0 0 6px'}}>GOOGLE REVIEW LINK (for PDF QR)</div>
-          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
-            <input defaultValue={localStorage.getItem('4s_review_url')||''}
-              onBlur={e=>{ localStorage.setItem('4s_review_url', e.target.value.trim()); showToast('Review link saved ✓'); }}
-              style={{width:'100%',border:'none',outline:'none',fontFamily:T.mono,fontSize:11,color:T.ink,background:'transparent'}}
-              placeholder="https://g.page/r/…/review"/>
-            <div style={{fontSize:10,color:T.ink4,marginTop:6,lineHeight:1.5}}>Used for the "Scan to review us" QR on the order PDF. Or drop a <b>review-qr.png</b> into the app folder to use your exact QR image.</div>
-          </div>
-          {pingResult && (
-            <div style={{marginTop:8,padding:'12px',borderRadius:6,background:pingResult.ok?T.okSoft:T.badSoft,border:`1px solid ${pingResult.ok?T.ok:T.bad}`}}>
-              <div style={{fontSize:13,fontWeight:700,color:pingResult.ok?T.ok:T.bad}}>{pingResult.msg}</div>
-              {pingResult.detail && <div style={{fontSize:11,color:T.ink3,marginTop:3,fontFamily:T.mono}}>Sheets found: {pingResult.detail}</div>}
-              {pingResult.ok && pingResult.sheetUrl && (
-                <div style={{marginTop:8,padding:'8px 10px',background:'#fff',borderRadius:4,border:`1px solid ${T.greenLine}`}}>
-                  <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:.5,marginBottom:4}}>OPS SPREADSHEET</div>
-                  <a href={pingResult.sheetUrl} target="_blank" rel="noreferrer"
-                    style={{fontSize:11,color:T.green,fontFamily:T.mono,wordBreak:'break-all',textDecoration:'underline'}}>
-                    Open OPS sheet (APP_ORDERING_CREDS tab → manage logins) ↗
-                  </a>
-                </div>
-              )}
-              {!pingResult.ok && <div style={{fontSize:11,color:T.ink3,marginTop:6,lineHeight:1.6}}>
-                Make sure the Web App is deployed with <b>Execute as: Me</b> and <b>Anyone can access</b>. Then copy the latest deployment URL and paste above.
-              </div>}
-            </div>
-          )}
-        </div>
+        {/* Backend URL, Google review link and connection test are managed in
+            the background — no setup UI is shown to users. */}
 
         {/* ── App order serial counter (admin only) ── */}
         {isAdmin && (
@@ -3829,13 +3969,15 @@ function SettingsScreen({ctx}) {
               <Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncPriceList} disabled={loading}>
                 {loading?'Loading…':(priceItems||[]).length===0?'Load price list':'Sync now'}
               </Btn>
+              {isAdmin && (
               <Btn full icon={Icon.refresh(T.green,14)} onClick={runDebug} disabled={debugging}>
                 {debugging?'Checking…':'Debug'}
               </Btn>
+              )}
             </div>
 
-            {/* Debug result */}
-            {debugResult && (
+            {/* Debug result — admin only */}
+            {isAdmin && debugResult && (
               <div style={{marginTop:10,padding:'10px 12px',background:T.paper,border:`1px solid ${debugResult.ok?T.greenLine:T.bad}`,borderRadius:6}}>
                 {debugResult.ok ? (
                   <>
