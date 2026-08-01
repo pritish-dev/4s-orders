@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v44';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v45';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -557,6 +557,8 @@ function handlePriceList(p) {
     if (pc && pc.list.length) {
       var byLen  = pc.list.slice().sort(function(a, b){ return b._n.length - a._n.length; });
       var byCore = pc.list.slice().sort(function(a, b){ return b._cd.length - a._cd.length; });
+      var byBase = pc.list.filter(function(e){ return e._base && e._lc; })
+                          .sort(function(a, b){ return b._base.length - a._base.length; });
       for (var ci = 0; ci < all.length; ci++) {
         var itn = _normName(all[ci].name);
         var itd = _despaceName(all[ci].name);
@@ -570,6 +572,18 @@ function handlePriceList(p) {
           for (var pci = 0; pci < byCore.length; pci++) {
             var ce = byCore[pci];
             if (ce._cd.length >= 5 && itd.indexOf(ce._cd) === 0) { hit = ce; break; }
+          }
+        }
+        if (!hit && itd) {                                   // abbreviated qualifier
+          // Godrej shortens the trailing qualifier word in the feed:
+          // "Zompy Advance" -> "ZompyAdv…", "Majesta Plus" -> "Majesta P…".
+          // Require the base (name minus that word) to match at the start, then
+          // just its first letter — enough to disambiguate variants while
+          // keeping e.g. a "OpulentV2DinTbl" off the "Opulent Advance" sofa.
+          for (var qi = 0; qi < byBase.length; qi++) {
+            var be = byBase[qi];
+            if (be._base.length >= 4 && itd.indexOf(be._base) === 0 &&
+                itd.charAt(be._base.length) === be._lc) { hit = be; break; }
           }
         }
         if (!hit && itn) {                                   // family / substring fallback
@@ -923,10 +937,12 @@ function _despaceName(s) { return String(s || '').toLowerCase().replace(/[^a-z0-
 // prefix-matched against a despaced description. Anchoring at the start avoids
 // mid-description collisions (e.g. a colour "…Fab Vesta" must NOT match "Vesta").
 var _CAT_GENERIC = { sofa:1, set:1, modular:1, sectional:1, recliner:1, lounger:1, seater:1, str:1, seat:1 };
-function _coreKey(n) {
+// Normalised name words with trailing generic words removed, e.g.
+// "Majesta Plus Sofa Set" -> ["majesta","plus"], "Zompy Advance" -> ["zompy","advance"].
+function _coreWords(n) {
   var w = String(n || '').split(' ');
   while (w.length > 1 && _CAT_GENERIC[w[w.length - 1]]) w.pop();
-  return w.join('').replace(/[^a-z0-9]+/g, '');
+  return w;
 }
 function _splitUrls(v) {
   var s = String(v || ''); if (!s) return [];
@@ -954,8 +970,12 @@ function _getProductCatalog(opsSS) {
   for (var r = 1; r < vals.length; r++) {
     var nm = String(vals[r][cName] || '').trim(); if (!nm) continue;
     var n = _normName(nm); if (!n) continue;
+    var cw = _coreWords(n);
     var e = {
-      name: nm, _n: n, _cd: _coreKey(n),
+      name: nm, _n: n,
+      _cd:   cw.join(''),                                       // full core, spaces removed
+      _base: cw.length > 1 ? cw.slice(0, -1).join('') : '',     // core minus its last word
+      _lc:   cw.length > 1 ? cw[cw.length - 1].charAt(0) : '',  // first letter of that last word
       mainCat: cMain>=0 ? String(vals[r][cMain]||'').trim() : '',
       subCat:  cSub>=0  ? String(vals[r][cSub]||'').trim()  : '',
       features: cFeat>=0 ? String(vals[r][cFeat]||'').trim() : '',
