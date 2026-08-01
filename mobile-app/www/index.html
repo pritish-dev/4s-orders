@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '64';
+  var V = '65';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -87,7 +87,7 @@
      load and whenever the app is brought to the foreground. -->
 <script>
 (function(){
-  var RUNV = '64';   // keep in sync with V above and version.json
+  var RUNV = '65';   // keep in sync with V above and version.json
   function checkUpdate(){
     try {
       fetch('version.json?ts=' + Date.now(), { cache: 'no-store' })
@@ -2541,6 +2541,20 @@ function HomeScreen({ctx}) {
 // or "Home Storage" item is never pulled into bedroom, and storage is its own
 // group even when the feed files a wardrobe under bedroom furniture.
 function roomRank(it, catEntry) {
+  // Authoritative path: the backend ships the row's own CATEGORY column as
+  // it.room ("Living Room Furniture", "Bedroom Furniture", …). Rank from that
+  // alone so a stray word in the product name ("…Storage Ottoman") can't drag a
+  // living-room item into the storage group.
+  const rm = (it.room || '').toLowerCase();
+  if (rm) {
+    if (/dining/.test(rm)) return 2;
+    if (/storage|wardrobe|kreation|almirah|cabinet/.test(rm)) return 3;
+    if (/bed|mattress/.test(rm)) return 1;
+    if (/living|sofa|recliner|lounger|occasional|lounge/.test(rm)) return 0;
+    return 4;
+  }
+  // Fallback for items without a room label (raw Godrej tabs): infer from all
+  // available fields, most-specific first.
   const s = ((it.cat||'') + ' ' + (it.item||'') + ' ' + (it.sheet||'') + ' ' +
              (catEntry && catEntry.mainCat || '') + ' ' + (it.name||''))
             .toLowerCase().replace(/[^a-z0-9]+/g, ' ');   // underscores → spaces so \b works

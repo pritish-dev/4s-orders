@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v45';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v46';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -709,7 +709,9 @@ function _parsePriceTab(sh, tabName, catOverride) {
 // catOverride: when set (from Price_Lists sheet), all items get that category
 function _parseNormTab(rows, headerRow, tabName, catOverride) {
   var hdr    = rows[headerRow].map(function(c){ return String(c||'').toUpperCase().trim(); });
-  var cCat   = _hdrIdx(hdr, ['CATEGORY', 'CAT']);    if (cCat   < 0) cCat   = 0;
+  var cCat   = _hdrIdx(hdr, ['CATEGORY', 'CAT']);
+  var hasCat = cCat >= 0;                            // a real CATEGORY column (not the positional fallback)
+  if (cCat   < 0) cCat   = 0;
   var cGroup = _hdrIdx(hdr, ['ITEM_GROUP', 'ITEM GROUP', 'GROUP', 'SUB CATEGORY', 'SUBCATEGORY']); if (cGroup < 0) cGroup = 1;
   var cCode  = _hdrIdx(hdr, ['ITEM_CODE', 'ITEM CODE', 'LN CODE', 'LN_CODE', 'CODE']); if (cCode  < 0) cCode  = 2;
   var cDesc  = _hdrIdx(hdr, ['DESCRIPTION', 'LN DESCRIPTION', 'LN_DESCRIPTION', 'ITEM DESCRIPTION', 'PRODUCT NAME']); if (cDesc  < 0) cDesc  = 3;
@@ -729,7 +731,15 @@ function _parseNormTab(rows, headerRow, tabName, catOverride) {
     var cpl   = _numVal(row[cCPL]);
     var extra = cExtra < row.length ? String(row[cExtra] || '').trim() : '';
 
-    items.push(_makeItem(tabName, cat, group, code, desc, cpl, extra));
+    var it = _makeItem(tabName, cat, group, code, desc, cpl, extra);
+    // The row's own CATEGORY column is the authoritative room label
+    // ("Living Room Furniture", "Bedroom Furniture", "Dining Room Furniture",
+    // "Home Storage", "Mattress"…). It can differ from `cat` when a Price_Lists
+    // override coarsens the grouping, so ship it separately for Browse ordering
+    // without disturbing the category chips / CRM value that ride on `cat`.
+    var rowCat = hasCat ? String(row[cCat] || '').trim() : '';
+    if (rowCat) it.room = rowCat;
+    items.push(it);
   }
   return items;
 }
