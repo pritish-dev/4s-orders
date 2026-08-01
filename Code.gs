@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v40';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v41';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -945,6 +945,9 @@ function handleOrders(p) {
   var cMr1d=colOf(['MONEY RECEIPT DATE 1','MONEY RECEIPT DATE','RECEIPT DATE']);
   var cMr2n=colOf(['MONEY RECEIPT NO 2']), cMr2d=colOf(['MONEY RECEIPT DATE 2']);
   var cMr3n=colOf(['MONEY RECEIPT NO 3']), cMr3d=colOf(['MONEY RECEIPT DATE 3']);
+  // Per-receipt amounts for receipts 2 & 3 (receipt 1's amount is the earnest /
+  // ADV RECEIVED). Let the running balance reflect part-payments made after booking.
+  var cMr2a=colOf(['MONEY RECEIPT AMT 2','MONEY RECEIPT AMOUNT 2']), cMr3a=colOf(['MONEY RECEIPT AMT 3','MONEY RECEIPT AMOUNT 3']);
   // Per-item columns
   var cICode = colOf(['ITEM CODE','CODE']);
   var cIName = colOf(['PRODUCT NAME']);
@@ -1043,8 +1046,8 @@ function handleOrders(p) {
         })(),
         moneyReceipts: [
           { no: sval(r, cMr1n), date: dstr(r, cMr1d) },
-          { no: sval(r, cMr2n), date: dstr(r, cMr2d) },
-          { no: sval(r, cMr3n), date: dstr(r, cMr3d) },
+          { no: sval(r, cMr2n), date: dstr(r, cMr2d), amt: cMr2a >= 0 ? Number(r[cMr2a]) || 0 : 0 },
+          { no: sval(r, cMr3n), date: dstr(r, cMr3d), amt: cMr3a >= 0 ? Number(r[cMr3a]) || 0 : 0 },
         ],
         date: sval(r, cDate),
         amt: 0,
@@ -1400,8 +1403,10 @@ var CRM_APP_COLUMNS = [
   ['MONEY RECEIPT DATE 1', 'MONEY RECEIPT DATE', 'RECEIPT DATE'],
   ['MONEY RECEIPT NO 2'],
   ['MONEY RECEIPT DATE 2'],
+  ['MONEY RECEIPT AMT 2', 'MONEY RECEIPT AMOUNT 2'],
   ['MONEY RECEIPT NO 3'],
   ['MONEY RECEIPT DATE 3'],
+  ['MONEY RECEIPT AMT 3', 'MONEY RECEIPT AMOUNT 3'],
   ['DELIVERY STATUS'],
   // Partial-delivery tracking — JSON array of the item signatures that have been
   // delivered when the delivery status is "Partial Delivery"; the rest are Pending.
@@ -1784,8 +1789,10 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['MONEY RECEIPT DATE 1', 'MONEY RECEIPT DATE', 'RECEIPT DATE'], mr1.date || '');
     put(['MONEY RECEIPT NO 2'], mr2.no || '');
     put(['MONEY RECEIPT DATE 2'], mr2.date || '');
+    put(['MONEY RECEIPT AMT 2'], Number(mr2.amt) || 0);
     put(['MONEY RECEIPT NO 3'], mr3.no || '');
     put(['MONEY RECEIPT DATE 3'], mr3.date || '');
+    put(['MONEY RECEIPT AMT 3'], Number(mr3.amt) || 0);
     put(['DELIVERY STATUS'], o.deliveryStatus || 'Pending');
     put(['ORDER FORM RECEIPT NO','ORDER FORM RECEIPT NO.','ORDER FORM RECEIPT'], o.orderFormReceiptNo || '');
     put(['SI NO', 'SI NO.'], o.slNo || '');

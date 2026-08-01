@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '58';
+  var V = '59';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -87,7 +87,7 @@
      load and whenever the app is brought to the foreground. -->
 <script>
 (function(){
-  var RUNV = '58';   // keep in sync with V above and version.json
+  var RUNV = '59';   // keep in sync with V above and version.json
   function checkUpdate(){
     try {
       fetch('version.json?ts=' + Date.now(), { cache: 'no-store' })
@@ -494,6 +494,22 @@ function orderTotals(o) {
   const earnest       = paidInFull ? total : earnestRaw;
   const balance       = total - earnest;
   return { itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance, manual: !!o.manualOrder };
+}
+
+// Running payment ledger for an order: the booking advance (earnest = money
+// receipt 1) plus any later part-payments recorded as amounts on money receipts
+// 2 & 3. This is what the Collectibles view and the edit screen use so the
+// outstanding balance keeps shrinking as the customer pays over time. Backward
+// compatible: with no later receipt amounts, received == earnest and balance ==
+// total − earnest, exactly the booking-time figure the PDF still prints.
+function orderReceived(o) {
+  const { total } = orderTotals(o);
+  const later   = (o.moneyReceipts || []).slice(1).reduce((s, mr) => s + (Number(mr && mr.amt) || 0), 0);
+  let received  = (Number(o.earnest) || 0) + later;
+  if (received > total) received = total;            // never record more than the bill
+  let balance = total - received;
+  if (balance > 0 && balance <= 2) { received = total; balance = 0; }   // ₹2 rounding tolerance
+  return { total, received, balance };
 }
 
 // ─── ROLE-BASED ACCESS ──────────────────────────────────────
@@ -1386,7 +1402,7 @@ const BLANK_ORDER = () => ({
   // part of the PDF's "Order No. (Sl / Receipt)" field.
   orderFormReceiptNo:'',
   // Up to three money-receipt no + date pairs (updatable over time)
-  receiptNo:'', moneyReceipts:[{no:'',date:''},{no:'',date:''},{no:'',date:''}],
+  receiptNo:'', moneyReceipts:[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}],
   deliveryStatus:'Pending',
   followUp:'', salesExec:'', won:'',
   orderType:'B2C', items:[],
@@ -2034,6 +2050,7 @@ function App() {
     notifs:  <NotificationsScreen ctx={ctx}/>,
     settings:<SettingsScreen ctx={ctx}/>,
     reports: <ReportsScreen ctx={ctx}/>,
+    collect: <CollectiblesScreen ctx={ctx}/>,
   };
 
   return (
@@ -2263,6 +2280,100 @@ function ReportsScreen({ctx}) {
   );
 }
 
+// ─── Collectibles / Outstanding payments ─────────────────────
+// Every booked order that still has a balance due, newest-largest first, with the
+// running total to collect. Uses orderReceived() so part-payments recorded on
+// receipts 2 & 3 shrink the balance. Tap a row to open the order and record a
+// payment; the WhatsApp icon sends the customer a balance reminder.
+function CollectiblesScreen({ctx}) {
+  const {orders,nav,loadOrders,loading,setOrder} = ctx;
+  const [salesFilter,setSalesFilter] = useState('');
+  useEffect(()=>{ loadOrders(); },[]);
+
+  const due = (orders||[])
+    .filter(o=>o && o.status!=='draft')
+    .map(o=>({o, ...orderReceived(o)}))
+    .filter(x=>x.balance>2);
+  const salespeople = [...new Set(due.map(x=>(x.o.salesExec||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+  const shown = due
+    .filter(x=>!salesFilter || (x.o.salesExec||'').trim().toLowerCase()===salesFilter.toLowerCase())
+    .sort((a,b)=>b.balance-a.balance);
+  const totalOutstanding = shown.reduce((s,x)=>s+x.balance,0);
+
+  const openOrder = o => { setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)}); nav('order'); };
+  function remind(o, balance){
+    const msg = `Dear ${o.customer||'Customer'},\n\nGentle reminder from 4S Interiors about your order *#${o.no||'—'}*.\n\n*Outstanding balance:* ₹${balance.toLocaleString('en-IN')}\n\nKindly arrange the payment at your convenience. For any help call 0674-2744906.\n\nThank you,\n4S Interiors, Patia, Bhubaneswar\n_Authorised Dealer — Godrej Interio_`;
+    const phone = (o.phone||'').replace(/\D/g,'');
+    window.open('https://wa.me/'+(phone?'91'+phone:'')+'?text='+encodeURIComponent(msg),'_blank');
+  }
+
+  return (
+    <div className="screen">
+      <div style={{flexShrink:0}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 8px'}}>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+          <div style={{flex:1}}>
+            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>COLLECTIBLES</div>
+            <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Outstanding payments</div>
+          </div>
+          <button onClick={()=>loadOrders()} title="Refresh" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.refresh(T.ink2,15)}</button>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1.3fr 1fr',gap:8,padding:'2px 14px 10px'}}>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TOTAL TO COLLECT</div>
+            <div style={{fontSize:24,fontWeight:800,letterSpacing:-1,color:totalOutstanding>0?T.bad:T.ok,lineHeight:1.1,marginTop:4}}>₹{Math.round(totalOutstanding).toLocaleString('en-IN')}</div>
+          </div>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>ORDERS</div>
+            <div style={{fontSize:24,fontWeight:800,letterSpacing:-1,color:T.ink,lineHeight:1.1,marginTop:4}}>{shown.length}</div>
+          </div>
+        </div>
+        {salespeople.length>0 && (
+          <div style={{padding:'0 14px 8px',display:'flex',gap:6,overflowX:'auto',alignItems:'center'}}>
+            <span style={{fontSize:11,color:T.ink4,fontWeight:700,flexShrink:0}}>SALES</span>
+            <span onClick={()=>setSalesFilter('')} style={{padding:'5px 10px',borderRadius:99,background:!salesFilter?T.green:'#fff',color:!salesFilter?'#fff':T.ink2,border:`1px solid ${!salesFilter?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0}}>All</span>
+            {salespeople.map(sp=>(
+              <span key={sp} onClick={()=>setSalesFilter(sp)} style={{padding:'5px 10px',borderRadius:99,background:salesFilter===sp?T.green:'#fff',color:salesFilter===sp?'#fff':T.ink2,border:`1px solid ${salesFilter===sp?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>{sp}</span>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="scroll">
+        {loading && orders.length===0 && [0,1,2,3].map(i=><SkeletonOrderRow key={i}/>)}
+        {shown.map(({o,total,received,balance})=>(
+          <div key={o.no} style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`,padding:'12px 18px',display:'grid',gridTemplateColumns:'1fr auto',gap:10,cursor:'pointer'}} onClick={()=>openOrder(o)}>
+            <div style={{minWidth:0}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3}}>
+                <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
+                {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:null}
+              </div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{o.customer}</div>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.salesExec}{o.plannedDly?' · dly '+prettyDate(o.plannedDly):''}</div>
+              <div style={{fontSize:11,color:T.ink3,marginTop:3,fontFamily:T.mono}}>Bill ₹{Math.round(total).toLocaleString('en-IN')} · Paid ₹{Math.round(received).toLocaleString('en-IN')}</div>
+            </div>
+            <div style={{textAlign:'right',display:'flex',flexDirection:'column',alignItems:'flex-end',gap:6}}>
+              <div>
+                <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.6}}>BALANCE</div>
+                <div style={{fontSize:17,fontFamily:T.mono,fontWeight:800,color:T.bad,letterSpacing:-0.4}}>₹{Math.round(balance).toLocaleString('en-IN')}</div>
+              </div>
+              <span title="Send balance reminder on WhatsApp" onClick={e=>{e.stopPropagation();remind(o,Math.round(balance));}} style={{width:32,height:28,borderRadius:5,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',14)}</span>
+            </div>
+          </div>
+        ))}
+        {!loading && shown.length===0 && (
+          <div style={{padding:'48px 24px',textAlign:'center'}}>
+            <div style={{width:52,height:52,borderRadius:14,background:T.greenSoft,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12}}><span style={{fontWeight:800,fontSize:22,color:T.green}}>₹</span></div>
+            <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>All clear</div>
+            <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>{salesFilter?'No balance due for this salesperson.':'No outstanding balances right now.'}</div>
+          </div>
+        )}
+        <div style={{height:24}}/>
+      </div>
+      <BottomNav screen="home" nav={nav}/>
+    </div>
+  );
+}
+
 // ─── Home ───────────────────────────────────────────────────
 function HomeScreen({ctx}) {
   const {user,orders,syncedAt,priceItems,priceSyncError,nav,loadOrders,syncPriceList,loading,unreadCount,loadMis} = ctx;
@@ -2342,6 +2453,18 @@ function HomeScreen({ctx}) {
             <div><div style={{fontSize:11,fontWeight:600,opacity:.7,letterSpacing:.5,textTransform:'uppercase'}}>REPORTS</div><div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4,marginTop:2}}>Sales summary</div></div>
             <div style={{width:40,height:40,borderRadius:99,background:'#fff',display:'flex',alignItems:'center',justifyContent:'center'}}>{Icon.doc(T.green,20)}</div>
           </button>
+        </div>
+        {/* Outstanding payments — live total still to collect across all booked orders */}
+        <div style={{padding:'0 18px 12px'}}>
+          {(()=>{ const due=(orders||[]).filter(o=>o&&o.status!=='draft').reduce((s,o)=>s+orderReceived(o).balance,0); return (
+          <button onClick={()=>nav('collect')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 18px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,cursor:'pointer',textAlign:'left'}}>
+            <div style={{display:'flex',alignItems:'center',gap:12}}>
+              <div style={{width:38,height:38,borderRadius:99,background:due>0?T.badSoft:T.greenSoft,display:'flex',alignItems:'center',justifyContent:'center'}}><span style={{fontWeight:800,fontSize:18,color:due>0?T.bad:T.green}}>₹</span></div>
+              <div><div style={{fontSize:14,fontWeight:700,color:T.ink,letterSpacing:-0.2}}>Outstanding payments</div><div style={{fontSize:11,color:T.ink4}}>Balances still to collect</div></div>
+            </div>
+            <div style={{textAlign:'right'}}><div style={{fontSize:15,fontWeight:800,fontFamily:T.mono,color:due>0?T.bad:T.ok}}>₹{Math.round(due).toLocaleString('en-IN')}</div><div style={{fontSize:10,color:T.ink4}}>{due>0?'to collect':'all clear'}</div></div>
+          </button>
+          );})()}
         </div>
         <div style={{padding:'0 18px 6px',display:'flex',alignItems:'baseline',justifyContent:'space-between'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:1.2,textTransform:'uppercase'}}>RECENT ORDERS</div>
@@ -2949,16 +3072,25 @@ function OrderFormScreen({ctx}) {
           <SectionHead n="01" label="Godrej SO / WON"/>
           <Field label="WON (Godrej SO No)" value={o.won} onChange={v=>setF('won',v)} mono hint="Godrej SO / WON number — add or update it here"/>
           <SectionHead n="02" label="Money Receipt"/>
-          {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:''}; return (
+          {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:'',amt:''}; return (
             <div key={i} style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
               <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
                 <Field label={`Money Receipt No ${i+1}`} value={mr.no} onChange={v=>setMRestricted(i,'no',v)} mono/>
               </div>
-              <div style={{flex:1}}>
+              <div style={{flex:1,borderRight:i>=1?`1px solid ${T.line}`:undefined}}>
                 <Field label={`Date ${i+1}`} value={mr.date} onChange={v=>setMRestricted(i,'date',v)} mono type="date"/>
               </div>
+              {i>=1 && <div style={{flex:1}}>
+                <Field label={`Amount ${i+1}`} value={mr.amt} onChange={v=>setMRestricted(i,'amt',v)} mono type="number" hint={i===1?'Later payment':undefined}/>
+              </div>}
             </div>
           );})}
+          {(()=>{ const {received,balance}=orderReceived(o); return (
+            <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12}}>
+              <span style={{color:T.ink3,fontWeight:600}}>Received so far <b style={{fontFamily:T.mono,color:T.ink}}>₹{received.toLocaleString('en-IN')}</b></span>
+              <span style={{color:balance>0?T.bad:T.ok,fontWeight:700}}>{balance>0?`Balance ₹${balance.toLocaleString('en-IN')}`:'Paid in full ✓'}</span>
+            </div>
+          );})()}
           <SectionHead n="03" label="Delivery"/>
           <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
             <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Delivery Status</div>
@@ -3302,17 +3434,28 @@ function OrderFormScreen({ctx}) {
           </select>
         </div>
         <Field label="Earnest Amount" value={o.earnest} onChange={v=>setF('earnest',v)} mono type="number" required error={(Number(o.earnest)||0) > total ? `Amount paid ₹${(Number(o.earnest)||0).toLocaleString('en-IN')} exceeds the order total ₹${total.toLocaleString('en-IN')}` : undefined} hint={total>0?`Order total: ₹${total.toLocaleString('en-IN')}`:undefined}/>
-        {/* Money receipt no + date — updatable up to 3 times */}
-        {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:''}; const setMR=(field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:''},{no:'',date:''},{no:'',date:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; }); return (
+        {/* Money receipt no + date — updatable up to 3 times. Receipt 1's amount is
+            the Earnest above; receipts 2 & 3 carry their own amount so a later
+            part-payment reduces the outstanding balance in the Collectibles view. */}
+        {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:'',amt:''}; const setMR=(field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:'',amt:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; }); return (
           <div key={i} style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
             <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
               <Field label={`Money Receipt No ${i+1}`} value={mr.no} onChange={v=>setMR('no',v)} mono/>
             </div>
-            <div style={{flex:1}}>
+            <div style={{flex:1,borderRight:i>=1?`1px solid ${T.line}`:undefined}}>
               <Field label={`Date ${i+1}`} value={mr.date} onChange={v=>setMR('date',v)} mono type="date"/>
             </div>
+            {i>=1 && <div style={{flex:1}}>
+              <Field label={`Amount ${i+1}`} value={mr.amt} onChange={v=>setMR('amt',v)} mono type="number" hint={i===1?'Later payment':undefined}/>
+            </div>}
           </div>
         );})}
+        {(()=>{ const {received,balance}=orderReceived(o); return (
+          <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12}}>
+            <span style={{color:T.ink3,fontWeight:600}}>Received so far <b style={{fontFamily:T.mono,color:T.ink}}>₹{received.toLocaleString('en-IN')}</b></span>
+            <span style={{color:balance>0?T.bad:T.ok,fontWeight:700}}>{balance>0?`Balance ₹${balance.toLocaleString('en-IN')}`:'Paid in full ✓'}</span>
+          </div>
+        );})()}
         <Field label="Follow-up Date" value={o.followUp} onChange={v=>setF('followUp',v)} mono type="date" hint="Auto-set to 2 days before planned delivery · reminder at 10:00 AM"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Delivery Status</div>
