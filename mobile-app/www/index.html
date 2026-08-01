@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '59';
+  var V = '60';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -87,7 +87,7 @@
      load and whenever the app is brought to the foreground. -->
 <script>
 (function(){
-  var RUNV = '59';   // keep in sync with V above and version.json
+  var RUNV = '60';   // keep in sync with V above and version.json
   function checkUpdate(){
     try {
       fetch('version.json?ts=' + Date.now(), { cache: 'no-store' })
@@ -687,8 +687,10 @@ function StockChip({branch,count,low}) {
   return <span style={{display:'inline-flex',alignItems:'center',borderRadius:4,overflow:'hidden',border:`1px solid ${bdc}`,fontFamily:T.mono,fontSize:10,fontWeight:600,height:18}}><span style={{background:T.ink,color:'#fff',padding:'0 5px',height:'100%',display:'inline-flex',alignItems:'center',letterSpacing:.5}}>{branch}</span><span style={{background:bg,color:fg,padding:'0 6px',height:'100%',display:'inline-flex',alignItems:'center'}}>{count}</span></span>;
 }
 
-function SectionHead({n,label,action,onAction}) {
-  return <div style={{padding:'14px 16px 6px',display:'flex',alignItems:'baseline',justifyContent:'space-between',background:T.paper}}><div style={{display:'flex',alignItems:'baseline',gap:8}}><span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:700}}>{n}</span><span style={{fontSize:12,fontWeight:700,color:T.ink2,letterSpacing:1,textTransform:'uppercase'}}>{label}</span></div>{action&&<span onClick={onAction} style={{fontSize:11,color:T.green,fontWeight:700,cursor:'pointer'}}>{action}</span>}</div>;
+function SectionHead({n,label,action,onAction,id}) {
+  // scrollMarginTop keeps the heading clear of the sticky progress bar when the
+  // validation summary / progress chips scroll a section into view.
+  return <div id={id} style={{padding:'14px 16px 6px',display:'flex',alignItems:'baseline',justifyContent:'space-between',background:T.paper,scrollMarginTop:52}}><div style={{display:'flex',alignItems:'baseline',gap:8}}><span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:700}}>{n}</span><span style={{fontSize:12,fontWeight:700,color:T.ink2,letterSpacing:1,textTransform:'uppercase'}}>{label}</span></div>{action&&<span onClick={onAction} style={{fontSize:11,color:T.green,fontWeight:700,cursor:'pointer'}}>{action}</span>}</div>;
 }
 
 function Spinner({size=20,color=T.green}) {
@@ -1595,9 +1597,23 @@ function buildNotifications(orders, mis) {
         });
       }
     }
+    // 3) Follow-up due — the follow-up date (auto-set 2 days before delivery, or
+    // set by hand) has arrived or passed and the order isn't delivered yet. Nudges
+    // the salesperson to call/WhatsApp the customer before delivery.
+    const fuIso = (o.followUp && o.followUp.length >= 8) ? o.followUp : '';
+    const fdd = daysFromToday(fuIso);
+    if (fuIso && fdd != null && fdd <= 0 && !isDeliveryDone(o)) {
+      out.push({
+        id: 'followup|' + (o.no || o.won) + '|' + fuIso,
+        kind: 'followup', tone: fdd < 0 ? 'bad' : 'warn', orderNo: o.no, order: o,
+        title: fdd === 0 ? 'Follow-up due today' : 'Follow-up overdue by ' + Math.abs(fdd) + ' day' + (Math.abs(fdd) > 1 ? 's' : ''),
+        body: (o.customer || 'Order') + ' · call/WhatsApp' + (o.plannedDly ? ' before delivery ' + prettyDate(o.plannedDly) : ''),
+        sortDate: fuIso,
+      });
+    }
   });
-  // Overdue first, then soonest; committed notices interleave by date.
-  const rank = { overdue: 0, soon: 1, mis: 2 };
+  // Overdue first, then follow-ups, then soonest; committed notices interleave by date.
+  const rank = { overdue: 0, followup: 1, soon: 2, mis: 3 };
   out.sort((a, b) => (rank[a.kind] - rank[b.kind]) || String(a.sortDate).localeCompare(String(b.sortDate)));
   return out;
 }
@@ -2411,6 +2427,17 @@ function HomeScreen({ctx}) {
             </div>
           ))}
         </div>
+        {/* Resume an unsaved order draft (autosaved locally, restored after login). */}
+        {(()=>{ let draft=null; try{ const d=JSON.parse(localStorage.getItem('4s_draft')||'null'); if(d && !d.no && ((d.items&&d.items.length)||d.customer)) draft=d; }catch(e){} if(!draft) return null; return (
+          <div style={{margin:'0 18px 12px',padding:'11px 14px',background:T.warnSoft,border:'1px solid #e6cc95',borderRadius:8,display:'flex',alignItems:'center',gap:10}}>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:12,fontWeight:800,color:T.warn}}>Unsaved order in progress</div>
+              <div style={{fontSize:11,color:T.ink3,marginTop:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{draft.customer||'Draft'} · {(draft.items||[]).length} item{(draft.items||[]).length===1?'':'s'}</div>
+            </div>
+            <button onClick={()=>{ try{ctx.setOrder({...BLANK_ORDER(),...draft});}catch(e){} nav('order'); }} style={{flexShrink:0,height:32,padding:'0 14px',borderRadius:6,background:T.green,border:'none',color:'#fff',fontSize:12,fontWeight:700,cursor:'pointer'}}>Resume</button>
+            <button onClick={()=>{ if(!window.confirm('Discard the unsaved draft?'))return; try{localStorage.removeItem('4s_draft');}catch(e){} ctx.setOrder(BLANK_ORDER()); }} title="Discard draft" style={{flexShrink:0,width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.trash(T.ink4,14)}</button>
+          </div>
+        ); })()}
         <div style={{padding:'0 18px 12px'}}>
           <button onClick={()=>{ctx.setOrder({...BLANK_ORDER(),salesExec:user?.name||''});nav('order');}} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 18px',background:T.green,color:'#fff',border:'none',borderRadius:8,cursor:'pointer',textAlign:'left'}}>
             <div><div style={{fontSize:11,fontWeight:600,opacity:.7,letterSpacing:.5,textTransform:'uppercase'}}>NEW</div><div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4,marginTop:2}}>Book an order</div></div>
@@ -2857,6 +2884,10 @@ function OrderFormScreen({ctx}) {
   }
   const setF = (k,v) => setOrder(prev=>({...prev,[k]:v}));
   const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance} = orderTotals(o);
+  // Guided-form: once the user has tried to save, the validation summary + step
+  // progress stay live so they can see what's left and jump straight to it.
+  const [triedSave,setTriedSave] = React.useState(false);
+  const scrollToSec = sec => { try{ const el=document.getElementById('sec-'+sec); if(el) el.scrollIntoView({behavior:'smooth',block:'start'}); }catch(e){} };
 
   // Manager / Admin see cost + margin; Sales does not.
   const priv        = hasManagerAccess(user);
@@ -2959,62 +2990,63 @@ function OrderFormScreen({ctx}) {
     })}));
   }
 
-  async function handleSave() {
-    if(!o.customer) return ctx.showToast('Customer name is required','bad');
-    if(!o.phone)    return ctx.showToast('Phone number is required','bad');
-    if(!isValidPhone(o.phone)) return ctx.showToast('Enter a valid 10-digit mobile number','bad');
-    if(o.alt && !isValidPhone(o.alt)) return ctx.showToast('Alt. phone is not a valid mobile number','bad');
-    if(!o.email)    return ctx.showToast('E-mail is required','bad');
-    if(!isValidEmail(o.email)) return ctx.showToast('Enter a valid email address','bad');
-    // Customer GST No. is mandatory (printed on both PDF copies).
-    if(!o.gstNumber||!String(o.gstNumber).trim()) return ctx.showToast('Customer GST No. is required','bad');
-    if(!o.delivery) return ctx.showToast('Delivery address is required','bad');
-    // Pincode is a mandatory part of the delivery address.
-    if(!o.pincode||!String(o.pincode).trim()) return ctx.showToast('Pincode is required','bad');
-    if(!/^\d{6}$/.test(String(o.pincode).trim())) return ctx.showToast('Enter a valid 6-digit pincode','bad');
-    if(!o.floor)    return ctx.showToast('Floor is required','bad');
-    if(!o.landmark) return ctx.showToast('Nearest landmark is required','bad');
-    if(!o.liftAvailable) return ctx.showToast('Select whether a lift is available','bad');
-    // Lift type is mandatory when a lift is available — at least one must be picked.
-    if(o.liftAvailable==='Yes' && (!Array.isArray(o.liftTypes)||o.liftTypes.length===0)) return ctx.showToast('Select the lift type (Standard / Goods / Service)','bad');
-    // Delivery contact person required when the billing & delivery addresses differ
+  // Every required-field / validity check, collected into one list (instead of
+  // stopping at the first) so the guided form can show a full "what's still
+  // needed" summary and light up the step progress bar. Each error is tagged with
+  // its section id so tapping it (or the Save button) jumps straight there. The
+  // rules mirror the original one-at-a-time guards exactly.
+  function collectErrors() {
+    const e = []; const add = (sec,msg) => e.push({sec,msg});
+    if(!o.customer) add('customer','Customer name is required');
+    if(!o.phone) add('customer','Phone number is required');
+    else if(!isValidPhone(o.phone)) add('customer','Enter a valid 10-digit mobile number');
+    if(o.alt && !isValidPhone(o.alt)) add('customer','Alt. phone is not a valid mobile number');
+    if(!o.email) add('customer','E-mail is required');
+    else if(!isValidEmail(o.email)) add('customer','Enter a valid email address');
+    if(!o.gstNumber||!String(o.gstNumber).trim()) add('customer','Customer GST No. is required');
+    if(!o.awareness) add('customer','Select the Lead Source');
+    if(!o.purchasePattern||o.purchasePattern.length===0) add('customer','Select the purchase pattern');
+    if(!o.purchasingFor) add('customer','Select what they are purchasing for');
+    if(o.manualOrder && !o.date) add('customer','Set the Booking Date for the manual order');
+    if(!o.delivery) add('address','Delivery address is required');
+    if(!o.pincode||!String(o.pincode).trim()) add('address','Pincode is required');
+    else if(!/^\d{6}$/.test(String(o.pincode).trim())) add('address','Enter a valid 6-digit pincode');
+    if(!o.floor) add('address','Floor is required');
+    if(!o.landmark) add('address','Nearest landmark is required');
+    if(!o.liftAvailable) add('address','Select whether a lift is available');
+    if(o.liftAvailable==='Yes' && (!Array.isArray(o.liftTypes)||o.liftTypes.length===0)) add('address','Select the lift type (Standard / Goods / Service)');
     const addrDiffer = (o.billing||'').trim() && (o.delivery||'').trim() && (o.billing||'').trim()!==(o.delivery||'').trim();
-    if(addrDiffer && (!o.contactPersonName||!o.contactNumber)) return ctx.showToast('Delivery Contact Person Name & Number are required (billing & delivery addresses differ)','bad');
-    if(o.contactNumber && !isValidPhone(o.contactNumber)) return ctx.showToast('Contact number is not a valid mobile number','bad');
-    if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item','bad');
-    // SI No is mandatory for every order (printed as the Sl part of the PDF order no).
-    if(!o.slNo||!String(o.slNo).trim()) return ctx.showToast('SI No is required','bad');
-    // Receipt No: app orders get it auto-assigned on save (next app-booking number),
-    // so it's not entered here; a manual order must carry its paper receipt number.
-    if(o.manualOrder && (!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim())) return ctx.showToast('Receipt No is required for a manual order','bad');
-    // Payment Mode is mandatory (printed on both PDF copies).
-    if(!o.paymentMode||!String(o.paymentMode).trim()) return ctx.showToast('Select the Payment Mode','bad');
-    // Money Receipt No is mandatory on the order form.
-    if(!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim()) return ctx.showToast('Money Receipt No is required','bad');
-    // Manual orders must carry the actual (settable) booking date.
-    if(o.manualOrder && !o.date) return ctx.showToast('Set the Booking Date for the manual order','bad');
-    // Mandatory customer-profiling fields (DOB & anniversary are now optional)
-    if(!o.awareness)    return ctx.showToast('Select the Lead Source','bad');
-    if(!o.purchasePattern||o.purchasePattern.length===0) return ctx.showToast('Select the purchase pattern','bad');
-    if(!o.purchasingFor) return ctx.showToast('Select what they are purchasing for','bad');
-    // Sofa: sofa dims + entry-door site measurement are mandatory
-    if(hasSofa && (!o.sofaWidth||!o.sofaHeight||!o.sofaDepth)) return ctx.showToast('Enter Sofa width, height & depth (mandatory for sofas)','bad');
-    if(hasSofa && (!o.entryDoorWidth||!o.entryDoorHeight)) return ctx.showToast('Enter Entry Door width & height (required for sofa orders)','bad');
-    // Staircase measurement — required only for a SOFA with NO lift:
-    // staircase width + the landing area's length / width / depth.
-    if(needStaircase && (!o.staircaseWidth||!o.landingLength||!o.landingWidth||!o.landingDepth)) return ctx.showToast('Enter Staircase width & the landing area length/width/depth (required for a sofa with no lift)','bad');
-    // Modular wardrobe (Kalista / Kreation X2 / X3): every furniture block needs its
-    // wardrobe dims, and every room block needs its dims — both are mandatory.
+    if(addrDiffer && (!o.contactPersonName||!o.contactNumber)) add('address','Delivery Contact Person Name & Number are required (addresses differ)');
+    if(o.contactNumber && !isValidPhone(o.contactNumber)) add('address','Contact number is not a valid mobile number');
+    if(hasSofa && (!o.sofaWidth||!o.sofaHeight||!o.sofaDepth)) add('measure','Enter Sofa width, height & depth');
+    if(hasSofa && (!o.entryDoorWidth||!o.entryDoorHeight)) add('measure','Enter Entry Door width & height');
+    if(needStaircase && (!o.staircaseWidth||!o.landingLength||!o.landingWidth||!o.landingDepth)) add('measure','Enter Staircase width & the landing area length/width/depth');
     if(hasWardrobe){
-      if(!wardrobes.length) return ctx.showToast('Add at least one modular furniture measurement','bad');
+      if(!wardrobes.length) add('measure','Add at least one modular furniture measurement');
       for(let i=0;i<wardrobes.length;i++){ const w=wardrobes[i];
-        if(!w.length||!w.width||!w.height) return ctx.showToast(`Enter length, width & height for Modular Furniture ${i+1}`,'bad');
+        if(!w.length||!w.width||!w.height) add('measure',`Enter length, width & height for Modular Furniture ${i+1}`);
       }
-      if(!rooms.length) return ctx.showToast('Add at least one room measurement (mandatory for modular furniture)','bad');
+      if(!rooms.length) add('rooms','Add at least one room measurement (mandatory for modular furniture)');
       for(let i=0;i<rooms.length;i++){ const r=rooms[i];
-        if(!r.name||!(r.name||'').trim()) return ctx.showToast(`Enter the room name for Room ${i+1}`,'bad');
-        if(!r.width||!r.height||!r.depth) return ctx.showToast(`Enter width, height & depth for Room ${i+1}`,'bad');
+        if(!r.name||!(r.name||'').trim()) add('rooms',`Enter the room name for Room ${i+1}`);
+        if(!r.width||!r.height||!r.depth) add('rooms',`Enter width, height & depth for Room ${i+1}`);
       }
+    }
+    if(!o.items||o.items.length===0) add('items','Add at least one item');
+    if(!o.slNo||!String(o.slNo).trim()) add('internal','SI No is required');
+    if(o.manualOrder && (!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim())) add('internal','Receipt No is required for a manual order');
+    if(!o.paymentMode||!String(o.paymentMode).trim()) add('payment','Select the Payment Mode');
+    if(!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim()) add('payment','Money Receipt No is required');
+    return e;
+  }
+
+  async function handleSave() {
+    setTriedSave(true);
+    const errs = collectErrors();
+    if(errs.length){
+      ctx.showToast(errs.length+' field'+(errs.length>1?'s':'')+' still need'+(errs.length>1?'':'s')+' attention','bad');
+      scrollToSec(errs[0].sec);
+      return;
     }
     // Lead Source is now the awareness dropdown — keep the OPS "Source" column in sync
     const saved = await doSaveOrder(withMeasurements({...o,salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)}));
@@ -3111,6 +3143,12 @@ function OrderFormScreen({ctx}) {
     );
   }
 
+  // Live validation state drives the step progress bar and the save summary.
+  const liveErrors = collectErrors();
+  const STEPS = [['customer','Customer'],['address','Address'],['measure','Measure'],['items','Items'],['payment','Payment']];
+  const stepSecs = { customer:['customer'], address:['address'], measure:['measure','rooms'], items:['items'], payment:['payment','internal'] };
+  const stepDone = k => !liveErrors.some(e => stepSecs[k].includes(e.sec));
+
   return (
     <div className="screen">
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,flexShrink:0}}>
@@ -3128,6 +3166,16 @@ function OrderFormScreen({ctx}) {
         </div>
       </div>
       <StockRibbon syncedAt={ctx.syncedAt}/>
+      {/* Step progress — a tap jumps to that section; a filled dot means every
+          required field in it is done. Purely a guide; nothing is gated on it. */}
+      <div style={{display:'flex',gap:4,padding:'7px 10px',background:'#fff',borderBottom:`1px solid ${T.line}`,overflowX:'auto',flexShrink:0}}>
+        {STEPS.map(([k,label])=>{ const done=stepDone(k); return (
+          <div key={k} onClick={()=>scrollToSec(k)} style={{flex:'1 0 auto',display:'flex',alignItems:'center',gap:5,padding:'4px 9px',borderRadius:99,cursor:'pointer',background:done?T.greenSoft:T.paper2,border:`1px solid ${done?T.greenLine:T.line}`,whiteSpace:'nowrap'}}>
+            <span style={{width:14,height:14,borderRadius:99,flexShrink:0,display:'inline-flex',alignItems:'center',justifyContent:'center',background:done?T.green:'#fff',border:done?'none':`1.5px solid ${T.line2||T.line}`,color:'#fff',fontSize:9,fontWeight:800}}>{done?'✓':''}</span>
+            <span style={{fontSize:11,fontWeight:700,color:done?T.green:T.ink3}}>{label}</span>
+          </div>
+        );})}
+      </div>
       <div className="scroll">
         {o.manualOrder && (
           <>
@@ -3137,7 +3185,7 @@ function OrderFormScreen({ctx}) {
             <Field label="Booking Date" value={dmyToISO(o.date)} onChange={v=>setF('date',isoToDMY(v))} type="date" mono required hint="Manual order — the actual date this order was booked"/>
           </>
         )}
-        <SectionHead n="01" label="Customer"/>
+        <SectionHead n="01" label="Customer" id="sec-customer"/>
         <Field label="Customer Name" value={o.customer} onChange={v=>setF('customer',v)} required/>
         <Field label="Phone" value={o.phone} onChange={v=>setF('phone',v)} mono required type="tel" action="CALL" onAction={()=>o.phone&&window.open('tel:'+o.phone)} error={o.phone&&!isValidPhone(o.phone)?'Enter a valid 10-digit mobile number':undefined}/>
         <Field label="Alt. Phone" value={o.alt} onChange={v=>setF('alt',v)} mono type="tel" error={o.alt&&!isValidPhone(o.alt)?'Enter a valid 10-digit mobile number':undefined}/>
@@ -3171,7 +3219,7 @@ function OrderFormScreen({ctx}) {
           </select>
         </div>
 
-        <SectionHead n="02" label="Address"/>
+        <SectionHead n="02" label="Address" id="sec-address"/>
         <Field label="Delivery Address" value={o.delivery} onChange={v=>setF('delivery',v)} multiline required/>
         <Field label="Pincode" value={o.pincode} onChange={v=>setF('pincode',v.replace(/[^\d]/g,'').slice(0,6))} mono required type="tel" hint="Mandatory · delivery address pincode (printed on the PDF)" error={o.pincode&&!/^\d{6}$/.test(o.pincode)?'Enter a valid 6-digit pincode':undefined}/>
         <Field label="Floor" value={o.floor} onChange={v=>setF('floor',v)} required hint="Mandatory"/>
@@ -3212,7 +3260,7 @@ function OrderFormScreen({ctx}) {
           </>
         );})()}
 
-        <SectionHead n="03" label="Site Measurements"/>
+        <SectionHead n="03" label="Site Measurements" id="sec-measure"/>
         <div style={{padding:'8px 14px',background:T.paper2||'#fafafa',borderBottom:`1px solid ${T.line}`,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
           <span style={{fontSize:11,color:T.ink4,fontWeight:700}}>ENTER IN</span>
           {[['cm','cm'],['ft','ft / in']].map(([u,lbl])=>(
@@ -3256,7 +3304,7 @@ function OrderFormScreen({ctx}) {
         )}
         {/* Rooms — sales picks how many rooms, then notes each room's dims.
             Mandatory when a modular wardrobe is in the order. */}
-        <SectionHead n="03b" label="Rooms"/>
+        <SectionHead n="03b" label="Rooms" id="sec-rooms"/>
         {hasWardrobe && (
           <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Modular wardrobe in order — room measurements are mandatory (printed on the PDF)</div>
         )}
@@ -3293,7 +3341,7 @@ function OrderFormScreen({ctx}) {
         <MeasureField label="Entry Door Width" value={o.entryDoorWidth} onChange={v=>setF('entryDoorWidth',v)} unit={measUnit} required={hasSofa} hint={hasSofa?'Mandatory for sofa orders':undefined}/>
         <MeasureField label="Entry Door Height" value={o.entryDoorHeight} onChange={v=>setF('entryDoorHeight',v)} unit={measUnit} required={hasSofa}/>
 
-        <SectionHead n="04" label={`Items · ${(o.items||[]).length}`} action="+ ADD ITEM" onAction={()=>nav('search')}/>
+        <SectionHead n="04" label={`Items · ${(o.items||[]).length}`} action="+ ADD ITEM" onAction={()=>nav('search')} id="sec-items"/>
         <div style={{background:'#fff'}}>
           {(o.items||[]).map((it,i)=>{
             const mrpVal   = it.mrp||it.cpl||0;                 // pre-GST list price (base)
@@ -3404,7 +3452,7 @@ function OrderFormScreen({ctx}) {
             {Icon.search(T.green,16)}<span style={{fontSize:13}}>Search & add item</span>
           </div>
         </div>
-        <SectionHead n="05" label="Commercials"/>
+        <SectionHead n="05" label="Commercials" id="sec-commercial"/>
         <Field label="Additional Order Discount %" value={o.orderDiscount} onChange={v=>setF('orderDiscount',v.replace(/[^\d.]/g,''))} mono type="number" hint="Extra discount on the whole order (on top of per-item discounts). Shown on the PDF."/>
         <Field label="SI No" value={o.slNo} onChange={v=>setF('slNo',v)} mono required hint="Mandatory · the order-form SI number · printed as the Sl part of the PDF's Order No. (Sl / Receipt)"/>
         {o.manualOrder
@@ -3417,7 +3465,7 @@ function OrderFormScreen({ctx}) {
         <Field label="WON (Godrej SO No)" value={o.won} onChange={v=>setF('won',v)} mono hint="Godrej SO / WON number — can be added or updated any time"/>
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setOrder(prev=>({...prev,plannedDly:v,followUp:followUpFromDelivery(v)||prev.followUp}))} mono required type="date" hint="Follow-up auto-set to 2 days before this date"/>
         <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
-        <SectionHead n="06" label="Payment"/>
+        <SectionHead n="06" label="Payment" id="sec-payment"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>PAYMENT MODE <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <select value={o.paymentMode} onChange={e=>setF('paymentMode',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.paymentMode?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
@@ -3465,7 +3513,7 @@ function OrderFormScreen({ctx}) {
           <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Order is Completed only when "Installation Done".</div>
           {/partial/i.test(o.deliveryStatus||'') && <PartialDeliverySummary order={o} onEdit={()=>setPartialPicker(true)}/>}
         </div>
-        <SectionHead n="07" label="Internal"/>
+        <SectionHead n="07" label="Internal" id="sec-internal"/>
         <Field label="Salesperson" value={o.salesExec??''} onChange={v=>setF('salesExec',v)} mono hint="Pre-filled with your name — edit or clear freely (your name is used if left blank)."/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Order Type <span style={{color:T.bad,marginLeft:3}}>*</span></div>
@@ -3497,6 +3545,21 @@ function OrderFormScreen({ctx}) {
           </div>
         </div>
       </div>
+      {/* Validation summary — appears after the first Save attempt and updates live
+          as fields are filled. Each line jumps to the section that needs it. */}
+      {triedSave && liveErrors.length>0 && (
+        <div style={{flexShrink:0,background:T.badSoft,borderTop:`1px solid ${T.bad}`,padding:'10px 14px',maxHeight:150,overflowY:'auto'}}>
+          <div style={{fontSize:12,fontWeight:800,color:T.bad,marginBottom:6}}>⚠ {liveErrors.length} thing{liveErrors.length>1?'s':''} needed before saving</div>
+          <div style={{display:'flex',flexDirection:'column',gap:4}}>
+            {liveErrors.slice(0,6).map((e,i)=>(
+              <div key={i} onClick={()=>scrollToSec(e.sec)} style={{fontSize:12,color:T.ink2,cursor:'pointer',display:'flex',gap:6,alignItems:'baseline'}}>
+                <span style={{color:T.bad,fontWeight:800}}>→</span><span style={{textDecoration:'underline',textDecorationColor:T.line2||T.line}}>{e.msg}</span>
+              </div>
+            ))}
+            {liveErrors.length>6 && <div style={{fontSize:11,color:T.ink4,fontWeight:600}}>+{liveErrors.length-6} more…</div>}
+          </div>
+        </div>
+      )}
       <div style={{display:'flex',gap:8,padding:'10px 14px',background:'#fff',borderTop:`1px solid ${T.line}`,flexShrink:0}}>
         <Btn onClick={()=>{ if((o.items&&o.items.length)&&!window.confirm('Discard changes to this order?'))return; try{localStorage.removeItem('4s_draft');}catch{} setOrder(BLANK_ORDER()); nav('home'); }}>Discard</Btn>
         <Btn onClick={handleSaveDraft}>Save Draft</Btn>
@@ -3908,9 +3971,10 @@ function NotificationsScreen({ctx}) {
   const committedCount = misList.filter(m=>m.committed).length;
 
   const groups = [
-    {kind:'overdue', label:'Overdue deliveries', icon:Icon.clock(T.bad,16), tone:T.bad, soft:T.badSoft||'#fdecec'},
-    {kind:'soon',    label:'Delivery approaching', icon:Icon.truck(T.warn,16), tone:T.warn, soft:T.warnSoft},
-    {kind:'mis',     label:'Committed in MIS — plan delivery', icon:Icon.bolt(T.green,14), tone:T.green, soft:T.greenSoft},
+    {kind:'overdue',  label:'Overdue deliveries', icon:Icon.clock(T.bad,16), tone:T.bad, soft:T.badSoft||'#fdecec'},
+    {kind:'followup', label:'Follow-ups due', icon:Icon.bell(T.ink2,15), tone:T.ink2, soft:T.paper2},
+    {kind:'soon',     label:'Delivery approaching', icon:Icon.truck(T.warn,16), tone:T.warn, soft:T.warnSoft},
+    {kind:'mis',      label:'Committed in MIS — plan delivery', icon:Icon.bolt(T.green,14), tone:T.green, soft:T.greenSoft},
   ];
 
   async function refreshMis() {
