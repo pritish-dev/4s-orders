@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v43';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v44';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -555,10 +555,23 @@ function handlePriceList(p) {
   try {
     var pc = _getProductCatalog(opsSS);
     if (pc && pc.list.length) {
-      var byLen = pc.list.slice().sort(function(a, b){ return b._n.length - a._n.length; });
+      var byLen  = pc.list.slice().sort(function(a, b){ return b._n.length - a._n.length; });
+      var byCore = pc.list.slice().sort(function(a, b){ return b._cd.length - a._cd.length; });
       for (var ci = 0; ci < all.length; ci++) {
         var itn = _normName(all[ci].name);
+        var itd = _despaceName(all[ci].name);
         var hit = itn ? pc.index[itn] : null;               // exact normalised match
+        if (!hit && itd) {                                   // anchored despaced-prefix
+          // The description must START with the model core (longest wins, so a
+          // specific variant beats a shorter same-prefix name). This is what
+          // makes brand-new products match despite dropped spaces / trailing
+          // words in the price feed, without the false hits a loose substring
+          // scan on a despaced string would cause.
+          for (var pci = 0; pci < byCore.length; pci++) {
+            var ce = byCore[pci];
+            if (ce._cd.length >= 5 && itd.indexOf(ce._cd) === 0) { hit = ce; break; }
+          }
+        }
         if (!hit && itn) {                                   // family / substring fallback
           for (var bi = 0; bi < byLen.length; bi++) {
             var e = byLen[bi];
@@ -902,6 +915,19 @@ function _numVal(v) {
 // description (the catalog has no item code). Header-name based, so column order
 // and casing don't matter.
 function _normName(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+function _despaceName(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
+// Godrej price descriptions lead with the model name but frequently drop its
+// spaces ("BroadwayV2", "SumoV2") or trail generic words the catalog leaves out
+// ("Bayflow" vs "Bayflow Sofa"). The core key is the normalised product name
+// with trailing generic words stripped and all separators removed, so it can be
+// prefix-matched against a despaced description. Anchoring at the start avoids
+// mid-description collisions (e.g. a colour "…Fab Vesta" must NOT match "Vesta").
+var _CAT_GENERIC = { sofa:1, set:1, modular:1, sectional:1, recliner:1, lounger:1, seater:1, str:1, seat:1 };
+function _coreKey(n) {
+  var w = String(n || '').split(' ');
+  while (w.length > 1 && _CAT_GENERIC[w[w.length - 1]]) w.pop();
+  return w.join('').replace(/[^a-z0-9]+/g, '');
+}
 function _splitUrls(v) {
   var s = String(v || ''); if (!s) return [];
   return s.split(/[\s,]+/).map(function(x){ return x.trim(); })
@@ -929,7 +955,7 @@ function _getProductCatalog(opsSS) {
     var nm = String(vals[r][cName] || '').trim(); if (!nm) continue;
     var n = _normName(nm); if (!n) continue;
     var e = {
-      name: nm, _n: n,
+      name: nm, _n: n, _cd: _coreKey(n),
       mainCat: cMain>=0 ? String(vals[r][cMain]||'').trim() : '',
       subCat:  cSub>=0  ? String(vals[r][cSub]||'').trim()  : '',
       features: cFeat>=0 ? String(vals[r][cFeat]||'').trim() : '',

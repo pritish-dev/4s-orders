@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '62';
+  var V = '63';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -87,7 +87,7 @@
      load and whenever the app is brought to the foreground. -->
 <script>
 (function(){
-  var RUNV = '62';   // keep in sync with V above and version.json
+  var RUNV = '63';   // keep in sync with V above and version.json
   function checkUpdate(){
     try {
       fetch('version.json?ts=' + Date.now(), { cache: 'no-store' })
@@ -2533,6 +2533,23 @@ function HomeScreen({ctx}) {
 }
 
 // ─── Stock Search ────────────────────────────────────────────
+// Browse Items room ordering. Groups the list so it reads Living Room → Bedroom
+// → Dining → Wardrobe & Storage → everything else, using the price-list CATEGORY
+// (it.cat) first, then the matched Product Catalog room, then the description —
+// so it still works for SKUs that never matched the catalog. Precedence is
+// deliberate: dining and storage are checked before bedroom so a "Dining Room"
+// or "Home Storage" item is never pulled into bedroom, and storage is its own
+// group even when the feed files a wardrobe under bedroom furniture.
+function roomRank(it, catEntry) {
+  const s = ((it.cat||'') + ' ' + (it.item||'') + ' ' + (it.sheet||'') + ' ' +
+             (catEntry && catEntry.mainCat || '') + ' ' + (it.name||''))
+            .toLowerCase().replace(/[^a-z0-9]+/g, ' ');   // underscores → spaces so \b works
+  if (/\bdining\b|dintbl|din tbl/.test(s)) return 2;
+  if (/wardrobe|almirah|\bstorage\b|kreation|sideboard|chest of|shoe\s?rack|book\s?shelf|\bcabinet\b/.test(s)) return 3;
+  if (/bedroom|\bbeds?\b|mattress|dresser|bedside|night\s?stand/.test(s)) return 1;
+  if (/living room|\bsofa\b|recliner|lounger|coffee\s?table|\bottoman\b|settee|occasional/.test(s)) return 0;
+  return 4;
+}
 // A neutral image glyph used wherever a product photo is missing / fails to load.
 function PhIcon({size=28}) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={T.line2||T.ink4} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.4"/><path d="M4 18l5-5 4 4 3-3 4 4"/></svg>;
@@ -2714,14 +2731,20 @@ function SearchScreen({ctx}) {
 
   const {filtered, searchMode} = React.useMemo(() => {
     const { results, mode } = fuzzySearch(bycat, deferredQ);
-    // Show in-stock items first, then out-of-stock, then Made-To-Order. Stable
-    // within each tier so search relevance / browse order is preserved.
+    // When browsing (no query), group by room — Living Room → Bedroom → Dining →
+    // Wardrobe & Storage → others — so the catalogue reads in a natural showroom
+    // order. Search keeps relevance order untouched. Within each group, in-stock
+    // items come first, then out-of-stock, then Made-To-Order; stable otherwise.
+    const browsing = !deferredQ.trim();
     const sorted = results
       .map((it, i) => ({ it, i }))
-      .sort((a, b) => (availabilityTier(a.it) - availabilityTier(b.it)) || (a.i - b.i))
+      .sort((a, b) =>
+        (browsing ? (roomRank(a.it, catalog[a.it.catKey]) - roomRank(b.it, catalog[b.it.catKey])) : 0)
+        || (availabilityTier(a.it) - availabilityTier(b.it))
+        || (a.i - b.i))
       .map(x => x.it);
     return { filtered: sorted, searchMode: mode };
-  }, [bycat, deferredQ]);
+  }, [bycat, deferredQ, catalog]);
 
   // Cap what we actually render so a broad browse / match never mounts thousands
   // of rows (the cause of scroll + typing jank). Extras are one tap away by
