@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '61';
+  var V = '62';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -87,7 +87,7 @@
      load and whenever the app is brought to the foreground. -->
 <script>
 (function(){
-  var RUNV = '61';   // keep in sync with V above and version.json
+  var RUNV = '62';   // keep in sync with V above and version.json
   function checkUpdate(){
     try {
       fetch('version.json?ts=' + Date.now(), { cache: 'no-store' })
@@ -343,6 +343,12 @@ async function loadPriceListItems(forceFresh = false, skipLocalCache = false) {
 
   localStorage.setItem(CACHE_KEY, JSON.stringify(res.items));
   localStorage.setItem(CACHE_TS,  String(Date.now()));
+  // Product Catalog (photos + specs), stored separately and looked up by catKey in
+  // Browse Items. Kept out of the items array so the per-SKU payload stays lean.
+  try {
+    localStorage.setItem('4s_catalog_v1', JSON.stringify(res.catalog || {}));
+    localStorage.setItem('4s_catalog_stats_v1', JSON.stringify(res.catalogStats || {}));
+  } catch (e) {}
   return res.items;
 }
 
@@ -2527,8 +2533,140 @@ function HomeScreen({ctx}) {
 }
 
 // ─── Stock Search ────────────────────────────────────────────
+// A neutral image glyph used wherever a product photo is missing / fails to load.
+function PhIcon({size=28}) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={T.line2||T.ink4} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.4"/><path d="M4 18l5-5 4 4 3-3 4 4"/></svg>;
+}
+// 64px catalog thumbnail — the product's first photo, or a placeholder tile.
+function ProductThumb({src, size=64}) {
+  const [err,setErr] = React.useState(false);
+  const box = {width:size,height:size,borderRadius:10,flexShrink:0,border:`1px solid ${T.line}`,background:T.paper2};
+  if (!src || err) return <div style={{...box,display:'grid',placeItems:'center'}}><PhIcon size={size*0.5}/></div>;
+  return <img src={src} loading="lazy" decoding="async" alt="" onError={()=>setErr(true)} style={{...box,objectFit:'cover'}}/>;
+}
+
+// Premium product preview (Browse Items only). Shows the catalog photos, features,
+// measurements and colour/material swatches when the SKU matched a Product Catalog
+// row; otherwise a graceful "coming soon" state that keeps the SKU fully orderable.
+function ProductSheet({item, cat, onClose, onAdd}) {
+  const [ai,setAi]       = React.useState(0);
+  const [imgErr,setImgErr] = React.useState({});
+  const cplBase = Number(item.cpl)||Number(item.mrp)||0;
+  const cpl     = cplBase>0 ? Math.round(cplBase*(1+GST_RATE)) : 0;
+  const images  = (cat&&Array.isArray(cat.images))?cat.images:[];
+  const swatches= (cat&&Array.isArray(cat.swatches))?cat.swatches:[];
+  const stockTotal = (item.stock||[]).reduce((s,x)=>s+x.q,0);
+  const featureLines = (cat&&cat.features) ? String(cat.features).split(/\r?\n|•|•|;/).map(s=>s.replace(/^[-*\s]+/,'').trim()).filter(Boolean) : [];
+  const measure = (cat&&cat.measurements||'').trim();
+  const colour  = (cat&&cat.colourMaterial||'').trim();
+  const catLabel= [cat&&cat.mainCat, cat&&cat.subCat].filter(Boolean).join(' · ') || (item.cat||'');
+  const hasRich = images.length>0 || featureLines.length>0 || !!measure || !!colour || swatches.length>0;
+  const main = images[ai];
+  return (
+    <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(10,15,13,.45)',zIndex:9997,display:'flex',alignItems:'flex-end',justifyContent:'center'}}>
+      <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:430,background:T.paper,borderTopLeftRadius:16,borderTopRightRadius:16,maxHeight:'88vh',display:'flex',flexDirection:'column',animation:'slideUp .2s ease'}}>
+        <div style={{width:38,height:4,borderRadius:99,background:T.line2||T.line,margin:'9px auto 2px',flexShrink:0}}/>
+        <div className="scroll" style={{paddingBottom:14}}>
+          {images.length>0 ? (
+            <div style={{padding:'6px 16px 0'}}>
+              <div style={{aspectRatio:'16 / 11',borderRadius:14,overflow:'hidden',border:`1px solid ${T.line}`,background:T.paper2,display:'grid',placeItems:'center'}}>
+                {main && !imgErr[ai] ? <img src={main} loading="lazy" decoding="async" alt="" onError={()=>setImgErr(p=>({...p,[ai]:true}))} style={{width:'100%',height:'100%',objectFit:'cover'}}/> : <PhIcon size={72}/>}
+              </div>
+              {images.length>1 && (
+                <div style={{display:'flex',gap:8,marginTop:8,overflowX:'auto'}}>
+                  {images.map((u,i)=>(
+                    <div key={i} onClick={()=>setAi(i)} style={{width:54,height:46,borderRadius:8,flexShrink:0,overflow:'hidden',background:T.paper2,border:`1px solid ${i===ai?T.green:T.line}`,boxShadow:i===ai?`0 0 0 1px ${T.green}`:'none',cursor:'pointer',display:'grid',placeItems:'center'}}>
+                      {!imgErr[i] ? <img src={u} loading="lazy" alt="" onError={()=>setImgErr(p=>({...p,[i]:true}))} style={{width:'100%',height:'100%',objectFit:'cover'}}/> : <PhIcon size={20}/>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{padding:'16px 16px 2px'}}>
+              <div style={{border:`1.5px dashed ${T.line2||T.line}`,borderRadius:14,background:T.paper2,padding:'24px 18px',textAlign:'center',display:'flex',flexDirection:'column',alignItems:'center',gap:8}}>
+                <div style={{width:54,height:54,borderRadius:14,background:'#fff',border:`1px solid ${T.line}`,display:'grid',placeItems:'center'}}><PhIcon size={30}/></div>
+                <div style={{fontSize:14.5,fontWeight:800}}>Full preview coming soon</div>
+                <div style={{fontSize:12,color:T.ink4,maxWidth:250,lineHeight:1.5}}>This item isn’t in the Product Catalog yet — everything you need to order it is right here.</div>
+              </div>
+            </div>
+          )}
+
+          <div style={{padding:'12px 16px 2px'}}>
+            <div style={{fontSize:19,fontWeight:800,letterSpacing:-0.4,lineHeight:1.18,textWrap:'balance'}}>{item.name}</div>
+            <div style={{display:'flex',alignItems:'center',gap:8,marginTop:4,flexWrap:'wrap'}}>
+              {catLabel && <span style={{fontFamily:T.mono,fontSize:10,letterSpacing:1,textTransform:'uppercase',color:T.ink4}}>{catLabel}</span>}
+              {(item.altCode||item.code) && <span style={{fontFamily:T.mono,fontSize:10.5,fontWeight:700,color:item.altCode?T.green:T.ink4}}>{item.altCode||item.code}</span>}
+            </div>
+          </div>
+
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,margin:'12px 16px',padding:'12px 14px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:12}}>
+            <div>
+              <div style={{fontFamily:T.mono,fontWeight:800,fontSize:19}}>{cpl>0?'₹'+cpl.toLocaleString('en-IN'):'—'}</div>
+              <div style={{fontSize:9,color:T.ink4,fontWeight:600}}>{cpl>0?'incl. 18% GST':'price on request'}{stockTotal>0?' · '+stockTotal+' in stock':''}</div>
+            </div>
+            <button onClick={onAdd} style={{padding:'11px 16px',borderRadius:8,background:T.green,color:'#fff',border:'none',fontWeight:700,fontSize:13.5,display:'flex',gap:6,alignItems:'center',cursor:'pointer'}}>{Icon.plus('#fff',14)}Add to order</button>
+          </div>
+
+          {featureLines.length>0 && (
+            <div style={{padding:'2px 16px'}}>
+              <div style={{fontSize:10,fontWeight:800,letterSpacing:1.2,textTransform:'uppercase',color:T.ink4,margin:'10px 0 7px'}}>Features</div>
+              <div style={{display:'flex',flexDirection:'column',gap:7}}>
+                {featureLines.slice(0,12).map((f,i)=>(
+                  <div key={i} style={{display:'flex',gap:9,fontSize:13,color:T.ink2,alignItems:'flex-start'}}><span style={{width:6,height:6,borderRadius:99,background:T.green,marginTop:6,flexShrink:0}}/>{f}</div>
+                ))}
+              </div>
+            </div>
+          )}
+          {measure && (
+            <div style={{padding:'2px 16px'}}>
+              <div style={{fontSize:10,fontWeight:800,letterSpacing:1.2,textTransform:'uppercase',color:T.ink4,margin:'12px 0 7px'}}>Measurements</div>
+              <div style={{fontSize:13,color:T.ink2,fontFamily:T.mono,lineHeight:1.5,background:'#fff',border:`1px solid ${T.line}`,borderRadius:9,padding:'10px 12px',whiteSpace:'pre-wrap'}}>{measure}</div>
+            </div>
+          )}
+          {(colour || swatches.length>0) && (
+            <div style={{padding:'2px 16px'}}>
+              <div style={{fontSize:10,fontWeight:800,letterSpacing:1.2,textTransform:'uppercase',color:T.ink4,margin:'12px 0 7px'}}>Colour &amp; Material</div>
+              {colour && <div style={{fontSize:13,color:T.ink3,marginBottom:swatches.length?10:0}}>{colour}</div>}
+              {swatches.length>0 && (
+                <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+                  {swatches.map((u,i)=>(<SwatchChip key={i} src={u}/>))}
+                </div>
+              )}
+            </div>
+          )}
+          {!hasRich && (
+            <div style={{padding:'2px 16px'}}>
+              <div style={{fontSize:10,fontWeight:800,letterSpacing:1.2,textTransform:'uppercase',color:T.ink4,margin:'10px 0 7px'}}>Item details</div>
+              <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                {[['Code',item.altCode||item.code||'—'],['Category',item.cat||item.sheet||'—'],['Stock',stockTotal>0?String(stockTotal):'0']].map(([k,v])=>(
+                  <div key={k} style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:9,padding:'8px 11px',minWidth:70}}>
+                    <div style={{fontSize:8.5,letterSpacing:1,textTransform:'uppercase',color:T.ink4,fontWeight:700}}>{k}</div>
+                    <div style={{fontFamily:T.mono,fontWeight:800,fontSize:13,marginTop:2,color:k==='Stock'&&stockTotal>0?T.ok:T.ink}}>{v}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div style={{height:8}}/>
+        </div>
+      </div>
+    </div>
+  );
+}
+// A single colour/material swatch (image), hidden if it fails to load.
+function SwatchChip({src}) {
+  const [err,setErr] = React.useState(false);
+  if (err) return null;
+  return <span style={{width:40,height:40,borderRadius:10,border:'1px solid rgba(0,0,0,.12)',overflow:'hidden',background:T.paper2,display:'inline-block'}}><img src={src} loading="lazy" alt="" onError={()=>setErr(true)} style={{width:'100%',height:'100%',objectFit:'cover'}}/></span>;
+}
+
 function SearchScreen({ctx}) {
   const {items, priceItems, syncedAt, priceSyncedAt, nav, back, order, setOrder, syncPriceList, loading} = ctx;
+  // Product Catalog map (photos + specs), looked up by each item's catKey. Read
+  // from localStorage and re-parsed whenever the price list is re-synced.
+  const catalog = React.useMemo(() => { try { return JSON.parse(localStorage.getItem('4s_catalog_v1')||'{}'); } catch { return {}; } }, [priceSyncedAt, priceItems.length]);
+  const [preview, setPreview] = React.useState(null);
   const [q,   setQ]   = useState('');
   const [cat, setCat] = useState('all');
   const cartCount = (order.items||[]).reduce((s,i)=>s+(i.qty||0),0);
@@ -2766,9 +2904,12 @@ function SearchScreen({ctx}) {
           const cplBase = Number(it.cpl) || Number(it.mrp) || 0;
           // MRP shown to the user = list price (CPL) with 18% GST already added in.
           const cpl = cplBase > 0 ? Math.round(cplBase * (1 + GST_RATE)) : 0;
+          const catEntry = catalog[it.catKey];
+          const thumb = catEntry && catEntry.images && catEntry.images[0];
           return (
-            <div key={(it.code||it.name||'')+'|'+(it.sheet||'')+'|'+fi} style={{padding:'12px 18px',borderBottom:`1px solid ${T.line}`}}>
+            <div key={(it.code||it.name||'')+'|'+(it.sheet||'')+'|'+fi} onClick={()=>setPreview(it)} style={{padding:'12px 18px',borderBottom:`1px solid ${T.line}`,cursor:'pointer'}}>
               <div style={{display:'flex',gap:10}}>
+                <ProductThumb src={thumb}/>
                 <div style={{flex:1,minWidth:0}}>
                   {/* LN Description — always the primary product name */}
                   <div style={{fontSize:13,fontWeight:600,color:T.ink,lineHeight:1.35,marginBottom:4}}>{it.name}</div>
@@ -2801,7 +2942,7 @@ function SearchScreen({ctx}) {
                     </div>
                     {cpl > 0 && <div style={{fontSize:8,color:T.ink4,fontWeight:600,textAlign:'right',marginTop:1}}>incl. 18% GST</div>}
                   </div>
-                  <button onClick={()=>addToOrder(it)} style={{height:32,padding:'0 12px',borderRadius:6,background:oos?T.warn:T.green,color:'#fff',border:'none',fontSize:13,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:4}}>
+                  <button onClick={e=>{e.stopPropagation();addToOrder(it);}} style={{height:32,padding:'0 12px',borderRadius:6,background:oos?T.warn:T.green,color:'#fff',border:'none',fontSize:13,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:4}}>
                     {Icon.plus('#fff',14)}{oos?'Book':'Add'}
                   </button>
                 </div>
@@ -2844,6 +2985,7 @@ function SearchScreen({ctx}) {
           <span style={{fontSize:13,fontWeight:700,display:'flex',alignItems:'center',gap:4}}>Continue booking →</span>
         </div>
       )}
+      {preview && <ProductSheet item={preview} cat={catalog[preview.catKey]} onClose={()=>setPreview(null)} onAdd={()=>{addToOrder(preview);setPreview(null);}}/>}
       <BottomNav screen="search" nav={nav}/>
     </div>
   );
@@ -4317,6 +4459,18 @@ function SettingsScreen({ctx}) {
                     <span>Total SKUs</span>
                     <span style={{fontWeight:700,color:T.ok}}>{(priceItems||[]).length}</span>
                   </div>
+                  {(()=>{ let st=null; try{ st=JSON.parse(localStorage.getItem('4s_catalog_stats_v1')||'null'); }catch(e){} if(!st||!st.total) return null; const pct=Math.round((st.matched/st.total)*100); return (
+                    <div style={{marginTop:6,borderTop:`1px solid ${T.line}`,paddingTop:6}}>
+                      <div style={{display:'flex',justifyContent:'space-between',color:T.ink2}}>
+                        <span>Catalog photos matched</span>
+                        <span style={{fontWeight:700,color:pct>=50?T.ok:T.warn}}>{st.matched} of {st.total} · {pct}%</span>
+                      </div>
+                      <div style={{fontSize:9.5,color:T.ink4,marginTop:2}}>{st.products||0} catalog products linked. Unmatched items show a “coming soon” preview.</div>
+                      {isAdmin && Array.isArray(st.sample) && st.sample.length>0 && (
+                        <div style={{marginTop:5,fontSize:9,color:T.ink4,lineHeight:1.6}}>Sample unmatched: {st.sample.slice(0,6).join(' · ')}</div>
+                      )}
+                    </div>
+                  ); })()}
                 </>
               ) : (
                 <div style={{color:T.warn}}>No items loaded — tap "Sync now" to fetch from OPS sheet</div>

@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v42';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v43';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -43,6 +43,7 @@ var CRM_MIS_UPDATE_URL = 'https://godrej-crm-app-4sinteriors.streamlit.app/MIS_U
 var PRICE_SKIP = [
   'Stock', 'APP_ORDERING_CREDS', 'Staff',
   'Orders_Master', 'Change_Log', 'Price_Lists',
+  'Product Catalog', 'Product Catalogue',
   'Sheet1', 'Sheet2', 'Sheet3', 'Sheet4', 'Sheet5',
 ];
 
@@ -546,8 +547,42 @@ function handlePriceList(p) {
     };
   }
 
+  // Product Catalog join — attach photos/specs by matching each item's description
+  // to the catalog's Product Name (the catalog has no item code). Returns a deduped
+  // catalog map (one entry per product, shared across its variant SKUs) plus a
+  // per-item catKey, so the payload stays small even when most SKUs match.
+  var catalogMap = {}, catMatched = 0, catUnmatched = [];
+  try {
+    var pc = _getProductCatalog(opsSS);
+    if (pc && pc.list.length) {
+      var byLen = pc.list.slice().sort(function(a, b){ return b._n.length - a._n.length; });
+      for (var ci = 0; ci < all.length; ci++) {
+        var itn = _normName(all[ci].name);
+        var hit = itn ? pc.index[itn] : null;               // exact normalised match
+        if (!hit && itn) {                                   // family / substring fallback
+          for (var bi = 0; bi < byLen.length; bi++) {
+            var e = byLen[bi];
+            if (e._n.length >= 4 && (itn.indexOf(e._n) >= 0 || e._n.indexOf(itn) >= 0)) { hit = e; break; }
+          }
+        }
+        if (hit) {
+          all[ci].catKey = hit._n;
+          if (!catalogMap[hit._n]) catalogMap[hit._n] = {
+            name: hit.name, mainCat: hit.mainCat, subCat: hit.subCat,
+            features: hit.features, measurements: hit.measurements,
+            colourMaterial: hit.colourMaterial, images: hit.images, swatches: hit.swatches };
+          catMatched++;
+        } else if (catUnmatched.length < 25) {
+          catUnmatched.push(all[ci].name);
+        }
+      }
+    }
+  } catch (e) { /* catalog join is non-fatal — items still load without photos */ }
+
   var result = { ok: true, scriptVersion: SCRIPT_VERSION, mode: usedFallback ? 'auto-scan' : 'config', items: all, counts: counts, totalTabs: Object.keys(counts).length,
-                 annotated: { discontinued: annDiscontinued, altCode: annAltCode, addedFromDiscontinued: addedDiscontinued } };
+                 annotated: { discontinued: annDiscontinued, altCode: annAltCode, addedFromDiscontinued: addedDiscontinued },
+                 catalog: catalogMap,
+                 catalogStats: { matched: catMatched, total: all.length, products: Object.keys(catalogMap).length, sample: catUnmatched } };
   if (errors.length) result.tabErrors = errors;
   _cachePut(cacheKey, result);   // speed up the next load
   return result;
@@ -859,6 +894,53 @@ function _numVal(v) {
   if (parts.length > 2) s = parts.slice(0, -1).join('') + '.' + parts[parts.length - 1];
   var result = parseFloat(s) || 0;
   return result > 9999999 ? 0 : result;  // cap at ₹1 crore
+}
+
+// ─── PRODUCT CATALOG (photos + specs) ─────────────────────────────────────────
+// Reads the OPS "Product Catalog" tab and returns an index keyed by a normalised
+// Product Name, so a price-list item can be matched to its photos/features by
+// description (the catalog has no item code). Header-name based, so column order
+// and casing don't matter.
+function _normName(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+function _splitUrls(v) {
+  var s = String(v || ''); if (!s) return [];
+  return s.split(/[\s,]+/).map(function(x){ return x.trim(); })
+          .filter(function(x){ return /^https?:\/\//i.test(x); }).slice(0, 8);
+}
+function _getProductCatalog(opsSS) {
+  var sh = opsSS.getSheetByName('Product Catalog') || opsSS.getSheetByName('Product Catalogue');
+  if (!sh) return null;
+  var last = sh.getLastRow(), lastC = sh.getLastColumn();
+  if (last < 2 || lastC < 1) return { index: {}, list: [], rows: 0 };
+  var vals = sh.getRange(1, 1, last, lastC).getValues();
+  var hdr  = vals[0].map(function(c){ return String(c || '').toLowerCase().trim(); });
+  function idx(cands){ for (var i=0;i<hdr.length;i++){ for (var j=0;j<cands.length;j++){ if (hdr[i]===cands[j]) return i; } } return -1; }
+  var cName = idx(['product name','product','name']);
+  var cMain = idx(['main category','category']);
+  var cSub  = idx(['sub category','subcategory','sub-category']);
+  var cFeat = idx(['features','feature','description','specifications','specs']);
+  var cMeas = idx(['measurements','measurement','dimensions','size']);
+  var cCol  = idx(['colour & material','color & material','colour and material','color and material','colour','color','material']);
+  var cImg  = idx(['product image urls','product image url','product images','image urls','image url','images','image']);
+  var cSw   = idx(['swatch image urls','swatch image url','swatch images','swatches','swatch']);
+  if (cName < 0) return { index: {}, list: [], rows: last - 1 };
+  var index = {}, list = [];
+  for (var r = 1; r < vals.length; r++) {
+    var nm = String(vals[r][cName] || '').trim(); if (!nm) continue;
+    var n = _normName(nm); if (!n) continue;
+    var e = {
+      name: nm, _n: n,
+      mainCat: cMain>=0 ? String(vals[r][cMain]||'').trim() : '',
+      subCat:  cSub>=0  ? String(vals[r][cSub]||'').trim()  : '',
+      features: cFeat>=0 ? String(vals[r][cFeat]||'').trim() : '',
+      measurements: cMeas>=0 ? String(vals[r][cMeas]||'').trim() : '',
+      colourMaterial: cCol>=0 ? String(vals[r][cCol]||'').trim() : '',
+      images:  cImg>=0 ? _splitUrls(vals[r][cImg]) : [],
+      swatches:cSw>=0  ? _splitUrls(vals[r][cSw])  : [],
+    };
+    if (!index[n]) { index[n] = e; list.push(e); }   // first row wins on duplicate names
+  }
+  return { index: index, list: list, rows: last - 1 };
 }
 
 function _makeItem(tabName, cat, group, code, desc, cpl, extra) {
