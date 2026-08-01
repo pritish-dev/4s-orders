@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '63';
+  var V = '64';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -87,7 +87,7 @@
      load and whenever the app is brought to the foreground. -->
 <script>
 (function(){
-  var RUNV = '63';   // keep in sync with V above and version.json
+  var RUNV = '64';   // keep in sync with V above and version.json
   function checkUpdate(){
     try {
       fetch('version.json?ts=' + Date.now(), { cache: 'no-store' })
@@ -2577,7 +2577,11 @@ function ProductSheet({item, cat, onClose, onAdd}) {
   const measure = (cat&&cat.measurements||'').trim();
   const colour  = (cat&&cat.colourMaterial||'').trim();
   const catLabel= [cat&&cat.mainCat, cat&&cat.subCat].filter(Boolean).join(' · ') || (item.cat||'');
-  const hasRich = images.length>0 || featureLines.length>0 || !!measure || !!colour || swatches.length>0;
+  // Catalog specs that stand on their own even when no photo URL was supplied —
+  // features, measurements and colour/material all come from the same Product
+  // Catalog sheet row, so they show whether or not the image cell is filled.
+  const hasSpecs = featureLines.length>0 || !!measure || !!colour || swatches.length>0;
+  const hasRich  = images.length>0 || hasSpecs;
   const main = images[ai];
   return (
     <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(10,15,13,.45)',zIndex:9997,display:'flex',alignItems:'flex-end',justifyContent:'center'}}>
@@ -2598,6 +2602,15 @@ function ProductSheet({item, cat, onClose, onAdd}) {
                   ))}
                 </div>
               )}
+            </div>
+          ) : hasSpecs ? (
+            // Photo missing, but the catalog row has specs — show a neutral photo
+            // placeholder and let the features / measurements / colour render below.
+            <div style={{padding:'6px 16px 0'}}>
+              <div style={{aspectRatio:'16 / 11',borderRadius:14,overflow:'hidden',border:`1px solid ${T.line}`,background:T.paper2,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:6}}>
+                <PhIcon size={56}/>
+                <div style={{fontSize:11,color:T.ink4,fontWeight:600}}>Photo coming soon</div>
+              </div>
             </div>
           ) : (
             <div style={{padding:'16px 16px 2px'}}>
@@ -2739,7 +2752,9 @@ function SearchScreen({ctx}) {
     const sorted = results
       .map((it, i) => ({ it, i }))
       .sort((a, b) =>
-        (browsing ? (roomRank(a.it, catalog[a.it.catKey]) - roomRank(b.it, catalog[b.it.catKey])) : 0)
+        // Discontinued items always sink below every active (continued) item.
+        ((a.it.discontinued ? 1 : 0) - (b.it.discontinued ? 1 : 0))
+        || (browsing ? (roomRank(a.it, catalog[a.it.catKey]) - roomRank(b.it, catalog[b.it.catKey])) : 0)
         || (availabilityTier(a.it) - availabilityTier(b.it))
         || (a.i - b.i))
       .map(x => x.it);
