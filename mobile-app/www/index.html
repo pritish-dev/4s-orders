@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '60';
+  var V = '61';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -87,7 +87,7 @@
      load and whenever the app is brought to the foreground. -->
 <script>
 (function(){
-  var RUNV = '60';   // keep in sync with V above and version.json
+  var RUNV = '61';   // keep in sync with V above and version.json
   function checkUpdate(){
     try {
       fetch('version.json?ts=' + Date.now(), { cache: 'no-store' })
@@ -1927,7 +1927,7 @@ function App() {
   async function doSaveOrder(draft) {
     setLoading(true);
     try {
-      const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total } });
+      const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total, by: user?.code, byName: user?.name } });
       if (res.ok) {
         const saved = {...draft, no: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo || draft.orderFormReceiptNo};
         setOrder(saved);
@@ -1956,7 +1956,7 @@ function App() {
     const remaining = [];
     for (const draft of q) {
       try {
-        const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total } });
+        const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total, by: draft.by||user?.code, byName: draft.byName||user?.name } });
         if (!res || !res.ok) remaining.push(draft);
       } catch { remaining.push(draft); }
     }
@@ -4137,6 +4137,19 @@ function SettingsScreen({ctx}) {
   const [serial,setSerial]         = useState(null);   // {lastIssued,nextWillBe}
   const [serialInput,setSerialInput] = useState('');
   const [serialSaving,setSerialSaving] = useState(false);
+  // Audit log (admin) — who created / edited / deleted / updated which order.
+  const [audit,setAudit]           = useState(null);   // null = not loaded; [] = loaded empty
+  const [auditLoading,setAuditLoading] = useState(false);
+  async function loadAudit() {
+    if (!isAdmin) return;
+    setAuditLoading(true);
+    try {
+      const res = await apiGet('auditLog', {limit:100, by:user?.code}, 15000);
+      if (res && res.ok) setAudit(res.entries||[]);
+      else showToast(res?.error||'Could not load the audit log','bad');
+    } catch(e) { showToast(e.message,'bad'); }
+    finally { setAuditLoading(false); }
+  }
 
   async function loadSerial() {
     if (!isAdmin) return;
@@ -4237,6 +4250,34 @@ function SettingsScreen({ctx}) {
                   style={{flex:1,border:`1px solid ${T.line}`,borderRadius:6,outline:'none',fontFamily:T.mono,fontSize:15,color:T.ink,background:'#fff',padding:'0 12px'}}/>
                 <Btn primary onClick={saveSerial} disabled={serialSaving}>{serialSaving?'Saving…':'Set number'}</Btn>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Audit log (admin only) ── */}
+        {isAdmin && (
+          <div style={{padding:'0 18px 14px'}}>
+            <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>AUDIT LOG — WHO CHANGED WHAT</div>
+            <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'14px'}}>
+              <div style={{fontSize:12,color:T.ink3,lineHeight:1.6,marginBottom:10}}>
+                Every order create, edit, delete, WON and delivery change is recorded with the staff member and the time. Newest first.
+              </div>
+              <Btn full icon={Icon.refresh(T.green,14)} onClick={loadAudit} disabled={auditLoading}>{auditLoading?'Loading…':(audit===null?'Load audit log':'Refresh')}</Btn>
+              {audit!==null && (
+                <div style={{marginTop:10,border:`1px solid ${T.line}`,borderRadius:6,overflow:'hidden'}}>
+                  {audit.length===0 && <div style={{padding:16,textAlign:'center',fontSize:12,color:T.ink4}}>No changes recorded yet.</div>}
+                  {audit.slice(0,100).map((a,i,arr)=>{ const tone=/DELETE/.test(a.action)?T.bad:/CREATE/.test(a.action)?T.ok:T.ink3; const label=(a.action||'').replace(/_/g,' '); return (
+                    <div key={i} style={{padding:'9px 12px',borderBottom:i<arr.length-1?`1px solid ${T.line}`:'none'}}>
+                      <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                        <span style={{fontSize:10,fontWeight:800,letterSpacing:.4,color:'#fff',background:tone,padding:'1px 6px',borderRadius:3}}>{label}</span>
+                        {a.orderNo && <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{a.orderNo}</span>}
+                      </div>
+                      {a.detail && <div style={{fontSize:11,color:T.ink3,marginTop:3,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{a.detail}</div>}
+                      <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{a.user||'—'} · {a.ts}</div>
+                    </div>
+                  );})}
+                </div>
+              )}
             </div>
           </div>
         )}

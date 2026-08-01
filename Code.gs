@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v41';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v42';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -106,6 +106,7 @@ function doGet(e) {
       case 'mis':            result = handleMisData();          break;
       case 'nextReceipt':    result = handleNextReceipt();      break;
       case 'getAppSerial':   result = handleGetAppSerial();     break;
+      case 'auditLog':       result = handleAuditLog(p);        break;
       case 'debugPriceList': result = handleDebugPriceList();   break;
       default:               result = { ok: false, error: 'Unknown action: ' + (p.action || '(none)') };
     }
@@ -1465,6 +1466,10 @@ function handleSaveOrder(o) {
   if (!o) throw new Error('No order data provided.');
   var res = _writeOrderToCRM(o);
   if (!res.ok) throw new Error(res.error || 'Could not write the order to the CRM sheet.');
+  // Audit: CREATE for a brand-new booking, EDIT when it already had an order no.
+  var who = o.byName || o.by || o.salesExec || '';
+  var act = (o.no || o.internalNo) ? 'EDIT_ORDER' : 'CREATE_ORDER';
+  _appendLog(who, res.orderNo, act, (o.customer || '') + (o.totalWithTax ? ' · ₹' + (Number(o.totalWithTax) || 0) : ''));
   return { ok: true, orderNo: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo, crmRows: res.rows };
 }
 
@@ -2013,11 +2018,50 @@ function _lookupRole(username) {
   return 'sales';
 }
 
-// ─── CHANGE LOG ───────────────────────────────────────────────────────────────
-// Logger-only now (the app no longer keeps an Orders_Master / Change_Log sheet —
-// the CRM tab is the single source of truth).
+// ─── AUDIT LOG ────────────────────────────────────────────────────────────────
+// Every order create / edit / delete / WON / delivery change is appended here so
+// there's a durable "who changed what, when" trail. Lives as its own tab in the
+// CRM spreadsheet, created on first use. Best-effort: any failure is swallowed so
+// a logging hiccup can never block the actual save or delete. Also mirrors to the
+// Apps Script Logger for live debugging.
+var AUDIT_TAB_NAME = 'APP AUDIT LOG';
 function _appendLog(user, orderNo, action, detail) {
   try { Logger.log([new Date(), user, orderNo, action, detail].join(' | ')); } catch(e) {}
+  try {
+    var ss = SpreadsheetApp.openById(CRM_SHEET_ID);
+    var sh = ss.getSheetByName(AUDIT_TAB_NAME);
+    if (!sh) {
+      sh = ss.insertSheet(AUDIT_TAB_NAME);
+      sh.appendRow(['Timestamp', 'User', 'Order No', 'Action', 'Details']);
+      try { sh.setFrozenRows(1); } catch(e) {}
+    }
+    var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+    var ts = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss');
+    sh.appendRow([ts, String(user || '—'), String(orderNo || ''), String(action || ''), String(detail || '')]);
+  } catch(e) {}
+}
+
+// Recent audit entries, newest first. Admin-only (the caller's role is looked up
+// server-side from the same creds used for login, so a non-admin can't read it).
+function handleAuditLog(p) {
+  var by = String((p && p.by) || '').trim();
+  if (_lookupRole(by) !== 'admin') return { ok: false, error: 'Only an admin can view the audit log.' };
+  var limit = Math.max(1, Math.min(500, Number(p && p.limit) || 100));
+  try {
+    var ss = SpreadsheetApp.openById(CRM_SHEET_ID);
+    var sh = ss.getSheetByName(AUDIT_TAB_NAME);
+    if (!sh) return { ok: true, entries: [] };
+    var last = sh.getLastRow();
+    if (last < 2) return { ok: true, entries: [] };
+    var n = Math.min(limit, last - 1);
+    var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+    var vals = sh.getRange(last - n + 1, 1, n, 5).getValues();
+    var entries = vals.map(function(r){
+      var ts = (r[0] instanceof Date) ? Utilities.formatDate(r[0], tz, 'yyyy-MM-dd HH:mm:ss') : String(r[0] || '');
+      return { ts: ts, user: String(r[1] || ''), orderNo: String(r[2] || ''), action: String(r[3] || ''), detail: String(r[4] || '') };
+    }).reverse();   // newest first
+    return { ok: true, entries: entries, scriptVersion: SCRIPT_VERSION };
+  } catch(e) { return { ok: false, error: e.message }; }
 }
 
 // ─── DEBUG — fast: reads only header row + row count per listed tab ────────────
