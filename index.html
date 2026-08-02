@@ -35,7 +35,7 @@
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
-    var KEEP = ['4s_api_url','4s_review_url','4s_user','4s_queue','4s_draft'];
+    var KEEP = ['4s_api_url','4s_api_pin','4s_review_url','4s_user','4s_queue','4s_draft'];
     var saved = {};
     for (var ki = 0; ki < KEEP.length; ki++) {
       try { var kv = localStorage.getItem(KEEP[ki]); if (kv !== null) saved[KEEP[ki]] = kv; } catch(e) {}
@@ -58,6 +58,24 @@
       location.reload(true);
     }
   }
+})();
+</script>
+
+<!-- Pre-configured backend URL — enforced silently in the background.
+     The web app NEVER asks anyone for the /exec URL; it is fixed to the value
+     below on every launch (same URL baked into the mobile app). To change the
+     backend later, update this one URL and merge — it reaches every device. -->
+<script>
+(function(){
+  var BAKED_API_URL = 'https://script.google.com/macros/s/AKfycbzKocxzCGzHlx9ycP1g2G8e7fijQdAve-jA05p0rMNVbmoP6BXku6WBB9Hw4eCqRTMa/exec';
+  try {
+    if (BAKED_API_URL.indexOf('http') === 0) {
+      // Always pin the URL (background). Guarantees the setup/URL screens are
+      // never needed — there is nothing for a user to configure.
+      localStorage.setItem('4s_api_url', BAKED_API_URL);
+      localStorage.setItem('4s_api_pin', '1');
+    }
+  } catch(e){}
 })();
 </script>
 
@@ -1584,15 +1602,15 @@ function App() {
     return () => window.removeEventListener('popstate', handler);
   }, [popScreen]);
 
-  // Restore session
+  // Restore session. The backend URL is baked in + pinned on every launch, so the
+  // app never needs the "setup" screen — a signed-out user always lands on login.
   useEffect(() => {
     const saved = localStorage.getItem('4s_user');
-    const apiUrl = localStorage.getItem('4s_api_url');
     if (saved) {
-      try { setUser(JSON.parse(saved)); setScreen(apiUrl ? 'home' : 'settings'); }
-      catch { setScreen(apiUrl ? 'login' : 'setup'); }
+      try { setUser(JSON.parse(saved)); setScreen('home'); }
+      catch { setScreen('login'); }
     } else {
-      setScreen(apiUrl ? 'login' : 'setup');
+      setScreen('login');
     }
   }, []);
 
@@ -1888,7 +1906,7 @@ function App() {
 
   const screens = {
     loading: <LoadingScreen/>,
-    setup:   <SetupScreen   ctx={ctx}/>,
+    setup:   <LoginScreen   ctx={ctx}/>,  // URL setup removed — never shown
     login:   <LoginScreen   ctx={ctx}/>,
     home:    <HomeScreen    ctx={ctx}/>,
     search:  <SearchScreen  ctx={ctx}/>,
@@ -2033,9 +2051,6 @@ function LoginScreen({ctx}) {
             <Btn primary full size="lg" type="submit" disabled={!username||!password}>Sign in →</Btn>
           </div>
         </form>
-      </div>
-      <div style={{padding:'16px 28px 28px',textAlign:'center'}}>
-        <span onClick={()=>ctx.nav('setup')} style={{fontSize:12,color:T.ink4,cursor:'pointer',textDecoration:'underline'}}>Change API URL</span>
       </div>
     </div>
   );
