@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '65';
+  var V = '66';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -87,7 +87,7 @@
      load and whenever the app is brought to the foreground. -->
 <script>
 (function(){
-  var RUNV = '65';   // keep in sync with V above and version.json
+  var RUNV = '66';   // keep in sync with V above and version.json
   function checkUpdate(){
     try {
       fetch('version.json?ts=' + Date.now(), { cache: 'no-store' })
@@ -529,6 +529,20 @@ function normRole(role) {
 }
 function hasManagerAccess(user) {
   return PRIVILEGED_ROLES.indexOf(normRole(user && user.role)) >= 0;
+}
+// Whether an order has been finalised — i.e. submitted and its PDF generated.
+// Only a submitted order is locked down for the sales team; a draft stays fully
+// editable by everyone until it is submitted. Admins can always edit everything.
+//   • orderStatus 'submitted' → finalised (locked, sales edits WON/receipts/delivery)
+//   • orderStatus 'draft'     → still a draft (fully editable by everyone)
+//   • neither (legacy order saved before this lifecycle existed) → treat a saved
+//     order (it has an order no) as submitted, preserving the earlier behaviour.
+function isOrderSubmitted(o) {
+  if (!o) return false;
+  const s = String(o.orderStatus || '').toLowerCase();
+  if (s === 'submitted') return true;
+  if (s === 'draft')     return false;
+  return !!o.no;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1411,6 +1425,9 @@ const BLANK_ORDER = () => ({
   orderFormReceiptNo:'',
   // Up to three money-receipt no + date pairs (updatable over time)
   receiptNo:'', moneyReceipts:[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}],
+  // Edit-lock lifecycle: '' (never saved) → 'draft' (Save Draft) → 'submitted'
+  // (finalised, PDF generated). Drives who may edit the order after saving.
+  orderStatus:'',
   deliveryStatus:'Pending',
   followUp:'', salesExec:'', won:'',
   orderType:'B2C', items:[],
@@ -3063,10 +3080,11 @@ function OrderFormScreen({ctx}) {
   }
   // Admins can permanently delete an already-saved order straight from the edit screen.
   const isAdmin = normRole(user?.role) === 'admin';
-  // Sales team can only EDIT a saved order's WON, money-receipt no/date and its
-  // delivery status. Admins may edit everything; a brand-new order (no o.no yet)
-  // is always fully editable so the booking can be filled in.
-  const restricted = !!o.no && !isAdmin;
+  // A DRAFT stays fully editable by everyone until it is submitted. Once the
+  // order is submitted (its PDF has been generated), the sales team can only EDIT
+  // its WON (Godrej SO No), money-receipt no/date and delivery status. Admins may
+  // always edit everything; a draft or brand-new order is fully editable.
+  const restricted = isOrderSubmitted(o) && !isAdmin;
   // Measurement entry unit — 'cm' (default) or 'ft' (feet + inches). Only the
   // input changes; every value is stored in cm on the order and the Google sheet.
   const [measUnit,setMeasUnit] = React.useState('cm');
@@ -3242,8 +3260,10 @@ function OrderFormScreen({ctx}) {
       scrollToSec(errs[0].sec);
       return;
     }
-    // Lead Source is now the awareness dropdown — keep the OPS "Source" column in sync
-    const saved = await doSaveOrder(withMeasurements({...o,salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)}));
+    // Lead Source is now the awareness dropdown — keep the OPS "Source" column in sync.
+    // This is the finalise/submit path: mark the order SUBMITTED so it locks down
+    // for the sales team (only WON / money receipts / delivery stay editable).
+    const saved = await doSaveOrder(withMeasurements({...o,orderStatus:'submitted',salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)}));
     if(saved) { setOrder(saved); nav('pdf'); }
   }
 
@@ -3263,7 +3283,9 @@ function OrderFormScreen({ctx}) {
   async function handleSaveDraft() {
     if(!o.customer) return ctx.showToast('Enter at least the customer name to save a draft','bad');
     if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item to save a draft','bad');
-    const saved = await doSaveOrder(withMeasurements({...o,salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)}));
+    // Save Draft keeps the order editable by everyone — mark it a DRAFT (never
+    // downgrade an already-submitted order: the backend guards against that too).
+    const saved = await doSaveOrder(withMeasurements({...o,orderStatus:isOrderSubmitted(o)?'submitted':'draft',salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)}));
     if(saved) { setOrder(saved); ctx.showToast('Draft saved — you can reopen it from Orders','ok'); }
   }
 

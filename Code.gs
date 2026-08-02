@@ -1072,6 +1072,7 @@ function handleOrders(p) {
   var cOFRcpt  = colOf(['ORDER FORM RECEIPT NO','ORDER FORM RECEIPT NO.','ORDER FORM RECEIPT']);
   var cSiNo    = colOf(['SI NO','SI NO.','ORDER SI NO','SI NUMBER']);
   var cManual  = colOf(['MANUAL ORDER','IS MANUAL ORDER','MANUAL']);
+  var cOrdStage= colOf(['ORDER STATUS','ORDER STAGE','DRAFT/SUBMITTED']);
   var cOrdDisc = colOf(['ORDER DISCOUNT %','ADDITIONAL ORDER DISCOUNT %','ORDER DISCOUNT']);
   var cPay     = colOf(['PAYMENT MODE']);
   var cAdv     = colOf(['ADV RECEIVED']);
@@ -1169,6 +1170,8 @@ function handleOrders(p) {
         orderFormReceiptNo: sval(r, cOFRcpt),
         slNo: sval(r, cSiNo),
         manualOrder: /^(yes|true|1)$/i.test(sval(r, cManual)),
+        // '', 'draft' or 'submitted' — the order's edit-lock lifecycle.
+        orderStatus: sval(r, cOrdStage).toLowerCase(),
         orderDiscount: disc,
         paymentMode: sval(r, cPay),
         earnest: cAdv >= 0 ? Number(r[cAdv]) || 0 : 0,
@@ -1263,8 +1266,11 @@ function handleOrders(p) {
     .map(function(m){
       var won = m.wons.join(', ');
       var completed = /installation done/i.test(m.deliveryStatus || '');
+      // A saved-but-not-yet-submitted order surfaces as a 'draft' on the
+      // dashboard; a WON makes it 'billed', installation makes it 'completed'.
       var status = completed ? 'completed'
-                 : (won ? 'billed' : 'pending-won');
+                 : (won ? 'billed'
+                 : (m.orderStatus === 'draft' ? 'draft' : 'pending-won'));
       m.won = won;
       delete m.wons; delete m._row;
       m.status = status;
@@ -1553,6 +1559,11 @@ var CRM_APP_COLUMNS = [
   ['ORDER FORM RECEIPT NO', 'ORDER FORM RECEIPT NO.', 'ORDER FORM RECEIPT'],
   ['SI NO', 'SI NO.'],
   ['MANUAL ORDER', 'IS MANUAL ORDER', 'MANUAL'],
+  // Draft vs Submitted lifecycle. 'DRAFT' while the order is still editable by
+  // everyone; 'SUBMITTED' once the order form is finalised and its PDF has been
+  // generated — after which the sales team can only touch the WON (Godrej SO No),
+  // money receipts (no + date) and the delivery status. Admins always edit all.
+  ['ORDER STATUS', 'ORDER STAGE', 'DRAFT/SUBMITTED'],
 ];
 
 // Appends any missing CRM columns (by header name) to the end of the header row
@@ -1713,6 +1724,7 @@ function _writeOrderToCRM(o) {
   var cDate    = colOf(CRM_H.DATE);
   var cRcpt    = colOf(['ORDER FORM RECEIPT NO', 'ORDER FORM RECEIPT NO.', 'ORDER FORM RECEIPT']);
   var cManualC = colOf(['MANUAL ORDER', 'IS MANUAL ORDER', 'MANUAL']);
+  var cStage   = colOf(['ORDER STATUS', 'ORDER STAGE', 'DRAFT/SUBMITTED']);
 
   var lastRow = sh.getLastRow();
   var data    = lastRow >= 2 ? sh.getRange(2, 1, lastRow - 1, ncol).getValues() : [];
@@ -1724,7 +1736,7 @@ function _writeOrderToCRM(o) {
   // duplicates. Match by the stable INTERNAL order number first, then by ORDER
   // NO — never by phone, so editing the customer's phone still updates the same
   // order rather than creating a new entry.
-  var matchRows = [], existingWon = '', existingDate = '';
+  var matchRows = [], existingWon = '', existingDate = '', existingStage = '';
   if ((incomingInt || incomingOrder) && (cIntNo >= 0 || cOrderNo >= 0)) {
     for (var i = 0; i < data.length; i++) {
       var rowInt   = cIntNo   >= 0 ? Number(data[i][cIntNo]) || 0 : 0;
@@ -1733,8 +1745,9 @@ function _writeOrderToCRM(o) {
       var orderMatch = incomingOrder && rowOrder === incomingOrder;
       if (!intMatch && !orderMatch) continue;
       matchRows.push(i);
-      if (cWon  >= 0 && !existingWon)  existingWon  = String(data[i][cWon]  || '').trim();
-      if (cDate >= 0 && !existingDate) existingDate = String(data[i][cDate] || '').trim();
+      if (cWon   >= 0 && !existingWon)   existingWon   = String(data[i][cWon]   || '').trim();
+      if (cDate  >= 0 && !existingDate)  existingDate  = String(data[i][cDate]  || '').trim();
+      if (cStage >= 0 && !existingStage) existingStage = String(data[i][cStage] || '').trim().toLowerCase();
     }
   }
 
@@ -1786,6 +1799,12 @@ function _writeOrderToCRM(o) {
   var todayStr     = now.toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'2-digit' }).replace(/\//g,'.');
   var orderDateStr = String(o.date || '') || existingDate || todayStr;   // keep original date on re-save
   var wonToWrite   = String(o.won || '').trim() || existingWon || '';    // preserve a WON already on the sheet
+
+  // Draft / Submitted lifecycle: honour what the client sends, but never silently
+  // downgrade an order that is already SUBMITTED back to a draft — once its PDF has
+  // been generated it stays locked for the sales team (admins still edit freely).
+  var incomingStage = String(o.orderStatus || '').trim().toLowerCase();
+  o.orderStatus = (existingStage === 'submitted') ? 'submitted' : incomingStage;
 
   // Replace: delete the order's old rows (bottom-up) so item count can change.
   if (matchRows.length) {
@@ -1942,6 +1961,8 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     // Manual order flag — replicated (paper) orders. Booking date is carried via
     // the DATE column; this flag lets the app keep its manual GST display on reopen.
     put(['MANUAL ORDER','IS MANUAL ORDER','MANUAL'], o.manualOrder ? 'Yes' : '');
+    // Draft / Submitted lifecycle marker (blank for legacy rows).
+    put(['ORDER STATUS','ORDER STAGE','DRAFT/SUBMITTED'], o.orderStatus ? String(o.orderStatus).toUpperCase() : '');
 
     out.push(row);
   }
