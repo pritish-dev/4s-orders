@@ -4,7 +4,7 @@
 // Network-first for API calls to Google Apps Script.
 // ============================================================
 
-const CACHE  = '4s-orders-c9a5180';
+const CACHE  = '4s-orders-d19bcd6';
 const SHELL  = [
   '/4s-orders/',
   '/4s-orders/index.html',
