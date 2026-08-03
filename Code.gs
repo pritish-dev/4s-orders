@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v49';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v50';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -2196,44 +2196,48 @@ var LOOKUP_PHONE_ALIASES = ['CONTACT NUMBER','CONTACT NO','CONTACT NO.','CONTACT
 var LOOKUP_ALT_ALIASES   = ['ALT PHONE','ALTERNATE PHONE','ALT CONTACT NUMBER','ALTERNATE CONTACT NUMBER','ALTERNATE MOBILE','ALT MOBILE','ALT CONTACT','SECONDARY CONTACT','SECONDARY MOBILE','ALTERNATE NUMBER','ALT NO'];
 var LOOKUP_NAME_ALIASES  = ['CUSTOMER NAME','CUSTOMER','NAME','PARTY NAME','CLIENT NAME','NAME OF CUSTOMER','CUSTOMER FULL NAME'];
 
-// Every order-sheet (tab) name to scan for a customer lookup: the primary app tab
-// plus every non-empty name listed in the SHEET_DETAILS / OLD_SHEET_DETAILS index
-// tabs. Column-header labels ("Franchise_sheets" / "four_s_sheets") are skipped.
-// Only names that actually resolve to a tab in the CRM spreadsheet are returned,
-// so a stale entry in an index tab is silently ignored.
-function _crmOrderSheetNames(ss) {
-  var seen = {}, out = [];
-  function add(n) {
-    n = String(n || '').trim();
-    if (!n) return;
-    if (/^(franchise[_ ]?sheets?|four[_ ]?s[_ ]?sheets?|sheet[_ ]?names?|sheets?)$/i.test(n)) return;
-    var k = n.toUpperCase();
-    if (seen[k]) return;
-    seen[k] = true;
-    out.push(n);
+// Does a cell hold the target 10-digit number? Handles cells with MULTIPLE numbers
+// (e.g. "7008859785/9668859768"), country codes and any separators, by splitting
+// the cell into digit runs and comparing each run's last 10 digits.
+function _lkPhoneMatches(v, target) {
+  if (!target) return false;
+  var parts = String(v == null ? '' : v).split(/[^0-9]+/);
+  for (var i = 0; i < parts.length; i++) {
+    var d = parts[i]; if (!d) continue;
+    if (d.length > 10) d = d.slice(-10);
+    if (d.length === 10 && d === target) return true;
   }
-  add(CRM_TAB_NAME);
-  for (var t = 0; t < CRM_SHEET_INDEX_TABS.length; t++) {
-    try {
-      var sh = ss.getSheetByName(CRM_SHEET_INDEX_TABS[t]);
-      if (!sh || sh.getLastRow() < 1 || sh.getLastColumn() < 1) continue;
-      var vals = sh.getRange(1, 1, sh.getLastRow(), sh.getLastColumn()).getValues();
-      for (var r = 0; r < vals.length; r++)
-        for (var c = 0; c < vals[r].length; c++) add(vals[r][c]);
-    } catch (e) { /* skip an unreadable index tab */ }
-  }
-  // Keep only names that resolve to a real tab in this spreadsheet.
-  return out.filter(function (n) { try { return !!ss.getSheetByName(n); } catch (e) { return false; } });
+  return false;
+}
+
+// Build a header→column resolver from an arbitrary header row (used to detect the
+// real header even when a sheet has title rows above it).
+function _lkColOf(header) {
+  var idx = {};
+  for (var c = 0; c < header.length; c++) { var k = _crmKey(header[c]); if (k && idx[k] === undefined) idx[k] = c; }
+  return function (cands) { for (var i = 0; i < cands.length; i++) { var ci = idx[_crmKey(cands[i])]; if (ci !== undefined) return ci; } return -1; };
+}
+
+// All tabs in the CRM spreadsheet that could hold orders — i.e. every tab EXCEPT
+// the two index tabs. The whole spreadsheet is the order database (current + past
+// years, franchise + 4S), so this needs no maintenance when a new year is added.
+function _crmAllOrderSheets(ss) {
+  var skip = {};
+  for (var i = 0; i < CRM_SHEET_INDEX_TABS.length; i++) skip[String(CRM_SHEET_INDEX_TABS[i]).toUpperCase()] = true;
+  var out = [];
+  var shs = ss.getSheets();
+  for (var j = 0; j < shs.length; j++) { if (!skip[shs[j].getName().toUpperCase()]) out.push(shs[j]); }
+  return out;
 }
 
 // ─── LOOKUP CUSTOMER BY PHONE ─────────────────────────────────────────────────
 // When a new order is being booked, the app sends the customer's mobile number
-// here. We search EVERY order sheet listed in SHEET_DETAILS / OLD_SHEET_DETAILS
-// (current + past years, franchise + 4S), plus the primary app tab. If the number
-// is found (a returning customer, no matter whether it's their 2nd, 3rd … order),
-// we return the most recent profile recorded for them so the order form can
-// pre-fill the name, address and other reusable details. `orderCount` = how many
-// distinct past orders that number has across all sheets.
+// here. We search EVERY order tab in the CRM spreadsheet (current + past years,
+// franchise + 4S). For each tab we auto-detect the header row (so title rows above
+// the header don't break it) and match the phone cell-by-cell (handling cells that
+// hold two numbers). If found — a returning customer, no matter their 2nd/3rd/…
+// order — we return the most recent profile so the order form can pre-fill it, plus
+// `orderCount` = how many distinct past orders that number has across all sheets.
 function handleLookupCustomer(p) {
   var phone = _digits10(p && p.phone);
   if (!phone) return { ok: true, found: false };
@@ -2250,21 +2254,27 @@ function handleLookupCustomer(p) {
     return String(v == null ? '' : v).trim();
   }
 
-  var sheetNames = _crmOrderSheetNames(ss);
+  var sheets = _crmAllOrderSheets(ss);
   var best = null, bestDate = null, orders = {}, scanned = [];
 
-  for (var si = 0; si < sheetNames.length; si++) {
+  for (var si = 0; si < sheets.length; si++) {
    try {
-    var sh = ss.getSheetByName(sheetNames[si]);
-    if (!sh || sh.getLastRow() < 2 || sh.getLastColumn() < 1) continue;
+    var sh = sheets[si];
+    if (sh.getLastRow() < 2 || sh.getLastColumn() < 1) continue;
+    var values = sh.getDataRange().getValues();
 
-    var C = _crmCols(sh), colOf = C.colOf, ncol = C.header.length;
-    var cPhone = colOf(LOOKUP_PHONE_ALIASES);
-    var cAlt   = colOf(LOOKUP_ALT_ALIASES);
-    if (cPhone < 0 && cAlt < 0) continue;          // no phone column → not an order sheet
-    scanned.push(sheetNames[si]);
-    var cOrderNo = colOf(CRM_H.ORDER_NO), cIntNo = colOf(CRM_H.INT_NO);
-    var cCust = colOf(LOOKUP_NAME_ALIASES), cDate = colOf(CRM_H.DATE);
+    // Auto-detect the header row: the first of the top rows that carries a phone or
+    // name column. This survives title / merged rows above the real header.
+    var hIdx = -1, colOf = null;
+    var scanMax = Math.min(values.length, 20);
+    for (var h = 0; h < scanMax; h++) {
+      var cand = _lkColOf(values[h]);
+      if (cand(LOOKUP_PHONE_ALIASES) >= 0 || cand(LOOKUP_NAME_ALIASES) >= 0) { hIdx = h; colOf = cand; break; }
+    }
+    if (hIdx < 0) continue;   // not an order sheet
+
+    var cPhone = colOf(LOOKUP_PHONE_ALIASES), cAlt = colOf(LOOKUP_ALT_ALIASES), cCust = colOf(LOOKUP_NAME_ALIASES);
+    var cOrderNo = colOf(CRM_H.ORDER_NO), cDate = colOf(CRM_H.DATE);
     var cEmail = colOf(['EMAIL ADDRESS','EMAIL','E-MAIL','EMAIL ID']);
     var cGst   = colOf(['CUSTOMER GST NO','CUSTOMER GSTIN','GST NO','GSTIN','GST NUMBER']);
     var cBill  = colOf(['BILLING ADDRESS','BILL ADDRESS']);
@@ -2273,24 +2283,32 @@ function handleLookupCustomer(p) {
     var cFloor = colOf(['FLOOR']), cLandmk = colOf(['LANDMARK','NEAREST LANDMARK']);
     var cDob   = colOf(['DATE OF BIRTH','DOB']);
     var cAnniv = colOf(['MARRIAGE ANNIVERSARY','MARRIAGE ANNIVERSARY DATE','ANNIVERSARY']);
+    scanned.push(sh.getName());
 
-    var data = sh.getRange(2, 1, sh.getLastRow() - 1, ncol).getValues();
-    for (var i = 0; i < data.length; i++) {
-      var r = data[i];
-      var rp = cPhone >= 0 ? _digits10(r[cPhone]) : '';
-      var ra = cAlt   >= 0 ? _digits10(r[cAlt])   : '';
-      if (rp !== phone && ra !== phone) continue;
+    for (var i = hIdx + 1; i < values.length; i++) {
+      var r = values[i];
+      var matched = false;
+      if (cPhone >= 0 && _lkPhoneMatches(r[cPhone], phone)) matched = true;
+      else if (cAlt >= 0 && _lkPhoneMatches(r[cAlt], phone)) matched = true;
+      else if (cPhone < 0 && cAlt < 0) {
+        // Header found via the name column but no recognised phone column — brute
+        // force every cell in the row for the number.
+        for (var cc = 0; cc < r.length; cc++) { if (_lkPhoneMatches(r[cc], phone)) { matched = true; break; } }
+      }
+      if (!matched) continue;
+
       var name = cCust >= 0 ? String(r[cCust] || '').trim() : '';
-      // Count distinct past orders (namespaced by sheet so numbers can't collide).
-      var key = sheetNames[si] + '|' + (cOrderNo >= 0 ? String(r[cOrderNo] || '') : '') + '|' + (cIntNo >= 0 ? String(r[cIntNo] || '') : '');
-      orders[key] = true;
+      // Count distinct past orders. Prefer an order-no column; otherwise group the
+      // per-item rows of one order by (date + name) so a 5-line order counts once.
+      var oid = cOrderNo >= 0 ? String(r[cOrderNo] || '').trim() : '';
+      if (!oid) oid = (cDate >= 0 ? fmt(r[cDate]) : '') + '~' + name;
+      orders[sh.getName() + '|' + oid] = true;
       if (!name) continue;
+
       // Prefer the profile from the row with the newest ORDER DATE; a dated row
-      // always beats an undated one; among undated rows, keep the last one seen.
+      // always beats an undated one; among undated rows keep the last one seen.
       var d = cDate >= 0 ? _parseCrmDate(r[cDate]) : null;
-      var better = !best
-        || (d && (!bestDate || d >= bestDate))
-        || (!d && !bestDate);
+      var better = !best || (d && (!bestDate || d >= bestDate)) || (!d && !bestDate);
       if (!better) continue;
       best = {
         customer: name,
