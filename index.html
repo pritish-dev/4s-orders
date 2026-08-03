@@ -3169,10 +3169,19 @@ function OrderFormScreen({ctx}) {
         setCrmStatus('found');
         setOrder(prev=>{
           const fill = (k,v)=> (v && !String(prev[k]||'').trim()) ? v : prev[k];
+          // Use whatever address the record has for the DELIVERY address (and
+          // billing); the two fall back to each other so the delivery address is
+          // filled whenever any address exists. Sales can edit it if it changed.
+          const addr = m.delivery || m.billing || '';
+          // Repeat-customer purchase pattern, from the count of PREVIOUS orders:
+          //   1 previous → 2nd Time · 2 previous → 3rd Time · 3+ previous → More than 3.
+          const nPrev = Number(m.orderCount)||0;
+          const pattern = nPrev>=3 ? 'More than 3' : nPrev===2 ? '3rd Time' : nPrev>=1 ? '2nd Time' : '';
+          const curPat  = Array.isArray(prev.purchasePattern) ? prev.purchasePattern : [];
           return {...prev,
             customer: fill('customer', m.customer),
-            delivery: fill('delivery', m.delivery),
-            billing:  fill('billing',  m.billing),
+            delivery: fill('delivery', m.delivery || addr),
+            billing:  fill('billing',  m.billing  || addr),
             pincode:  fill('pincode',  m.pincode),
             floor:    fill('floor',    m.floor),
             landmark: fill('landmark', m.landmark),
@@ -3181,10 +3190,13 @@ function OrderFormScreen({ctx}) {
             alt:      fill('alt',      m.alt),
             dob:      fill('dob',      m.dob),
             anniversary: fill('anniversary', m.anniversary),
+            // Only set the pattern automatically when the salesperson hasn't picked one.
+            purchasePattern: (pattern && curPat.length===0) ? [pattern] : curPat,
           };
         });
         const n = Number(m.orderCount)||1;
-        showToast('Returning customer · '+n+' previous order'+(n>1?'s':'')+' — details filled','ok');
+        const pat = n>=3 ? 'More than 3' : n===2 ? '3rd Time' : '2nd Time';
+        showToast('Returning customer · '+n+' previous order'+(n>1?'s':'')+' · '+pat+' — details filled','ok');
       } else if (r && r.status==='none'){
         setCrmStatus('none');
       } else {
@@ -3516,7 +3528,7 @@ function OrderFormScreen({ctx}) {
             background: crmStatus==='found'?T.greenSoft : crmStatus==='error'?(T.warnSoft||'#fff7e6') : T.paper2,
             border:`1px solid ${crmStatus==='found'?T.green : crmStatus==='error'?T.warn : T.line}`}}>
             {crmStatus==='searching' && (<><Spinner size={14}/><div style={{fontSize:12,color:T.ink2}}>Searching our records for this number…</div></>)}
-            {crmStatus==='found' && (<><span style={{fontSize:15}}>✓</span><div style={{fontSize:12,color:T.ink2,lineHeight:1.4}}><b>Returning customer</b> — {Number(crmMatch&&crmMatch.orderCount)||1} previous order{((Number(crmMatch&&crmMatch.orderCount)||1)>1)?'s':''}. Name &amp; address filled from the CRM; edit anything that changed.</div></>)}
+            {crmStatus==='found' && (()=>{const n=Number(crmMatch&&crmMatch.orderCount)||1;const pat=n>=3?'More than 3':n===2?'3rd Time':'2nd Time';return (<><span style={{fontSize:15}}>✓</span><div style={{fontSize:12,color:T.ink2,lineHeight:1.4}}><b>Returning customer</b> — {n} previous order{n>1?'s':''} · marked <b>{pat}</b>. Name &amp; address filled from the CRM; edit anything that changed.</div></>);})()}
             {crmStatus==='none' && (<><span style={{fontSize:15}}>🆕</span><div style={{fontSize:12,color:T.ink3}}>New customer — no earlier record found for this number.</div></>)}
             {crmStatus==='error' && (<><span style={{fontSize:15}}>⚠️</span><div style={{fontSize:12,color:T.ink2,flex:1}}>Couldn't check our records (slow network).</div><span onClick={()=>runCustomerLookup(o.phone,true)} style={{fontSize:12,fontWeight:700,color:T.green,cursor:'pointer'}}>RETRY</span></>)}
           </div>
