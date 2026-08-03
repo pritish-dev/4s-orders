@@ -201,20 +201,36 @@ function makeQrDataUrl(text, size = 160) {
 // ═══════════════════════════════════════════════════════════
 function getApiUrl() { return localStorage.getItem('4s_api_url') || ''; }
 
-async function apiGet(action, params = {}, timeoutMs = 15000) {
+// JSONP GET with a generous timeout and automatic retries, so a slow Apps Script
+// cold-start (which can take 20-30s on the first hit of the day) never surfaces as
+// a "Request timed out" error in this production app. Each attempt uses a UNIQUE
+// callback name so a late response from a timed-out attempt can't resolve the
+// wrong request. Callers can still pass a custom timeout / retry count.
+function _apiGetOnce(action, params, timeoutMs) {
   const url = getApiUrl();
-  if (!url) throw new Error('API URL not configured. Go to Settings.');
-  const cb  = 'cb' + Date.now();
-  const qs  = new URLSearchParams({ action, callback: cb, ...params }).toString();
+  if (!url) return Promise.reject(new Error('API URL not configured. Go to Settings.'));
+  const cb = 'cb' + Date.now() + '_' + Math.random().toString(36).slice(2);
+  const qs = new URLSearchParams({ action, callback: cb, ...params }).toString();
   return new Promise((res, rej) => {
     const script = document.createElement('script');
     const timeout = setTimeout(() => { cleanup(); rej(new Error('Request timed out after ' + Math.round(timeoutMs/1000) + 's.')); }, timeoutMs);
-    function cleanup() { clearTimeout(timeout); delete window[cb]; script.remove(); }
+    function cleanup() { clearTimeout(timeout); try { delete window[cb]; } catch (e) {} script.remove(); }
     window[cb] = (data) => { cleanup(); res(data); };
     script.onerror = () => { cleanup(); rej(new Error('Network error — check API URL.')); };
     script.src = url + '?' + qs;
     document.head.appendChild(script);
   });
+}
+async function apiGet(action, params = {}, timeoutMs = 30000, retries = 2) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try { return await _apiGetOnce(action, params, timeoutMs); }
+    catch (e) {
+      lastErr = e;
+      if (attempt < retries) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));  // backoff, then retry
+    }
+  }
+  throw lastErr || new Error('Network error');
 }
 
 async function apiPost(body, tries = 3) {
@@ -275,16 +291,12 @@ async function loadPriceListItems(forceFresh = false, skipLocalCache = false) {
   const params = forceFresh ? { fresh: '1' } : {};
   let res;
   try {
-    // One automatic retry so a slow cold-start doesn't surface as an error.
-    res = await apiGet('priceList', params, 60000);
+    // apiGet retries with backoff, so a slow cold-start doesn't surface as an error.
+    res = await apiGet('priceList', params, 60000, 2);
   } catch (e1) {
     const m1 = e1.message || '';
-    if (m1.includes('timed out')) {
-      try { res = await apiGet('priceList', params, 60000); }
-      catch (e2) { throw new Error('Sync timed out twice — the sheet may be busy. Please tap Sync to retry.'); }
-    } else {
-      throw new Error('Network error: ' + m1);
-    }
+    if (/timed out|timeout/i.test(m1)) throw new Error('Sync timed out — the sheet may be busy. Please tap Sync to retry.');
+    throw new Error('Network error: ' + m1);
   }
 
   if (!res || !res.ok) {
@@ -1661,9 +1673,13 @@ function playBell() {
 function App() {
   const [screen,        setScreen]       = useState('loading');
   const [user,          setUser]         = useState(null);
-  const [items,         setItems]        = useState([]);
-  const [priceItems,    setPriceItems]   = useState([]);
-  const [orders,        setOrders]       = useState([]);
+  // Hydrate stock, price list and orders from their local caches synchronously so
+  // they render INSTANTLY on open (before any network call). The price list rarely
+  // changes, so it's served straight from cache; stock is refreshed via Sync Now;
+  // orders refresh silently in the background on every open.
+  const [items,         setItems]        = useState(() => { try { return JSON.parse(localStorage.getItem('4s_items')||'[]'); } catch { return []; } });
+  const [priceItems,    setPriceItems]   = useState(() => { try { return JSON.parse(localStorage.getItem('4s_price_items_v9')||'[]'); } catch { return []; } });
+  const [orders,        setOrders]       = useState(() => { try { return JSON.parse(localStorage.getItem('4s_orders')||'[]'); } catch { return []; } });
   const [syncedAt,      setSyncedAt]     = useState(null);
   const [priceSyncedAt, setPriceSyncedAt]= useState(() => localStorage.getItem('4s_price_items_v9_ts') ? new Date(Number(localStorage.getItem('4s_price_items_v9_ts'))).toISOString() : null);
   const [priceSyncError, setPriceSyncError] = useState(null);
@@ -1740,7 +1756,11 @@ function App() {
     let hadCachedPL = false;
     if (cachedPL) try { const p = JSON.parse(cachedPL); setPriceItems(p); hadCachedPL = p.length > 0; } catch {}
     syncStock({ silent: true });
-    loadPriceListItems(true)
+    // The price list rarely changes, so serve it straight from the local cache and
+    // only pull a fresh copy when the cache is stale (>6h). The app is usable
+    // immediately on open without waiting on the network; the manual "Sync Now"
+    // button always forces a fresh price-list + stock pull on demand.
+    loadPriceListItems(false)
       .then(pi => {
         if (pi.length > 0) {
           setPriceItems(pi);
@@ -1751,6 +1771,9 @@ function App() {
       // If we already have cached prices, stay silent — no scary toast on a
       // slow background refresh. Only surface an error when there's nothing to show.
       .catch(e => { if (!hadCachedPL) setPriceSyncError(e.message); });
+    // Orders render instantly from cache (state is seeded from localStorage above);
+    // refresh them silently in the background so the ledger is current on open.
+    loadOrders({ silent: true });
     loadMis({ silent: true });
   }, [user]);
 
@@ -1825,15 +1848,14 @@ function App() {
 
   async function syncStock(opts) {
     const silent = opts && opts.silent;
-    setLoading(true);
+    // Only show the blocking spinner when there's no cached stock yet; a background
+    // resync stays invisible so a slow cold-start never interrupts the user.
+    const haveStock = (items && items.length > 0) || !!localStorage.getItem('4s_items');
+    if (!silent || !haveStock) setLoading(true);
     try {
-      // One retry so a slow cold-start doesn't surface as a sync error.
-      let res;
-      try { res = await apiGet('stock', {}, 60000); }
-      catch (e1) {
-        if ((e1.message||'').includes('timed out')) res = await apiGet('stock', {}, 60000);
-        else throw e1;
-      }
+      // apiGet already retries with backoff, so a slow cold-start doesn't surface
+      // as a timeout error.
+      const res = await apiGet('stock', {}, 60000, 2);
       if (res.ok) {
         setItems(res.items);
         setSyncedAt(res.syncedAt || new Date().toISOString());
@@ -1868,16 +1890,26 @@ function App() {
     }
   }
 
-  async function loadOrders() {
-    setLoading(true);
+  async function loadOrders(opts) {
+    const silent = opts && opts.silent;
+    // If we already have orders (seeded from cache), refresh in the background:
+    // don't show the blocking spinner and never surface a timeout/network error —
+    // the cached ledger stays on screen. Only a first-ever load with nothing cached
+    // shows the spinner and reports a hard failure.
+    const haveCache = (orders && orders.length > 0) || !!localStorage.getItem('4s_orders');
+    if (!haveCache) setLoading(true);
     try {
-      const res = await apiGet('orders', { exec: user?.name || '' });
-      if (res.ok) {
+      const res = await apiGet('orders', { exec: user?.name || '' }, 30000, 2);
+      if (res && res.ok) {
         setOrders(res.orders);
         localStorage.setItem('4s_orders', JSON.stringify(res.orders));
-      } else showToast(res.error||'Failed to load orders','bad');
-    } catch(e) { showToast(e.message,'bad'); }
-    finally { setLoading(false); }
+      } else if (!silent && !haveCache) {
+        showToast((res && res.error) || 'Failed to load orders','bad');
+      }
+    } catch(e) {
+      if (!haveCache) showToast('Could not reach the server — pull to refresh','warn');
+      // else: keep showing the cached orders, silently
+    } finally { if (!haveCache) setLoading(false); }
   }
 
   // Pull the MIS_Daily committed-stock feed (read from the OPS sheet by the backend).
@@ -2009,7 +2041,7 @@ function App() {
   // (name, address, …) plus how many past orders they have, or null if new/offline.
   async function doLookupCustomer(phone) {
     try {
-      const res = await apiGet('lookupCustomer', { phone: String(phone||'') }, 12000);
+      const res = await apiGet('lookupCustomer', { phone: String(phone||'') }, 30000, 1);
       return (res && res.ok && res.found) ? res : null;
     } catch(e) { return null; }
   }
