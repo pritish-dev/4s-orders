@@ -2037,13 +2037,17 @@ function App() {
     finally { setLoading(false); }
   }
 
-  // Look up a returning customer by mobile number. Resolves to the CRM profile
-  // (name, address, …) plus how many past orders they have, or null if new/offline.
+  // Look up a returning customer by mobile number across every CRM order sheet.
+  // Returns a status the UI can show: {status:'found', data} with the profile,
+  // {status:'none'} when the number is new, or {status:'error'} on a network/API
+  // failure (so the app can say "couldn't check" and offer a retry).
   async function doLookupCustomer(phone) {
     try {
-      const res = await apiGet('lookupCustomer', { phone: String(phone||'') }, 30000, 1);
-      return (res && res.ok && res.found) ? res : null;
-    } catch(e) { return null; }
+      const res = await apiGet('lookupCustomer', { phone: String(phone||'') }, 30000, 2);
+      if (res && res.ok && res.found) return { status:'found', data: res };
+      if (res && res.ok)              return { status:'none' };
+      return { status:'error', error: (res && res.error) || 'Lookup failed' };
+    } catch(e) { return { status:'error', error: e.message }; }
   }
 
   // Admin-only: permanently delete an order (all its rows) from the CRM sheet.
@@ -3148,40 +3152,54 @@ function OrderFormScreen({ctx}) {
   const {doLookupCustomer, showToast} = ctx;
   const lookupTimer   = React.useRef(null);
   const lookedUpPhone = React.useRef('');
-  const [crmMatch,setCrmMatch] = React.useState(null);
-  function runCustomerLookup(rawPhone){
+  const [crmMatch,setCrmMatch]   = React.useState(null);
+  // idle | searching | found | none | error — drives the status line under Phone.
+  const [crmStatus,setCrmStatus] = React.useState('idle');
+  function runCustomerLookup(rawPhone, force){
     const digits = String(rawPhone||'').replace(/\D/g,'').slice(-10);
     if(digits.length!==10 || o.no) return;         // only auto-fill a brand-new order
-    if(digits===lookedUpPhone.current) return;
+    if(!force && digits===lookedUpPhone.current) return;   // already looked this one up
     lookedUpPhone.current = digits;
-    doLookupCustomer(digits).then(m=>{
-      if(!m) return;
-      setCrmMatch(m);
-      setOrder(prev=>{
-        const fill = (k,v)=> (v && !String(prev[k]||'').trim()) ? v : prev[k];
-        return {...prev,
-          customer: fill('customer', m.customer),
-          delivery: fill('delivery', m.delivery),
-          billing:  fill('billing',  m.billing),
-          pincode:  fill('pincode',  m.pincode),
-          floor:    fill('floor',    m.floor),
-          landmark: fill('landmark', m.landmark),
-          email:    fill('email',    m.email),
-          gstNumber:fill('gstNumber',m.gstNumber),
-          alt:      fill('alt',      m.alt),
-          dob:      fill('dob',      m.dob),
-          anniversary: fill('anniversary', m.anniversary),
-        };
-      });
-      const n = Number(m.orderCount)||1;
-      showToast('Returning customer · '+n+' previous order'+(n>1?'s':'')+' — details filled','ok');
+    setCrmMatch(null);
+    setCrmStatus('searching');
+    doLookupCustomer(digits).then(r=>{
+      if(r && r.status==='found'){
+        const m = r.data;
+        setCrmMatch(m);
+        setCrmStatus('found');
+        setOrder(prev=>{
+          const fill = (k,v)=> (v && !String(prev[k]||'').trim()) ? v : prev[k];
+          return {...prev,
+            customer: fill('customer', m.customer),
+            delivery: fill('delivery', m.delivery),
+            billing:  fill('billing',  m.billing),
+            pincode:  fill('pincode',  m.pincode),
+            floor:    fill('floor',    m.floor),
+            landmark: fill('landmark', m.landmark),
+            email:    fill('email',    m.email),
+            gstNumber:fill('gstNumber',m.gstNumber),
+            alt:      fill('alt',      m.alt),
+            dob:      fill('dob',      m.dob),
+            anniversary: fill('anniversary', m.anniversary),
+          };
+        });
+        const n = Number(m.orderCount)||1;
+        showToast('Returning customer · '+n+' previous order'+(n>1?'s':'')+' — details filled','ok');
+      } else if (r && r.status==='none'){
+        setCrmStatus('none');
+      } else {
+        setCrmStatus('error');
+        lookedUpPhone.current = '';   // let the same number be retried
+      }
     });
   }
   function onPhoneChange(v){
     setF('phone', v);
-    if(String(v||'').replace(/\D/g,'').length < 10) setCrmMatch(null);
+    const d = String(v||'').replace(/\D/g,'');
+    if(d.length < 10){ setCrmMatch(null); setCrmStatus('idle'); lookedUpPhone.current=''; }
     if(lookupTimer.current) clearTimeout(lookupTimer.current);
-    lookupTimer.current = setTimeout(()=>runCustomerLookup(v), 600);
+    // Search as soon as a full 10-digit number is present (debounced).
+    lookupTimer.current = setTimeout(()=>runCustomerLookup(v), 450);
   }
 
   const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance} = orderTotals(o);
@@ -3493,12 +3511,14 @@ function OrderFormScreen({ctx}) {
         <SectionHead n="01" label="Customer" id="sec-customer"/>
         <Field label="Customer Name" value={o.customer} onChange={v=>setF('customer',v)} required/>
         <Field label="Phone" value={o.phone} onChange={onPhoneChange} mono required type="tel" action="CALL" onAction={()=>o.phone&&window.open('tel:'+o.phone)} error={o.phone&&!isValidPhone(o.phone)?'Enter a valid 10-digit mobile number':undefined} hint={!o.no?'Returning customer? Their saved details fill in automatically.':undefined}/>
-        {crmMatch && !o.no && (
-          <div style={{margin:'0 14px 2px',padding:'8px 12px',background:T.greenSoft,border:`1px solid ${T.green}`,borderRadius:6,display:'flex',alignItems:'center',gap:8}}>
-            <span style={{fontSize:16}}>↺</span>
-            <div style={{fontSize:12,color:T.ink2,lineHeight:1.4}}>
-              <b>Returning customer</b> — {Number(crmMatch.orderCount)||1} previous order{(Number(crmMatch.orderCount)||1)>1?'s':''}. Name &amp; address filled from the CRM; edit anything that has changed.
-            </div>
+        {!o.no && crmStatus!=='idle' && (
+          <div style={{margin:'0 14px 2px',padding:'8px 12px',borderRadius:6,display:'flex',alignItems:'center',gap:8,
+            background: crmStatus==='found'?T.greenSoft : crmStatus==='error'?(T.warnSoft||'#fff7e6') : T.paper2,
+            border:`1px solid ${crmStatus==='found'?T.green : crmStatus==='error'?T.warn : T.line}`}}>
+            {crmStatus==='searching' && (<><Spinner size={14}/><div style={{fontSize:12,color:T.ink2}}>Searching our records for this number…</div></>)}
+            {crmStatus==='found' && (<><span style={{fontSize:15}}>✓</span><div style={{fontSize:12,color:T.ink2,lineHeight:1.4}}><b>Returning customer</b> — {Number(crmMatch&&crmMatch.orderCount)||1} previous order{((Number(crmMatch&&crmMatch.orderCount)||1)>1)?'s':''}. Name &amp; address filled from the CRM; edit anything that changed.</div></>)}
+            {crmStatus==='none' && (<><span style={{fontSize:15}}>🆕</span><div style={{fontSize:12,color:T.ink3}}>New customer — no earlier record found for this number.</div></>)}
+            {crmStatus==='error' && (<><span style={{fontSize:15}}>⚠️</span><div style={{fontSize:12,color:T.ink2,flex:1}}>Couldn't check our records (slow network).</div><span onClick={()=>runCustomerLookup(o.phone,true)} style={{fontSize:12,fontWeight:700,color:T.green,cursor:'pointer'}}>RETRY</span></>)}
           </div>
         )}
         <Field label="Alt. Phone" value={o.alt} onChange={v=>setF('alt',v)} mono type="tel" error={o.alt&&!isValidPhone(o.alt)?'Enter a valid 10-digit mobile number':undefined}/>
