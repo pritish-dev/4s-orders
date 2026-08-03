@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v48';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v49';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -2189,6 +2189,13 @@ function handleUpdateService(body) {
 // — the franchise order sheets and the 4S order sheets, current + past years.
 var CRM_SHEET_INDEX_TABS = ['SHEET_DETAILS', 'OLD_SHEET_DETAILS'];
 
+// Broad header aliases used ONLY by the customer lookup, so a returning customer
+// is found no matter how the phone / name column is labelled across the different
+// franchise and 4S order sheets (current + past years).
+var LOOKUP_PHONE_ALIASES = ['CONTACT NUMBER','CONTACT NO','CONTACT NO.','CONTACT','PHONE','PHONE NO','PHONE NO.','PHONE NUMBER','MOBILE','MOBILE NO','MOBILE NO.','MOBILE NUMBER','MOB NO','MOB','CUSTOMER CONTACT','CUSTOMER CONTACT NUMBER','CUSTOMER MOBILE','CUSTOMER PHONE','CUSTOMER NO','WHATSAPP','WHATSAPP NO','WHATSAPP NUMBER','CELL','CELL NO'];
+var LOOKUP_ALT_ALIASES   = ['ALT PHONE','ALTERNATE PHONE','ALT CONTACT NUMBER','ALTERNATE CONTACT NUMBER','ALTERNATE MOBILE','ALT MOBILE','ALT CONTACT','SECONDARY CONTACT','SECONDARY MOBILE','ALTERNATE NUMBER','ALT NO'];
+var LOOKUP_NAME_ALIASES  = ['CUSTOMER NAME','CUSTOMER','NAME','PARTY NAME','CLIENT NAME','NAME OF CUSTOMER','CUSTOMER FULL NAME'];
+
 // Every order-sheet (tab) name to scan for a customer lookup: the primary app tab
 // plus every non-empty name listed in the SHEET_DETAILS / OLD_SHEET_DETAILS index
 // tabs. Column-header labels ("Franchise_sheets" / "four_s_sheets") are skipped.
@@ -2207,14 +2214,16 @@ function _crmOrderSheetNames(ss) {
   }
   add(CRM_TAB_NAME);
   for (var t = 0; t < CRM_SHEET_INDEX_TABS.length; t++) {
-    var sh = ss.getSheetByName(CRM_SHEET_INDEX_TABS[t]);
-    if (!sh || sh.getLastRow() < 1 || sh.getLastColumn() < 1) continue;
-    var vals = sh.getRange(1, 1, sh.getLastRow(), sh.getLastColumn()).getValues();
-    for (var r = 0; r < vals.length; r++)
-      for (var c = 0; c < vals[r].length; c++) add(vals[r][c]);
+    try {
+      var sh = ss.getSheetByName(CRM_SHEET_INDEX_TABS[t]);
+      if (!sh || sh.getLastRow() < 1 || sh.getLastColumn() < 1) continue;
+      var vals = sh.getRange(1, 1, sh.getLastRow(), sh.getLastColumn()).getValues();
+      for (var r = 0; r < vals.length; r++)
+        for (var c = 0; c < vals[r].length; c++) add(vals[r][c]);
+    } catch (e) { /* skip an unreadable index tab */ }
   }
   // Keep only names that resolve to a real tab in this spreadsheet.
-  return out.filter(function (n) { return !!ss.getSheetByName(n); });
+  return out.filter(function (n) { try { return !!ss.getSheetByName(n); } catch (e) { return false; } });
 }
 
 // ─── LOOKUP CUSTOMER BY PHONE ─────────────────────────────────────────────────
@@ -2245,22 +2254,23 @@ function handleLookupCustomer(p) {
   var best = null, bestDate = null, orders = {}, scanned = [];
 
   for (var si = 0; si < sheetNames.length; si++) {
+   try {
     var sh = ss.getSheetByName(sheetNames[si]);
     if (!sh || sh.getLastRow() < 2 || sh.getLastColumn() < 1) continue;
 
     var C = _crmCols(sh), colOf = C.colOf, ncol = C.header.length;
-    var cPhone = colOf(CRM_H.PHONE);
-    var cAlt   = colOf(['ALT PHONE','ALTERNATE PHONE','ALT CONTACT NUMBER','ALTERNATE CONTACT NUMBER']);
+    var cPhone = colOf(LOOKUP_PHONE_ALIASES);
+    var cAlt   = colOf(LOOKUP_ALT_ALIASES);
     if (cPhone < 0 && cAlt < 0) continue;          // no phone column → not an order sheet
     scanned.push(sheetNames[si]);
     var cOrderNo = colOf(CRM_H.ORDER_NO), cIntNo = colOf(CRM_H.INT_NO);
-    var cCust = colOf(CRM_H.CUSTOMER), cDate = colOf(CRM_H.DATE);
-    var cEmail = colOf(['EMAIL ADDRESS']);
-    var cGst   = colOf(['CUSTOMER GST NO','CUSTOMER GSTIN','GST NO','GSTIN']);
-    var cBill  = colOf(['BILLING ADDRESS']);
-    var cDelv  = colOf(['DELIVERY ADDRESS']);
-    var cPincode = colOf(['PINCODE','PIN CODE','DELIVERY PINCODE','DELIVERY PIN CODE']);
-    var cFloor = colOf(['FLOOR']), cLandmk = colOf(['LANDMARK']);
+    var cCust = colOf(LOOKUP_NAME_ALIASES), cDate = colOf(CRM_H.DATE);
+    var cEmail = colOf(['EMAIL ADDRESS','EMAIL','E-MAIL','EMAIL ID']);
+    var cGst   = colOf(['CUSTOMER GST NO','CUSTOMER GSTIN','GST NO','GSTIN','GST NUMBER']);
+    var cBill  = colOf(['BILLING ADDRESS','BILL ADDRESS']);
+    var cDelv  = colOf(['DELIVERY ADDRESS','ADDRESS','CUSTOMER ADDRESS','SHIPPING ADDRESS']);
+    var cPincode = colOf(['PINCODE','PIN CODE','DELIVERY PINCODE','DELIVERY PIN CODE','PIN']);
+    var cFloor = colOf(['FLOOR']), cLandmk = colOf(['LANDMARK','NEAREST LANDMARK']);
     var cDob   = colOf(['DATE OF BIRTH','DOB']);
     var cAnniv = colOf(['MARRIAGE ANNIVERSARY','MARRIAGE ANNIVERSARY DATE','ANNIVERSARY']);
 
@@ -2297,6 +2307,7 @@ function handleLookupCustomer(p) {
       };
       if (d) bestDate = d;
     }
+   } catch (e) { /* skip an unreadable sheet and keep scanning the rest */ }
   }
 
   if (!best) return { ok: true, found: false, sheetsScanned: scanned };
