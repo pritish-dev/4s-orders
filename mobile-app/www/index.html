@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '66';
+  var V = '67';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -3225,8 +3225,9 @@ function OrderFormScreen({ctx}) {
             alt:      fill('alt',      m.alt),
             dob:      fill('dob',      m.dob),
             anniversary: fill('anniversary', m.anniversary),
-            // Only set the pattern automatically when the salesperson hasn't picked one.
-            purchasePattern: (pattern && curPat.length===0) ? [pattern] : curPat,
+            // Repeat customer → set the purchase pattern from their order history
+            // (authoritative: it reflects the real count, overriding any stale pick).
+            purchasePattern: pattern ? [pattern] : curPat,
           };
         });
         const n = Number(m.orderCount)||1;
