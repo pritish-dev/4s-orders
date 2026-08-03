@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v47';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v48';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -2184,75 +2184,128 @@ function handleUpdateService(body) {
   return { ok: true, rows: updated };
 }
 
+// Index tabs (inside the CRM spreadsheet) that list every historical order sheet
+// to search for a returning customer. Each tab lists TAB NAMES across its columns
+// — the franchise order sheets and the 4S order sheets, current + past years.
+var CRM_SHEET_INDEX_TABS = ['SHEET_DETAILS', 'OLD_SHEET_DETAILS'];
+
+// Every order-sheet (tab) name to scan for a customer lookup: the primary app tab
+// plus every non-empty name listed in the SHEET_DETAILS / OLD_SHEET_DETAILS index
+// tabs. Column-header labels ("Franchise_sheets" / "four_s_sheets") are skipped.
+// Only names that actually resolve to a tab in the CRM spreadsheet are returned,
+// so a stale entry in an index tab is silently ignored.
+function _crmOrderSheetNames(ss) {
+  var seen = {}, out = [];
+  function add(n) {
+    n = String(n || '').trim();
+    if (!n) return;
+    if (/^(franchise[_ ]?sheets?|four[_ ]?s[_ ]?sheets?|sheet[_ ]?names?|sheets?)$/i.test(n)) return;
+    var k = n.toUpperCase();
+    if (seen[k]) return;
+    seen[k] = true;
+    out.push(n);
+  }
+  add(CRM_TAB_NAME);
+  for (var t = 0; t < CRM_SHEET_INDEX_TABS.length; t++) {
+    var sh = ss.getSheetByName(CRM_SHEET_INDEX_TABS[t]);
+    if (!sh || sh.getLastRow() < 1 || sh.getLastColumn() < 1) continue;
+    var vals = sh.getRange(1, 1, sh.getLastRow(), sh.getLastColumn()).getValues();
+    for (var r = 0; r < vals.length; r++)
+      for (var c = 0; c < vals[r].length; c++) add(vals[r][c]);
+  }
+  // Keep only names that resolve to a real tab in this spreadsheet.
+  return out.filter(function (n) { return !!ss.getSheetByName(n); });
+}
+
 // ─── LOOKUP CUSTOMER BY PHONE ─────────────────────────────────────────────────
 // When a new order is being booked, the app sends the customer's mobile number
-// here. If that number already exists in the CRM sheet (a returning customer, no
-// matter whether it's their 2nd, 3rd … order), we return the profile last recorded
-// for them so the order form can pre-fill the name, address and other reusable
-// details instead of re-typing them. `orderCount` = how many distinct past orders
-// that number has, so the app can show "returning customer · N previous orders".
+// here. We search EVERY order sheet listed in SHEET_DETAILS / OLD_SHEET_DETAILS
+// (current + past years, franchise + 4S), plus the primary app tab. If the number
+// is found (a returning customer, no matter whether it's their 2nd, 3rd … order),
+// we return the most recent profile recorded for them so the order form can
+// pre-fill the name, address and other reusable details. `orderCount` = how many
+// distinct past orders that number has across all sheets.
 function handleLookupCustomer(p) {
   var phone = _digits10(p && p.phone);
   if (!phone) return { ok: true, found: false };
 
-  var sh;
-  try { sh = _openCRMSheet(); }
+  var ss;
+  try { ss = SpreadsheetApp.openById(CRM_SHEET_ID); }
   catch (e) { return { ok: false, error: e.message }; }
 
-  var C = _crmCols(sh), colOf = C.colOf, ncol = C.header.length;
-  var cPhone   = colOf(CRM_H.PHONE);
-  var cAlt     = colOf(['ALT PHONE','ALTERNATE PHONE','ALT CONTACT NUMBER','ALTERNATE CONTACT NUMBER']);
-  if (cPhone < 0) return { ok: true, found: false };
-  var cOrderNo = colOf(CRM_H.ORDER_NO);
-  var cIntNo   = colOf(CRM_H.INT_NO);
-  var cCust    = colOf(CRM_H.CUSTOMER);
-  var cEmail   = colOf(['EMAIL ADDRESS']);
-  var cGst     = colOf(['CUSTOMER GST NO','CUSTOMER GSTIN','GST NO','GSTIN']);
-  var cBill    = colOf(['BILLING ADDRESS']);
-  var cDelv    = colOf(['DELIVERY ADDRESS']);
-  var cPincode = colOf(['PINCODE','PIN CODE','DELIVERY PINCODE','DELIVERY PIN CODE']);
-  var cFloor   = colOf(['FLOOR']);
-  var cLandmk  = colOf(['LANDMARK']);
-  var cAltP    = cAlt;
-  var cDob     = colOf(['DATE OF BIRTH','DOB']);
-  var cAnniv   = colOf(['MARRIAGE ANNIVERSARY','MARRIAGE ANNIVERSARY DATE','ANNIVERSARY']);
-
-  var lastRow = sh.getLastRow();
-  if (lastRow < 2) return { ok: true, found: false };
-  var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
-
-  function sv(r, ci) { return ci >= 0 ? String(r[ci] || '').trim() : ''; }
-  var latest = null, orders = {};
-  for (var i = 0; i < data.length; i++) {
-    var r = data[i];
-    var rowPhone = _digits10(r[cPhone]);
-    var rowAlt   = cAltP >= 0 ? _digits10(r[cAltP]) : '';
-    if (rowPhone !== phone && rowAlt !== phone) continue;
-    // Count distinct past orders for this number.
-    var key = (cOrderNo >= 0 ? String(r[cOrderNo] || '') : '') + '|' + (cIntNo >= 0 ? String(r[cIntNo] || '') : '');
-    orders[key] = true;
-    // Keep the most recent row's profile (rows are appended, so higher index = newer).
-    var name = sv(r, cCust);
-    if (name) latest = r;
+  var tz;
+  try { tz = ss.getSpreadsheetTimeZone() || Session.getScriptTimeZone(); }
+  catch (e) { tz = Session.getScriptTimeZone(); }
+  function fmt(v) {
+    if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+    return String(v == null ? '' : v).trim();
   }
-  if (!latest) return { ok: true, found: false };
 
-  return {
-    ok: true, found: true,
-    orderCount: Object.keys(orders).length,
-    customer: sv(latest, cCust),
-    phone: phone,
-    alt: sv(latest, cAltP),
-    email: sv(latest, cEmail),
-    gstNumber: sv(latest, cGst),
-    billing: sv(latest, cBill),
-    delivery: sv(latest, cDelv),
-    pincode: sv(latest, cPincode),
-    floor: sv(latest, cFloor),
-    landmark: sv(latest, cLandmk),
-    dob: sv(latest, cDob),
-    anniversary: sv(latest, cAnniv),
-  };
+  var sheetNames = _crmOrderSheetNames(ss);
+  var best = null, bestDate = null, orders = {}, scanned = [];
+
+  for (var si = 0; si < sheetNames.length; si++) {
+    var sh = ss.getSheetByName(sheetNames[si]);
+    if (!sh || sh.getLastRow() < 2 || sh.getLastColumn() < 1) continue;
+
+    var C = _crmCols(sh), colOf = C.colOf, ncol = C.header.length;
+    var cPhone = colOf(CRM_H.PHONE);
+    var cAlt   = colOf(['ALT PHONE','ALTERNATE PHONE','ALT CONTACT NUMBER','ALTERNATE CONTACT NUMBER']);
+    if (cPhone < 0 && cAlt < 0) continue;          // no phone column → not an order sheet
+    scanned.push(sheetNames[si]);
+    var cOrderNo = colOf(CRM_H.ORDER_NO), cIntNo = colOf(CRM_H.INT_NO);
+    var cCust = colOf(CRM_H.CUSTOMER), cDate = colOf(CRM_H.DATE);
+    var cEmail = colOf(['EMAIL ADDRESS']);
+    var cGst   = colOf(['CUSTOMER GST NO','CUSTOMER GSTIN','GST NO','GSTIN']);
+    var cBill  = colOf(['BILLING ADDRESS']);
+    var cDelv  = colOf(['DELIVERY ADDRESS']);
+    var cPincode = colOf(['PINCODE','PIN CODE','DELIVERY PINCODE','DELIVERY PIN CODE']);
+    var cFloor = colOf(['FLOOR']), cLandmk = colOf(['LANDMARK']);
+    var cDob   = colOf(['DATE OF BIRTH','DOB']);
+    var cAnniv = colOf(['MARRIAGE ANNIVERSARY','MARRIAGE ANNIVERSARY DATE','ANNIVERSARY']);
+
+    var data = sh.getRange(2, 1, sh.getLastRow() - 1, ncol).getValues();
+    for (var i = 0; i < data.length; i++) {
+      var r = data[i];
+      var rp = cPhone >= 0 ? _digits10(r[cPhone]) : '';
+      var ra = cAlt   >= 0 ? _digits10(r[cAlt])   : '';
+      if (rp !== phone && ra !== phone) continue;
+      var name = cCust >= 0 ? String(r[cCust] || '').trim() : '';
+      // Count distinct past orders (namespaced by sheet so numbers can't collide).
+      var key = sheetNames[si] + '|' + (cOrderNo >= 0 ? String(r[cOrderNo] || '') : '') + '|' + (cIntNo >= 0 ? String(r[cIntNo] || '') : '');
+      orders[key] = true;
+      if (!name) continue;
+      // Prefer the profile from the row with the newest ORDER DATE; a dated row
+      // always beats an undated one; among undated rows, keep the last one seen.
+      var d = cDate >= 0 ? _parseCrmDate(r[cDate]) : null;
+      var better = !best
+        || (d && (!bestDate || d >= bestDate))
+        || (!d && !bestDate);
+      if (!better) continue;
+      best = {
+        customer: name,
+        alt:       cAlt   >= 0 ? String(r[cAlt]   || '').trim() : '',
+        email:     cEmail >= 0 ? String(r[cEmail] || '').trim() : '',
+        gstNumber: cGst   >= 0 ? String(r[cGst]   || '').trim() : '',
+        billing:   cBill  >= 0 ? String(r[cBill]  || '').trim() : '',
+        delivery:  cDelv  >= 0 ? String(r[cDelv]  || '').trim() : '',
+        pincode:   cPincode >= 0 ? String(r[cPincode] || '').trim() : '',
+        floor:     cFloor >= 0 ? String(r[cFloor] || '').trim() : '',
+        landmark:  cLandmk>= 0 ? String(r[cLandmk]|| '').trim() : '',
+        dob:         fmt(cDob   >= 0 ? r[cDob]   : ''),
+        anniversary: fmt(cAnniv >= 0 ? r[cAnniv] : ''),
+      };
+      if (d) bestDate = d;
+    }
+  }
+
+  if (!best) return { ok: true, found: false, sheetsScanned: scanned };
+  best.ok = true;
+  best.found = true;
+  best.phone = phone;
+  best.orderCount = Object.keys(orders).length;
+  best.sheetsScanned = scanned;
+  return best;
 }
 
 // Normalise a phone value to its last 10 digits (drops +91 / spaces / dashes) so
