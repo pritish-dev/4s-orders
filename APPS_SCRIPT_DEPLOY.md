@@ -96,13 +96,18 @@ app). When it goes green, the live backend is updated.
 This workflow only handles the **backend** (`Code.gs`). The **frontend**
 (`index.html`, `sw.js`, …) is served by GitHub Pages and updates on merge.
 
-Forcing every installed client (web PWA + Android/iOS apps) to actually pull the
-new build is handled automatically by the **`Stamp app version`** workflow
-(`.github/workflows/stamp-version.yml`). On every push to `master` that touches a
-frontend file it stamps fresh cache-busting markers — `mobile-app/www/version.json`,
-the mobile `RUNV`, and the service-worker cache name — via
-`scripts/stamp-version.mjs`, then commits them back. **You never have to bump a
-version by hand.**
+Publishing is handled by the **`Deploy to GitHub Pages`** workflow
+(`.github/workflows/deploy-pages.yml`). On every push to `master` it stamps fresh
+cache-busting markers — `mobile-app/www/version.json`, the mobile `RUNV`, and the
+service-worker cache name — via `scripts/stamp-version.mjs` **at build time**, then
+publishes the site. Because the stamp happens inside the build (never committed),
+every deploy carries a new version and forces every installed client (web PWA +
+Android/iOS apps) onto the new code. **You never have to bump a version by hand.**
+
+> Pages must use the **GitHub Actions** source (Settings → Pages → Source →
+> *GitHub Actions*). The workflow enables it automatically; if your org restricts
+> that, set it once by hand. A commit-back "stamp" workflow does **not** work here:
+> Pages does not redeploy for pushes made by the built-in `GITHUB_TOKEN`.
 
 The hard localStorage-reset gates (`var V = '…'`) are left alone on purpose: bump
 one of those manually only when a breaking data-format change needs to wipe every

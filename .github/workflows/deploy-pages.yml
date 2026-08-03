@@ -1,0 +1,63 @@
+name: Deploy to GitHub Pages
+
+# Publishes the web PWA + the mobile web copy to GitHub Pages on EVERY push to
+# master, and stamps the cache-busting version markers at build time so every
+# installed client (web + Android/iOS) is forced onto the new code automatically.
+#
+# Why a workflow instead of "Deploy from a branch":
+#   • The version markers must change on every release for clients to bust their
+#     cache. Stamping them here — in the build, never committed — means the deploy
+#     ALWAYS carries a fresh version, with no bot commit that Pages would ignore.
+#   • The deploy runs on every push, so the published site is always the latest.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One live deployment at a time; a newer push supersedes an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Stamp cache-busting version to the commit SHA (build-time only)
+        run: node scripts/stamp-version.mjs "${GITHUB_SHA:0:7}"
+
+      - name: Assemble the site (exclude VCS / CI files)
+        run: |
+          mkdir -p _site
+          rsync -a --exclude='.git' --exclude='.github' --exclude='_site' ./ _site/
+
+      - name: Configure Pages (enables the Actions source if not already)
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

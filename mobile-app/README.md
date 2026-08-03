@@ -19,9 +19,9 @@ via GitHub Pages, and every installed app picks up the new version the next time
 it's opened. You do **not** rebuild or reshare the APK for screen/logic changes.
 
 The version markers that trigger this auto-refresh (`www/version.json` + the baked
-`RUNV`) are stamped **automatically** on every merge by the `Stamp app version`
-GitHub Action — so a code change alone is enough; nobody has to bump a version by
-hand for installs to update.
+`RUNV`) are stamped **automatically at build time** by the `Deploy to GitHub Pages`
+GitHub Action on every push to `master` — so a code change alone is enough; nobody
+has to bump a version by hand for installs to update.
 
 Rebuild the APK only for **native** changes — app icon, splash, Capacitor
 plugins/version, or the `server.url` itself.
