@@ -758,6 +758,21 @@ function warehouseTagOf(stock) {
   return labels.join(', ');
 }
 
+// The warehouses that actually hold stock for an item, as sales-copy labels:
+//   ZBF11T → 'KB', ZBF34S → '34S'. Returns [] when the item is out of stock
+// everywhere (or stocked in some other warehouse). Used to decide whether the
+// salesperson must PICK a delivery warehouse (stocked in both) or it's automatic.
+function warehouseOptionsOf(stock) {
+  const arr = Array.isArray(stock) ? stock : [];
+  const qtyIn = (code) => arr
+    .filter(s => String(s.b || '').toUpperCase().indexOf(code) >= 0)
+    .reduce((t, s) => t + (Number(s.q) || 0), 0);
+  const opts = [];
+  if (qtyIn('11T') > 0) opts.push('KB');
+  if (qtyIn('34S') > 0) opts.push('34S');
+  return opts;
+}
+
 // copyType: 'sales' (default, fully itemised) or 'customer' (modular families
 // collapsed to one line each).
 function generatePDF(order, copyType) {
@@ -1260,7 +1275,7 @@ function generatePDF(order, copyType) {
     vln(ml+cw*0.6,y,y+9);
     hln(ml,y+ftH-8,ml+cw);
     doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...INK);
-    doc.text(fit1('Customer care no. : 18002671122  |  interiocare@godrej.com', cw*0.6-3, 6.5), ml+2, y+4);
+    doc.text(fit1('Customer care no. : 08067436743  |  interiocare@godrej.com', cw*0.6-3, 6.5), ml+2, y+4);
     doc.text(fit1('Website : www.godrejinterio.com', cw*0.6-3, 6.5), ml+2, y+8);
     doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...INK);
     doc.text(fit1('For GODREJ & BOYCE MFG. CO. LTD', cw*0.4-3, 7), ml+cw-2, y+4, {align:'right'});
@@ -1346,6 +1361,10 @@ const BLANK_ORDER = () => ({
   // (finalised, PDF generated). Drives who may edit the order after saving.
   orderStatus:'',
   deliveryStatus:'Pending',
+  // After-sales service / issue tracking. serviceFlag is set when a delivered order
+  // needs a service visit (e.g. a product found damaged/defective at installation).
+  // status is 'Open' until the issue is resolved, then 'Resolved'.
+  serviceFlag:false, serviceIssue:'', serviceRaisedDate:'', serviceAssignee:'', serviceResolvedDate:'', serviceStatus:'',
   followUp:'', salesExec:'', won:'',
   orderType:'B2C', items:[],
   // Customer profiling (saved to sheet, not on PDF). DOB & anniversary optional.
@@ -1844,6 +1863,28 @@ function App() {
     finally { setLoading(false); }
   }
 
+  // Raise / update / clear an after-sales service request on an order. `svc` carries
+  // { serviceFlag, serviceIssue, serviceRaisedDate, serviceAssignee,
+  //   serviceResolvedDate, serviceStatus }. Persisted on every CRM row of the order.
+  async function doUpdateService(orderNo, internalNo, svc) {
+    setLoading(true);
+    try {
+      const res = await apiPost({ action:'updateService', orderNo, internalNo, ...svc, updatedBy: user?.name });
+      if (res.ok) { showToast(svc.serviceFlag ? 'Service request saved ✓' : 'Service request cleared ✓'); loadOrders(); return true; }
+      else { showToast(res.error||'Update failed','bad'); return false; }
+    } catch(e) { showToast(e.message,'bad'); return false; }
+    finally { setLoading(false); }
+  }
+
+  // Look up a returning customer by mobile number. Resolves to the CRM profile
+  // (name, address, …) plus how many past orders they have, or null if new/offline.
+  async function doLookupCustomer(phone) {
+    try {
+      const res = await apiGet('lookupCustomer', { phone: String(phone||'') }, 12000);
+      return (res && res.ok && res.found) ? res : null;
+    } catch(e) { return null; }
+  }
+
   // Admin-only: permanently delete an order (all its rows) from the CRM sheet.
   // The backend re-checks that the requesting user is an admin before deleting.
   async function doDeleteOrder(orderNo, internalNo) {
@@ -1901,7 +1942,7 @@ function App() {
     localStorage.setItem('4s_notif_pushed', JSON.stringify([...pushedRef.current].slice(-500)));
   }, [notifications]);
 
-  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doDeleteOrder, doSignOut, syncStock, syncPriceList, loadOrders, getNextReceipt,
+  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doUpdateService, doLookupCustomer, doDeleteOrder, doSignOut, syncStock, syncPriceList, loadOrders, getNextReceipt,
     mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen };
 
   const screens = {
@@ -1913,6 +1954,7 @@ function App() {
     order:   <OrderFormScreen ctx={ctx}/>,
     pdf:     <PDFPreviewScreen ctx={ctx}/>,
     history: <HistoryScreen ctx={ctx}/>,
+    service: <ServiceScreen ctx={ctx}/>,
     won:     <WONUpdateScreen ctx={ctx}/>,
     notifs:  <NotificationsScreen ctx={ctx}/>,
     settings:<SettingsScreen ctx={ctx}/>,
@@ -2119,6 +2161,7 @@ function HomeScreen({ctx}) {
             {icon:Icon.search(T.ink2,18),label:'Browse\nItems',sub:(priceItems?.length>0)?(priceItems.length+' SKUs'):'Not loaded',tone:(priceItems?.length>0)?T.ok:T.warn,s:'search'},
             {icon:Icon.doc(T.ink2,18),label:'Order\nHistory',sub:'',tone:T.ink4,s:'history'},
             {icon:Icon.refresh(T.ink2,16),label:'Sync\nStock',sub:'',tone:T.ink4,s:null},
+            (()=>{const nOpen=orders.filter(o=>o.serviceFlag&&!/resolved/i.test(o.serviceStatus||'')).length;return {icon:<span style={{fontSize:18,lineHeight:'18px'}}>⚠️</span>,label:'Service\nRequests',sub:nOpen?nOpen+' open':'None open',tone:nOpen?T.bad:T.ink4,s:'service'};})(),
           ].map((q,i)=>(
             <div key={i} onClick={()=>q.s?nav(q.s):ctx.syncStock()} style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:6,padding:12,display:'flex',flexDirection:'column',gap:6,minHeight:76,cursor:'pointer'}}>
               {q.icon}
@@ -2246,9 +2289,13 @@ function SearchScreen({ctx}) {
         discontinued:!!item.discontinued, discSince:item.discSince||'',
         branch:((item.stock||[]).filter(s=>s.q>0)[0]||{}).b||'',
         inStock:(item.stock||[]).reduce((s,x)=>s+x.q,0),
-        // Warehouse tag snapshot for the sales-copy PDF: KB (ZBF11T / out of
-        // stock) or 34S (ZBF34S), captured at the moment the item is added.
-        whTag:warehouseTagOf(item.stock),
+        // Warehouse tag for the sales-copy PDF: KB (ZBF11T) or 34S (ZBF34S),
+        // captured when the item is added. When the item is stocked in BOTH
+        // warehouses the salesperson chooses which to deliver from (dropdown in the
+        // order form); a single-warehouse item is auto-tagged. whOptions drives
+        // whether that dropdown is shown.
+        whOptions:warehouseOptionsOf(item.stock),
+        whTag:(warehouseOptionsOf(item.stock)[0]||'KB'),
       }];
     }
     setOrder({...order,items:newItems});
@@ -2517,6 +2564,51 @@ function OrderFormScreen({ctx}) {
     if(ok){ setOrder(BLANK_ORDER()); nav('history'); }
   }
   const setF = (k,v) => setOrder(prev=>({...prev,[k]:v}));
+
+  // ── CRM autofill ──────────────────────────────────────────────────────────
+  // When the mobile number of a RETURNING customer is typed on a brand-new order,
+  // fetch their last-recorded profile from the CRM and pre-fill the empty fields
+  // (name, address, email, GST…). Works no matter how many times they've ordered
+  // before. Never overwrites anything the salesperson has already typed.
+  const {doLookupCustomer, showToast} = ctx;
+  const lookupTimer   = React.useRef(null);
+  const lookedUpPhone = React.useRef('');
+  const [crmMatch,setCrmMatch] = React.useState(null);
+  function runCustomerLookup(rawPhone){
+    const digits = String(rawPhone||'').replace(/\D/g,'').slice(-10);
+    if(digits.length!==10 || o.no) return;         // only auto-fill a brand-new order
+    if(digits===lookedUpPhone.current) return;
+    lookedUpPhone.current = digits;
+    doLookupCustomer(digits).then(m=>{
+      if(!m) return;
+      setCrmMatch(m);
+      setOrder(prev=>{
+        const fill = (k,v)=> (v && !String(prev[k]||'').trim()) ? v : prev[k];
+        return {...prev,
+          customer: fill('customer', m.customer),
+          delivery: fill('delivery', m.delivery),
+          billing:  fill('billing',  m.billing),
+          pincode:  fill('pincode',  m.pincode),
+          floor:    fill('floor',    m.floor),
+          landmark: fill('landmark', m.landmark),
+          email:    fill('email',    m.email),
+          gstNumber:fill('gstNumber',m.gstNumber),
+          alt:      fill('alt',      m.alt),
+          dob:      fill('dob',      m.dob),
+          anniversary: fill('anniversary', m.anniversary),
+        };
+      });
+      const n = Number(m.orderCount)||1;
+      showToast('Returning customer · '+n+' previous order'+(n>1?'s':'')+' — details filled','ok');
+    });
+  }
+  function onPhoneChange(v){
+    setF('phone', v);
+    if(String(v||'').replace(/\D/g,'').length < 10) setCrmMatch(null);
+    if(lookupTimer.current) clearTimeout(lookupTimer.current);
+    lookupTimer.current = setTimeout(()=>runCustomerLookup(v), 600);
+  }
+
   const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance} = orderTotals(o);
 
   // Manager / Admin see cost + margin; Sales does not.
@@ -2795,7 +2887,15 @@ function OrderFormScreen({ctx}) {
         )}
         <SectionHead n="01" label="Customer"/>
         <Field label="Customer Name" value={o.customer} onChange={v=>setF('customer',v)} required/>
-        <Field label="Phone" value={o.phone} onChange={v=>setF('phone',v)} mono required type="tel" action="CALL" onAction={()=>o.phone&&window.open('tel:'+o.phone)} error={o.phone&&!isValidPhone(o.phone)?'Enter a valid 10-digit mobile number':undefined}/>
+        <Field label="Phone" value={o.phone} onChange={onPhoneChange} mono required type="tel" action="CALL" onAction={()=>o.phone&&window.open('tel:'+o.phone)} error={o.phone&&!isValidPhone(o.phone)?'Enter a valid 10-digit mobile number':undefined} hint={!o.no?'Returning customer? Their saved details fill in automatically.':undefined}/>
+        {crmMatch && !o.no && (
+          <div style={{margin:'0 14px 2px',padding:'8px 12px',background:T.greenSoft,border:`1px solid ${T.green}`,borderRadius:6,display:'flex',alignItems:'center',gap:8}}>
+            <span style={{fontSize:16}}>↺</span>
+            <div style={{fontSize:12,color:T.ink2,lineHeight:1.4}}>
+              <b>Returning customer</b> — {Number(crmMatch.orderCount)||1} previous order{(Number(crmMatch.orderCount)||1)>1?'s':''}. Name &amp; address filled from the CRM; edit anything that has changed.
+            </div>
+          </div>
+        )}
         <Field label="Alt. Phone" value={o.alt} onChange={v=>setF('alt',v)} mono type="tel" error={o.alt&&!isValidPhone(o.alt)?'Enter a valid 10-digit mobile number':undefined}/>
         <Field label="E-mail" value={o.email} onChange={v=>setF('email',v)} type="email" required hint="Mandatory · digital copy is sent here" error={o.email&&!isValidEmail(o.email)?'Enter a valid email address':undefined}/>
         <Field label="Customer GST No." value={o.gstNumber} onChange={v=>setF('gstNumber',v.toUpperCase())} mono required hint="Mandatory · printed on the customer & sales copy of the PDF"/>
@@ -3046,6 +3146,23 @@ function OrderFormScreen({ctx}) {
                       />
                     )}
                   </div>
+                  {/* Delivery warehouse for the SALES-copy tag. A dropdown when the
+                      item is stocked in BOTH warehouses so the salesperson chooses
+                      the delivery source; a plain auto-label otherwise. */}
+                  {(()=>{const opts=Array.isArray(it.whOptions)?it.whOptions:[];const cur=it.whTag||opts[0]||'KB';return(
+                    <div style={{display:'flex',gap:8,marginTop:8,alignItems:'center',flexWrap:'wrap'}}>
+                      <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>WAREHOUSE</span>
+                      {opts.length>1 ? (
+                        <select value={cur} onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,whTag:v}:x)}));}}
+                          style={{border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 8px',fontFamily:T.sans,fontSize:12,fontWeight:700,color:T.ink,background:'#fff',cursor:'pointer'}}>
+                          {opts.map(w=><option key={w} value={w}>{w==='KB'?'KB (ZBF11T)':w==='34S'?'34S (ZBF34S)':w}</option>)}
+                        </select>
+                      ) : (
+                        <span style={{fontSize:11,fontWeight:700,color:T.ink2,padding:'3px 8px',borderRadius:4,background:T.paper2,border:`1px solid ${T.line}`}}>{cur}</span>
+                      )}
+                      {opts.length>1 && <span style={{fontSize:9,color:T.ink4}}>stocked in both — pick delivery source</span>}
+                    </div>
+                  );})()}
                 </div>
                 <div style={{textAlign:'right',flexShrink:0}}>
                   <div style={{fontFamily:T.mono,fontSize:15,fontWeight:700}}>₹{lineShown.toLocaleString('en-IN')}</div>
@@ -3284,6 +3401,147 @@ function PDFPreviewScreen({ctx}) {
   );
 }
 
+// ─── Service Requests (after-sales issue tracking) ───────────
+// Raise / track a service request against an order — e.g. a product found damaged
+// or defective at installation. A flagged order records the issue, when it was
+// raised, who is handling it and, once fixed, when it was resolved.
+function ServiceRequestModal({order, ctx, onClose}){
+  const {doUpdateService} = ctx;
+  const today = new Date().toISOString().slice(0,10);
+  const [issue,setIssue]       = useState(order.serviceIssue||'');
+  const [raised,setRaised]     = useState(order.serviceRaisedDate||today);
+  const [assignee,setAssignee] = useState(order.serviceAssignee||'');
+  const [status,setStatus]     = useState(order.serviceStatus||'Open');
+  const [resolved,setResolved] = useState(order.serviceResolvedDate||'');
+  const [busy,setBusy]         = useState(false);
+  const flagged = !!order.serviceFlag;
+  async function save(flagOn){
+    if(flagOn && !issue.trim()){ ctx.showToast('Describe the issue first','bad'); return; }
+    setBusy(true);
+    const ok = await doUpdateService(order.no, order.internalNo, {
+      serviceFlag: flagOn,
+      serviceIssue: issue.trim(),
+      serviceRaisedDate: raised,
+      serviceAssignee: assignee.trim(),
+      serviceResolvedDate: status==='Resolved' ? (resolved||today) : '',
+      serviceStatus: flagOn ? status : '',
+    });
+    setBusy(false);
+    if(ok) onClose();
+  }
+  return (
+    <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.45)',zIndex:9999,display:'flex',alignItems:'flex-end',justifyContent:'center'}}>
+      <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:600,background:'#fff',borderRadius:'14px 14px 0 0',maxHeight:'92vh',overflowY:'auto'}}>
+        <div style={{padding:'14px 16px',borderBottom:`1px solid ${T.line}`,display:'flex',justifyContent:'space-between',alignItems:'center',position:'sticky',top:0,background:'#fff',zIndex:1}}>
+          <div>
+            <div style={{fontSize:16,fontWeight:700}}>Service request</div>
+            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{order.no} · {order.customer}</div>
+          </div>
+          <span onClick={onClose} style={{cursor:'pointer'}}>{Icon.close(T.ink4)}</span>
+        </div>
+        <div>
+          <Field label="Issue / complaint" value={issue} onChange={setIssue} multiline required hint="e.g. Wardrobe shutter found damaged at installation; customer raised a complaint"/>
+          <Field label="Issue raised on" value={raised} onChange={setRaised} type="date" mono/>
+          <Field label="Handled by" value={assignee} onChange={setAssignee} hint="Who is taking care of this issue"/>
+          <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+            <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Status</div>
+            <select value={status} onChange={e=>setStatus(e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+              <option>Open</option><option>Resolved</option>
+            </select>
+          </div>
+          {status==='Resolved' && <Field label="Resolved on" value={resolved} onChange={setResolved} type="date" mono/>}
+        </div>
+        <div style={{display:'flex',gap:8,padding:'12px 14px',borderTop:`1px solid ${T.line}`,position:'sticky',bottom:0,background:'#fff'}}>
+          {flagged && <Btn onClick={()=>save(false)} disabled={busy}>Remove flag</Btn>}
+          <Btn primary full onClick={()=>save(true)} disabled={busy}>{flagged?'Update request':'Raise request'}</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ServiceScreen({ctx}){
+  const {orders,nav,loadOrders} = ctx;
+  const [sel,setSel] = useState(null);       // order being raised / edited in the modal
+  const [q,setQ]     = useState('');
+  useEffect(()=>{ loadOrders(); },[]);
+  const isResolved = o => String(o.serviceStatus||'').toLowerCase()==='resolved';
+  const flagged  = orders.filter(o=>o.serviceFlag);
+  const open     = flagged.filter(o=>!isResolved(o));
+  const resolved = flagged.filter(isResolved);
+  const query    = q.trim().toLowerCase();
+  const searchable = query
+    ? orders.filter(o=>!o.serviceFlag && (String(o.no||'').toLowerCase().includes(query)||String(o.customer||'').toLowerCase().includes(query)||String(o.phone||'').includes(query))).slice(0,30)
+    : [];
+  const card = (o,tone) => (
+    <div key={o.no} onClick={()=>setSel(o)} style={{background:'#fff',borderBottom:`1px solid ${T.line}`,padding:'12px 18px',cursor:'pointer',display:'grid',gridTemplateColumns:'1fr auto',gap:10}}>
+      <div style={{minWidth:0}}>
+        <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+          <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
+          <Pill tone={tone==='open'?'bad':'ok'} size="sm">{tone==='open'?'OPEN':'RESOLVED'}</Pill>
+        </div>
+        <div style={{fontSize:14,fontWeight:700,marginTop:2}}>{o.customer}</div>
+        {o.serviceIssue && <div style={{fontSize:12,color:T.ink3,marginTop:2,lineHeight:1.4}}>{o.serviceIssue}</div>}
+        <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:3}}>
+          {o.serviceRaisedDate?('Raised '+prettyDate(o.serviceRaisedDate)):''}{o.serviceAssignee?(' · '+o.serviceAssignee):''}{tone!=='open'&&o.serviceResolvedDate?(' · Resolved '+prettyDate(o.serviceResolvedDate)):''}
+        </div>
+      </div>
+      <div style={{textAlign:'right',alignSelf:'center'}}>{Icon.edit(T.green,15)}</div>
+    </div>
+  );
+  return (
+    <div className="screen">
+      <div style={{flexShrink:0}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`}}>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.home(T.ink2,18)}</button>
+          <div><div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>AFTER-SALES</div><div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5}}>Service Requests</div></div>
+        </div>
+        <div style={{display:'flex',gap:10,padding:'12px 18px'}}>
+          <div style={{flex:1,background:T.badSoft||'#fdecec',border:`1px solid ${T.bad}`,borderRadius:8,padding:'10px 12px'}}>
+            <div style={{fontSize:26,fontWeight:800,color:T.bad,lineHeight:1}}>{open.length}</div>
+            <div style={{fontSize:11,color:T.ink3,fontWeight:600,marginTop:3}}>Open</div>
+          </div>
+          <div style={{flex:1,background:T.greenSoft,border:`1px solid ${T.green}`,borderRadius:8,padding:'10px 12px'}}>
+            <div style={{fontSize:26,fontWeight:800,color:T.green,lineHeight:1}}>{resolved.length}</div>
+            <div style={{fontSize:11,color:T.ink3,fontWeight:600,marginTop:3}}>Resolved</div>
+          </div>
+        </div>
+        <div style={{padding:'0 18px 10px'}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'8px 12px'}}>
+            {Icon.search(T.ink4,16)}
+            <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Find an order to flag (no / customer / phone)" style={{flex:1,border:'none',outline:'none',fontSize:14,fontFamily:T.sans,color:T.ink,background:'transparent'}}/>
+            {q&&<span onClick={()=>setQ('')} style={{cursor:'pointer'}}>{Icon.close(T.ink4,14)}</span>}
+          </div>
+        </div>
+      </div>
+      <div className="scroll">
+        {query ? (
+          <>
+            <div style={{padding:'8px 18px',fontSize:11,fontWeight:700,color:T.ink4,letterSpacing:1}}>TAP AN ORDER TO RAISE A REQUEST · {searchable.length}</div>
+            {searchable.length===0 && <div style={{padding:'20px 18px',color:T.ink4,fontSize:13}}>No matching order.</div>}
+            {searchable.map(o=>(
+              <div key={o.no} onClick={()=>setSel(o)} style={{background:'#fff',borderBottom:`1px solid ${T.line}`,padding:'12px 18px',cursor:'pointer',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <div><div style={{fontSize:14,fontWeight:700}}>{o.customer}</div><div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.no} · {o.phone}</div></div>
+                <span style={{fontSize:12,fontWeight:700,color:T.green}}>+ FLAG</span>
+              </div>
+            ))}
+          </>
+        ) : (
+          <>
+            {open.length>0 && <div style={{padding:'10px 18px 4px',fontSize:11,fontWeight:700,color:T.bad,letterSpacing:1}}>OPEN · {open.length}</div>}
+            {open.map(o=>card(o,'open'))}
+            {resolved.length>0 && <div style={{padding:'12px 18px 4px',fontSize:11,fontWeight:700,color:T.green,letterSpacing:1}}>RESOLVED · {resolved.length}</div>}
+            {resolved.map(o=>card(o,'resolved'))}
+            {flagged.length===0 && <div style={{padding:'34px 18px',textAlign:'center',color:T.ink4}}><div style={{fontSize:34,marginBottom:8}}>✓</div><div style={{fontSize:14,fontWeight:600}}>No service requests</div><div style={{fontSize:12,marginTop:4}}>Search above to flag an order that needs service.</div></div>}
+          </>
+        )}
+        <div style={{height:24}}/>
+      </div>
+      {sel && <ServiceRequestModal order={sel} ctx={ctx} onClose={()=>setSel(null)}/>}
+    </div>
+  );
+}
+
 // ─── Order History ───────────────────────────────────────────
 function HistoryScreen({ctx}) {
   const {orders,mis,nav,loadOrders,loadMis,doUpdateDelivery,doDeleteOrder,user,misLoading} = ctx;
@@ -3294,6 +3552,7 @@ function HistoryScreen({ctx}) {
   const [query,setQuery] = useState('');
   const [salesFilter,setSalesFilter] = useState('');
   const [partialOrder,setPartialOrder] = useState(null);   // order awaiting the partial-delivery picker
+  const [serviceOrder,setServiceOrder] = useState(null);   // order whose service request is being raised/edited
   useEffect(()=>{ loadOrders(); loadMis({silent:true}); },[]);
   // Delivery-status category helpers (Partial Delivery contains "Deliver", so match precisely).
   const st = o => (o.deliveryStatus||'').toLowerCase();
@@ -3387,6 +3646,7 @@ function HistoryScreen({ctx}) {
                 const partialPending = /partial/i.test(o.deliveryStatus||'') ? Math.max(0,(o.items||[]).length-(o.deliveryStatus?(o.deliveredItems||[]).length:0)) : 0;
                 return (
                   <div style={{display:'flex',gap:5,marginTop:4,flexWrap:'wrap'}}>
+                    {o.serviceFlag && <Pill tone={/resolved/i.test(o.serviceStatus||'')?'ok':'bad'} size="sm">⚠ SERVICE {/resolved/i.test(o.serviceStatus||'')?'RESOLVED':'OPEN'}</Pill>}
                     {m && m.committed && !isCompleted(o) && <Pill tone="green" size="sm">MIS ✓ committed {m.totalQty}/{m.totalQty}</Pill>}
                     {m && !m.committed && m.anyCommitted && !isCompleted(o) && <Pill tone="neutral" size="sm">MIS {m.committedQty}/{m.totalQty} committing</Pill>}
                     {partialPending>0 && <Pill tone="warn" size="sm">{partialPending} pending for delivery</Pill>}
@@ -3404,6 +3664,7 @@ function HistoryScreen({ctx}) {
                 </select>
                 <span title="Edit order" onClick={e=>{e.stopPropagation();openOrder(o);}} style={{width:28,height:24,borderRadius:4,background:T.greenSoft,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.edit(T.green,13)}</span>
                 <span title="Order PDF" onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)});nav('pdf');}} style={{width:28,height:24,borderRadius:4,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,13)}</span>
+                <span title={o.serviceFlag?'Service request':'Flag a service request'} onClick={e=>{e.stopPropagation();setServiceOrder(o);}} style={{width:28,height:24,borderRadius:4,background:o.serviceFlag?(/resolved/i.test(o.serviceStatus||'')?T.greenSoft:(T.badSoft||'#fdecec')):T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:13,fontWeight:700,color:o.serviceFlag?(/resolved/i.test(o.serviceStatus||'')?T.green:T.bad):T.ink3}}>⚠</span>
                 <span onClick={e=>{e.stopPropagation();const phone=(o.phone||'').replace(/\D/g,'');if(phone)window.open('https://wa.me/91'+phone);}} style={{width:28,height:24,borderRadius:4,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',13)}</span>
                 {isAdmin&&<span title="Delete order (admin)" onClick={e=>{e.stopPropagation();deleteOrder(o);}} style={{width:28,height:24,borderRadius:4,background:T.badSoft||'#fdecec',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.trash(T.bad,13)}</span>}
               </div>
@@ -3414,6 +3675,7 @@ function HistoryScreen({ctx}) {
         <div style={{height:24}}/>
       </div>
       {partialOrder && <PartialDeliveryModal order={partialOrder} onCancel={()=>setPartialOrder(null)} onConfirm={confirmPartial}/>}
+      {serviceOrder && <ServiceRequestModal order={serviceOrder} ctx={ctx} onClose={()=>setServiceOrder(null)}/>}
       <BottomNav screen="history" nav={nav}/>
     </div>
   );

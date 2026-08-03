@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v46';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v47';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -108,6 +108,7 @@ function doGet(e) {
       case 'nextReceipt':    result = handleNextReceipt();      break;
       case 'getAppSerial':   result = handleGetAppSerial();     break;
       case 'auditLog':       result = handleAuditLog(p);        break;
+      case 'lookupCustomer': result = handleLookupCustomer(p);  break;
       case 'debugPriceList': result = handleDebugPriceList();   break;
       default:               result = { ok: false, error: 'Unknown action: ' + (p.action || '(none)') };
     }
@@ -127,6 +128,7 @@ function doPost(e) {
       case 'saveOrder':       result = handleSaveOrder(body.order);   break;
       case 'updateWON':       result = handleUpdateWON(body);         break;
       case 'updateDelivery':  result = handleUpdateDelivery(body);    break;
+      case 'updateService':   result = handleUpdateService(body);     break;
       case 'deleteOrder':     result = handleDeleteOrder(body);       break;
       case 'setAppSerial':    result = handleSetAppSerial(body);      break;
       default:                result = { ok: false, error: 'Unknown action: ' + body.action };
@@ -1098,6 +1100,14 @@ function handleOrders(p) {
   var cIQty  = colOf(['QTY']);
   var cIDisc = colOf(['ITEM DISCOUNT %','PER ITEM DISCOUNT %','ITEM DISC %']);
   var cISchm = colOf(['DISC ALLOWED']);
+  var cIWh   = colOf(['WAREHOUSE','DELIVERY WAREHOUSE','ITEM WAREHOUSE']);
+  // After-sales service / issue tracking (order-level).
+  var cSvcFlag  = colOf(['SERVICE FLAG','SERVICE REQUIRED','HAS SERVICE REQUEST']);
+  var cSvcIssue = colOf(['SERVICE ISSUE','ISSUE DESCRIPTION','SERVICE ISSUE DESCRIPTION']);
+  var cSvcRaised= colOf(['SERVICE RAISED DATE','ISSUE RAISED DATE','SERVICE REQUEST DATE']);
+  var cSvcOwner = colOf(['SERVICE ASSIGNEE','SERVICE OWNER','SERVICE HANDLED BY']);
+  var cSvcReslv = colOf(['SERVICE RESOLVED DATE','SERVICE RESOLUTION DATE']);
+  var cSvcStat  = colOf(['SERVICE STATUS','SERVICE REQUEST STATUS']);
 
   var lastRow = sh.getLastRow();
   var data    = lastRow >= 2 ? sh.getRange(2, 1, lastRow - 1, ncol).getValues() : [];
@@ -1192,6 +1202,13 @@ function handleOrders(p) {
           { no: sval(r, cMr3n), date: dstr(r, cMr3d), amt: cMr3a >= 0 ? Number(r[cMr3a]) || 0 : 0 },
         ],
         date: sval(r, cDate),
+        // After-sales service / issue tracking.
+        serviceFlag: /^(yes|true|1)$/i.test(sval(r, cSvcFlag)),
+        serviceIssue: sval(r, cSvcIssue),
+        serviceRaisedDate: dstr(r, cSvcRaised),
+        serviceAssignee: sval(r, cSvcOwner),
+        serviceResolvedDate: dstr(r, cSvcReslv),
+        serviceStatus: sval(r, cSvcStat),
         amt: 0,
         items: [],
         _row: i,
@@ -1253,6 +1270,9 @@ function handleOrders(p) {
       other: /other/i.test(schemeStr),
       schemeCode: otherMatch ? (otherMatch[1] || '').trim() : '',
       won: rowWon,
+      // Chosen delivery warehouse (KB / 34S) captured at booking, printed on the
+      // sales copy. Preserved across reopen so the PDF stays correct.
+      whTag: sval(r, cIWh),
     });
   }
 
@@ -1564,6 +1584,20 @@ var CRM_APP_COLUMNS = [
   // generated — after which the sales team can only touch the WON (Godrej SO No),
   // money receipts (no + date) and the delivery status. Admins always edit all.
   ['ORDER STATUS', 'ORDER STAGE', 'DRAFT/SUBMITTED'],
+  // Per-item delivery warehouse chosen for the SALES-copy PDF tag: 'KB' (ZBF11T)
+  // or '34S' (ZBF34S). Auto-set for single-warehouse items; picked by the
+  // salesperson when the item is stocked in both warehouses.
+  ['WAREHOUSE', 'DELIVERY WAREHOUSE', 'ITEM WAREHOUSE'],
+  // After-sales service / issue tracking (order-level, repeated on every row).
+  // SERVICE FLAG = 'Yes' once a service request is raised against an order (e.g. a
+  // product found damaged/defective at installation). The rest capture the issue,
+  // when it was raised, who is handling it, when it was resolved, and its status.
+  ['SERVICE FLAG', 'SERVICE REQUIRED', 'HAS SERVICE REQUEST'],
+  ['SERVICE ISSUE', 'ISSUE DESCRIPTION', 'SERVICE ISSUE DESCRIPTION'],
+  ['SERVICE RAISED DATE', 'ISSUE RAISED DATE', 'SERVICE REQUEST DATE'],
+  ['SERVICE ASSIGNEE', 'SERVICE OWNER', 'SERVICE HANDLED BY'],
+  ['SERVICE RESOLVED DATE', 'SERVICE RESOLUTION DATE'],
+  ['SERVICE STATUS', 'SERVICE REQUEST STATUS'],
 ];
 
 // Appends any missing CRM columns (by header name) to the end of the header row
@@ -1963,6 +1997,16 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['MANUAL ORDER','IS MANUAL ORDER','MANUAL'], o.manualOrder ? 'Yes' : '');
     // Draft / Submitted lifecycle marker (blank for legacy rows).
     put(['ORDER STATUS','ORDER STAGE','DRAFT/SUBMITTED'], o.orderStatus ? String(o.orderStatus).toUpperCase() : '');
+    // Per-item chosen delivery warehouse (KB / 34S) — printed on the sales copy.
+    put(['WAREHOUSE','DELIVERY WAREHOUSE','ITEM WAREHOUSE'], it.whTag || '');
+    // After-sales service / issue tracking — order-level, written on every row so a
+    // row scan (like delivery status) always finds it.
+    put(['SERVICE FLAG','SERVICE REQUIRED','HAS SERVICE REQUEST'], o.serviceFlag ? 'Yes' : '');
+    put(['SERVICE ISSUE','ISSUE DESCRIPTION','SERVICE ISSUE DESCRIPTION'], o.serviceIssue || '');
+    put(['SERVICE RAISED DATE','ISSUE RAISED DATE','SERVICE REQUEST DATE'], o.serviceRaisedDate || '');
+    put(['SERVICE ASSIGNEE','SERVICE OWNER','SERVICE HANDLED BY'], o.serviceAssignee || '');
+    put(['SERVICE RESOLVED DATE','SERVICE RESOLUTION DATE'], o.serviceResolvedDate || '');
+    put(['SERVICE STATUS','SERVICE REQUEST STATUS'], o.serviceStatus || '');
 
     out.push(row);
   }
@@ -2077,6 +2121,146 @@ function handleUpdateDelivery(body) {
   if (!updated) return { ok: false, error: 'Order not found: ' + orderNo };
   _appendLog(updatedBy, orderNo, 'UPDATE_DELIVERY', 'Delivery: ' + status);
   return { ok: true, rows: updated };
+}
+
+// ─── UPDATE SERVICE REQUEST ───────────────────────────────────────────────────
+// Flags (or updates) an after-sales service request on an order — e.g. a product
+// found damaged/defective at installation. Writes the service columns onto every
+// CRM row of the order (matched by ORDER NO or INTERNAL ODER NO), mirroring how the
+// delivery status is stored, so the flag survives a re-save and shows on reopen.
+function handleUpdateService(body) {
+  var orderNo    = String(body.orderNo    || '').trim();
+  var internalNo = Number(body.internalNo || 0);
+  var updatedBy  = String(body.updatedBy  || '');
+  if (!orderNo && !internalNo) return { ok: false, error: 'Order identifier is required.' };
+
+  var flagOn   = /^(yes|true|1)$/i.test(String(body.serviceFlag)) || !!body.serviceFlag;
+  var issue    = String(body.serviceIssue || '').trim();
+  var raised   = String(body.serviceRaisedDate || '').trim();
+  var assignee = String(body.serviceAssignee || '').trim();
+  var resolved = String(body.serviceResolvedDate || '').trim();
+  var status   = String(body.serviceStatus || '').trim();
+  // Sensible defaults: raising a request with no explicit status/date fills them in.
+  if (flagOn && !status)  status = resolved ? 'Resolved' : 'Open';
+  if (flagOn && !raised)  raised = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  if (!flagOn) { issue = ''; raised = ''; assignee = ''; resolved = ''; status = ''; }
+
+  var sh;
+  try { sh = _openCRMSheet(); }
+  catch (e) { return { ok: false, error: e.message }; }
+  try { _ensureCrmColumns(sh); } catch (e) {}
+
+  var C = _crmCols(sh), colOf = C.colOf, ncol = C.header.length;
+  var cOrderNo = colOf(CRM_H.ORDER_NO);
+  var cIntNo   = colOf(CRM_H.INT_NO);
+  var cFlag  = colOf(['SERVICE FLAG','SERVICE REQUIRED','HAS SERVICE REQUEST']);
+  var cIssue = colOf(['SERVICE ISSUE','ISSUE DESCRIPTION','SERVICE ISSUE DESCRIPTION']);
+  var cRais  = colOf(['SERVICE RAISED DATE','ISSUE RAISED DATE','SERVICE REQUEST DATE']);
+  var cOwn   = colOf(['SERVICE ASSIGNEE','SERVICE OWNER','SERVICE HANDLED BY']);
+  var cResl  = colOf(['SERVICE RESOLVED DATE','SERVICE RESOLUTION DATE']);
+  var cStat  = colOf(['SERVICE STATUS','SERVICE REQUEST STATUS']);
+  if (cFlag < 0) return { ok: false, error: 'Service columns are missing from the CRM sheet.' };
+
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return { ok: false, error: 'Order not found: ' + orderNo };
+  var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
+
+  var updated = 0;
+  for (var i = 0; i < data.length; i++) {
+    var matchOrder = cOrderNo >= 0 && orderNo    && String(data[i][cOrderNo] || '').trim() === orderNo;
+    var matchInt   = cIntNo   >= 0 && internalNo && Number(data[i][cIntNo]) === internalNo;
+    if (!matchOrder && !matchInt) continue;
+    var rowN = i + 2;
+    sh.getRange(rowN, cFlag + 1).setValue(flagOn ? 'Yes' : '');
+    if (cIssue >= 0) sh.getRange(rowN, cIssue + 1).setValue(issue);
+    if (cRais  >= 0) sh.getRange(rowN, cRais  + 1).setValue(raised);
+    if (cOwn   >= 0) sh.getRange(rowN, cOwn   + 1).setValue(assignee);
+    if (cResl  >= 0) sh.getRange(rowN, cResl  + 1).setValue(resolved);
+    if (cStat  >= 0) sh.getRange(rowN, cStat  + 1).setValue(status);
+    updated++;
+  }
+  if (!updated) return { ok: false, error: 'Order not found: ' + orderNo };
+  _appendLog(updatedBy, orderNo, 'UPDATE_SERVICE', (flagOn ? (status || 'Open') : 'Cleared') + (issue ? ' · ' + issue.slice(0, 60) : ''));
+  return { ok: true, rows: updated };
+}
+
+// ─── LOOKUP CUSTOMER BY PHONE ─────────────────────────────────────────────────
+// When a new order is being booked, the app sends the customer's mobile number
+// here. If that number already exists in the CRM sheet (a returning customer, no
+// matter whether it's their 2nd, 3rd … order), we return the profile last recorded
+// for them so the order form can pre-fill the name, address and other reusable
+// details instead of re-typing them. `orderCount` = how many distinct past orders
+// that number has, so the app can show "returning customer · N previous orders".
+function handleLookupCustomer(p) {
+  var phone = _digits10(p && p.phone);
+  if (!phone) return { ok: true, found: false };
+
+  var sh;
+  try { sh = _openCRMSheet(); }
+  catch (e) { return { ok: false, error: e.message }; }
+
+  var C = _crmCols(sh), colOf = C.colOf, ncol = C.header.length;
+  var cPhone   = colOf(CRM_H.PHONE);
+  var cAlt     = colOf(['ALT PHONE','ALTERNATE PHONE','ALT CONTACT NUMBER','ALTERNATE CONTACT NUMBER']);
+  if (cPhone < 0) return { ok: true, found: false };
+  var cOrderNo = colOf(CRM_H.ORDER_NO);
+  var cIntNo   = colOf(CRM_H.INT_NO);
+  var cCust    = colOf(CRM_H.CUSTOMER);
+  var cEmail   = colOf(['EMAIL ADDRESS']);
+  var cGst     = colOf(['CUSTOMER GST NO','CUSTOMER GSTIN','GST NO','GSTIN']);
+  var cBill    = colOf(['BILLING ADDRESS']);
+  var cDelv    = colOf(['DELIVERY ADDRESS']);
+  var cPincode = colOf(['PINCODE','PIN CODE','DELIVERY PINCODE','DELIVERY PIN CODE']);
+  var cFloor   = colOf(['FLOOR']);
+  var cLandmk  = colOf(['LANDMARK']);
+  var cAltP    = cAlt;
+  var cDob     = colOf(['DATE OF BIRTH','DOB']);
+  var cAnniv   = colOf(['MARRIAGE ANNIVERSARY','MARRIAGE ANNIVERSARY DATE','ANNIVERSARY']);
+
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return { ok: true, found: false };
+  var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
+
+  function sv(r, ci) { return ci >= 0 ? String(r[ci] || '').trim() : ''; }
+  var latest = null, orders = {};
+  for (var i = 0; i < data.length; i++) {
+    var r = data[i];
+    var rowPhone = _digits10(r[cPhone]);
+    var rowAlt   = cAltP >= 0 ? _digits10(r[cAltP]) : '';
+    if (rowPhone !== phone && rowAlt !== phone) continue;
+    // Count distinct past orders for this number.
+    var key = (cOrderNo >= 0 ? String(r[cOrderNo] || '') : '') + '|' + (cIntNo >= 0 ? String(r[cIntNo] || '') : '');
+    orders[key] = true;
+    // Keep the most recent row's profile (rows are appended, so higher index = newer).
+    var name = sv(r, cCust);
+    if (name) latest = r;
+  }
+  if (!latest) return { ok: true, found: false };
+
+  return {
+    ok: true, found: true,
+    orderCount: Object.keys(orders).length,
+    customer: sv(latest, cCust),
+    phone: phone,
+    alt: sv(latest, cAltP),
+    email: sv(latest, cEmail),
+    gstNumber: sv(latest, cGst),
+    billing: sv(latest, cBill),
+    delivery: sv(latest, cDelv),
+    pincode: sv(latest, cPincode),
+    floor: sv(latest, cFloor),
+    landmark: sv(latest, cLandmk),
+    dob: sv(latest, cDob),
+    anniversary: sv(latest, cAnniv),
+  };
+}
+
+// Normalise a phone value to its last 10 digits (drops +91 / spaces / dashes) so
+// lookups match regardless of how the number was originally typed.
+function _digits10(v) {
+  var d = String(v == null ? '' : v).replace(/\D/g, '');
+  if (d.length > 10) d = d.slice(-10);
+  return d.length === 10 ? d : '';
 }
 
 // ─── DELETE ORDER (admin only) ────────────────────────────────────────────────
