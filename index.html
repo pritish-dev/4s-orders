@@ -250,13 +250,15 @@ async function apiPost(body, tries = 3) {
 // ═══════════════════════════════════════════════════════════
 const OPS_SHEET_ID = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 
-async function loadPriceListItems(forceFresh = false) {
+async function loadPriceListItems(forceFresh = false, skipLocalCache = false) {
   const CACHE_KEY = '4s_price_items_v9';
   const CACHE_TS  = '4s_price_items_v9_ts';
   const AGE_MS    = 6 * 60 * 60 * 1000; // 6 hours
 
-  // Serve from the local cache if fresh (skipped on a manual Sync)
-  if (!forceFresh) {
+  // Serve from the local cache if fresh (skipped on a manual Sync, and on a
+  // background reopen-sync where we want whatever another user last pushed to
+  // the shared server cache — cheap because the server serves its own cache).
+  if (!forceFresh && !skipLocalCache) {
     const cached   = localStorage.getItem(CACHE_KEY);
     const cachedAt = localStorage.getItem(CACHE_TS);
     if (cached && cachedAt && Date.now() - Number(cachedAt) < AGE_MS) {
@@ -306,6 +308,12 @@ async function loadPriceListItems(forceFresh = false) {
 
   localStorage.setItem(CACHE_KEY, JSON.stringify(res.items));
   localStorage.setItem(CACHE_TS,  String(Date.now()));
+  // Product Catalog (photos + specs), stored separately and looked up by catKey in
+  // Browse Items. Kept out of the items array so the per-SKU payload stays lean.
+  try {
+    localStorage.setItem('4s_catalog_v1', JSON.stringify(res.catalog || {}));
+    localStorage.setItem('4s_catalog_stats_v1', JSON.stringify(res.catalogStats || {}));
+  } catch (e) {}
   return res.items;
 }
 
@@ -457,6 +465,22 @@ function orderTotals(o) {
   const earnest       = paidInFull ? total : earnestRaw;
   const balance       = total - earnest;
   return { itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance, manual: !!o.manualOrder };
+}
+
+// Running payment ledger for an order: the booking advance (earnest = money
+// receipt 1) plus any later part-payments recorded as amounts on money receipts
+// 2 & 3. This is what the Collectibles view and the edit screen use so the
+// outstanding balance keeps shrinking as the customer pays over time. Backward
+// compatible: with no later receipt amounts, received == earnest and balance ==
+// total − earnest, exactly the booking-time figure the PDF still prints.
+function orderReceived(o) {
+  const { total } = orderTotals(o);
+  const later   = (o.moneyReceipts || []).slice(1).reduce((s, mr) => s + (Number(mr && mr.amt) || 0), 0);
+  let received  = (Number(o.earnest) || 0) + later;
+  if (received > total) received = total;            // never record more than the bill
+  let balance = total - received;
+  if (balance > 0 && balance <= 2) { received = total; balance = 0; }   // ₹2 rounding tolerance
+  return { total, received, balance };
 }
 
 // ─── ROLE-BASED ACCESS ──────────────────────────────────────
@@ -648,12 +672,36 @@ function StockChip({branch,count,low}) {
   return <span style={{display:'inline-flex',alignItems:'center',borderRadius:4,overflow:'hidden',border:`1px solid ${bdc}`,fontFamily:T.mono,fontSize:10,fontWeight:600,height:18}}><span style={{background:T.ink,color:'#fff',padding:'0 5px',height:'100%',display:'inline-flex',alignItems:'center',letterSpacing:.5}}>{branch}</span><span style={{background:bg,color:fg,padding:'0 6px',height:'100%',display:'inline-flex',alignItems:'center'}}>{count}</span></span>;
 }
 
-function SectionHead({n,label,action,onAction}) {
-  return <div style={{padding:'14px 16px 6px',display:'flex',alignItems:'baseline',justifyContent:'space-between',background:T.paper}}><div style={{display:'flex',alignItems:'baseline',gap:8}}><span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:700}}>{n}</span><span style={{fontSize:12,fontWeight:700,color:T.ink2,letterSpacing:1,textTransform:'uppercase'}}>{label}</span></div>{action&&<span onClick={onAction} style={{fontSize:11,color:T.green,fontWeight:700,cursor:'pointer'}}>{action}</span>}</div>;
+function SectionHead({n,label,action,onAction,id}) {
+  // scrollMarginTop keeps the heading clear of the sticky progress bar when the
+  // validation summary / progress chips scroll a section into view.
+  return <div id={id} style={{padding:'14px 16px 6px',display:'flex',alignItems:'baseline',justifyContent:'space-between',background:T.paper,scrollMarginTop:52}}><div style={{display:'flex',alignItems:'baseline',gap:8}}><span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:700}}>{n}</span><span style={{fontSize:12,fontWeight:700,color:T.ink2,letterSpacing:1,textTransform:'uppercase'}}>{label}</span></div>{action&&<span onClick={onAction} style={{fontSize:11,color:T.green,fontWeight:700,cursor:'pointer'}}>{action}</span>}</div>;
 }
 
 function Spinner({size=20,color=T.green}) {
   return <div style={{width:size,height:size,border:`2px solid ${color}22`,borderTopColor:color,borderRadius:'50%',animation:'spin .7s linear infinite',flexShrink:0}}/>;
+}
+
+// Shimmering placeholder bar — used to build skeleton screens so the app looks
+// alive while data loads, instead of a blank pane or a lone spinner.
+function Skeleton({h=14,w='100%',r=6,mb=0,style}) {
+  return <div style={{height:h,width:w,borderRadius:r,marginBottom:mb,background:`linear-gradient(90deg,${T.paper2} 25%,${T.line} 37%,${T.paper2} 63%)`,backgroundSize:'400% 100%',animation:'shimmer 1.4s ease infinite',...style}}/>;
+}
+// One skeleton row shaped like an order card in the history / recent-orders lists.
+function SkeletonOrderRow() {
+  return (
+    <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`,padding:'12px 18px',display:'grid',gridTemplateColumns:'1fr auto',gap:10,alignItems:'center'}}>
+      <div style={{minWidth:0}}>
+        <Skeleton h={11} w={90} mb={7}/>
+        <Skeleton h={14} w={'60%'} mb={6}/>
+        <Skeleton h={10} w={110}/>
+      </div>
+      <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:8}}>
+        <Skeleton h={16} w={70}/>
+        <Skeleton h={18} w={90} r={99}/>
+      </div>
+    </div>
+  );
 }
 
 function Toast({msg,type='ok',onClose}) {
@@ -1356,7 +1404,7 @@ const BLANK_ORDER = () => ({
   // part of the PDF's "Order No. (Sl / Receipt)" field.
   orderFormReceiptNo:'',
   // Up to three money-receipt no + date pairs (updatable over time)
-  receiptNo:'', moneyReceipts:[{no:'',date:''},{no:'',date:''},{no:'',date:''}],
+  receiptNo:'', moneyReceipts:[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}],
   // Edit-lock lifecycle: '' (never saved) → 'draft' (Save Draft) → 'submitted'
   // (finalised, PDF generated). Drives who may edit the order after saving.
   orderStatus:'',
@@ -1556,11 +1604,58 @@ function buildNotifications(orders, mis) {
         });
       }
     }
+    // 3) Follow-up due — the follow-up date (auto-set 2 days before delivery, or
+    // set by hand) has arrived or passed and the order isn't delivered yet. Nudges
+    // the salesperson to call/WhatsApp the customer before delivery.
+    const fuIso = (o.followUp && o.followUp.length >= 8) ? o.followUp : '';
+    const fdd = daysFromToday(fuIso);
+    if (fuIso && fdd != null && fdd <= 0 && !isDeliveryDone(o)) {
+      out.push({
+        id: 'followup|' + (o.no || o.won) + '|' + fuIso,
+        kind: 'followup', tone: fdd < 0 ? 'bad' : 'warn', orderNo: o.no, order: o,
+        title: fdd === 0 ? 'Follow-up due today' : 'Follow-up overdue by ' + Math.abs(fdd) + ' day' + (Math.abs(fdd) > 1 ? 's' : ''),
+        body: (o.customer || 'Order') + ' · call/WhatsApp' + (o.plannedDly ? ' before delivery ' + prettyDate(o.plannedDly) : ''),
+        sortDate: fuIso,
+      });
+    }
   });
-  // Overdue first, then soonest; committed notices interleave by date.
-  const rank = { overdue: 0, soon: 1, mis: 2 };
+  // Overdue first, then follow-ups, then soonest; committed notices interleave by date.
+  const rank = { overdue: 0, followup: 1, soon: 2, mis: 3 };
   out.sort((a, b) => (rank[a.kind] - rank[b.kind]) || String(a.sortDate).localeCompare(String(b.sortDate)));
   return out;
+}
+
+// ── Notification chime ───────────────────────────────────────────────────────
+// A short two-tone bell played via the Web Audio API (no asset needed) whenever
+// a new notification arrives. Browsers require a prior user gesture before audio
+// can play, so we lazily create/resume the AudioContext on the first tap.
+let _audioCtx = null;
+function _getAudioCtx() {
+  try {
+    if (!_audioCtx) { const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return null; _audioCtx = new AC(); }
+    if (_audioCtx.state === 'suspended') _audioCtx.resume();
+    return _audioCtx;
+  } catch (e) { return null; }
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('pointerdown', () => { _getAudioCtx(); }, { once: true });
+}
+function playBell() {
+  const ctx = _getAudioCtx();
+  if (!ctx) return;
+  try {
+    const now = ctx.currentTime;
+    [ [880, 0], [1174, 0.14] ].forEach(([freq, dt]) => {
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.type = 'sine'; osc.frequency.value = freq;
+      osc.connect(gain); gain.connect(ctx.destination);
+      const t = now + dt;
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.35, t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.45);
+      osc.start(t); osc.stop(t + 0.5);
+    });
+  } catch (e) {}
 }
 
 function App() {
@@ -1621,10 +1716,11 @@ function App() {
     return () => window.removeEventListener('popstate', handler);
   }, [popScreen]);
 
-  // Restore session. The backend URL is baked in + pinned on every launch, so the
-  // app never needs the "setup" screen — a signed-out user always lands on login.
+  // Restore session
   useEffect(() => {
     const saved = localStorage.getItem('4s_user');
+    // The backend URL is always pre-configured in the background, so we never
+    // route to a setup/URL screen — signed-in users go home, everyone else logs in.
     if (saved) {
       try { setUser(JSON.parse(saved)); setScreen('home'); }
       catch { setScreen('login'); }
@@ -1656,6 +1752,39 @@ function App() {
       // slow background refresh. Only surface an error when there's nothing to show.
       .catch(e => { if (!hadCachedPL) setPriceSyncError(e.message); });
     loadMis({ silent: true });
+  }, [user]);
+
+  // Re-sync shared data every time the app is reopened / brought to the
+  // foreground. All devices read the same backend, so whatever price list,
+  // stock, MIS or orders ANY user last synced shows up for everyone on open —
+  // the manual Sync buttons stay available for an on-demand refresh.
+  useEffect(() => {
+    if (!user) return;
+    let last = 0;
+    const resync = () => {
+      if (document.visibilityState && document.visibilityState !== 'visible') return;
+      const now = Date.now();
+      if (now - last < 15000) return;   // debounce rapid focus/visibility churn
+      last = now;
+      syncStock({ silent: true });
+      loadMis({ silent: true });
+      loadOrders();
+      loadPriceListItems(false, true)   // skip local cache, use shared server cache
+        .then(pi => {
+          if (pi && pi.length) {
+            setPriceItems(pi);
+            const ts = localStorage.getItem('4s_price_items_v9_ts');
+            if (ts) setPriceSyncedAt(new Date(Number(ts)).toISOString());
+          }
+        })
+        .catch(() => {});
+    };
+    document.addEventListener('visibilitychange', resync);
+    window.addEventListener('focus', resync);
+    return () => {
+      document.removeEventListener('visibilitychange', resync);
+      window.removeEventListener('focus', resync);
+    };
   }, [user]);
 
   // Restore an unsaved order draft once, right after login
@@ -1805,7 +1934,7 @@ function App() {
   async function doSaveOrder(draft) {
     setLoading(true);
     try {
-      const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total } });
+      const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total, by: user?.code, byName: user?.name } });
       if (res.ok) {
         const saved = {...draft, no: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo || draft.orderFormReceiptNo};
         setOrder(saved);
@@ -1834,7 +1963,7 @@ function App() {
     const remaining = [];
     for (const draft of q) {
       try {
-        const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total } });
+        const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total, by: draft.by||user?.code, byName: draft.byName||user?.name } });
         if (!res || !res.ok) remaining.push(draft);
       } catch { remaining.push(draft); }
     }
@@ -1918,6 +2047,14 @@ function App() {
     localStorage.setItem('4s_notif_seen', JSON.stringify(ids));
   }, [orders, mis]);
 
+  // Ring the bell when the unread count goes up (a genuinely new alert). The
+  // initial value is skipped so it doesn't chime just for pre-existing alerts.
+  const prevUnreadRef = useRef(null);
+  useEffect(() => {
+    if (prevUnreadRef.current !== null && unreadCount > prevUnreadRef.current) playBell();
+    prevUnreadRef.current = unreadCount;
+  }, [unreadCount]);
+
   // Fire a native (OS) notification once per new event, so the sales team is
   // alerted even when the app is only in the background. Guarded by permission.
   const pushedRef = useRef(null);
@@ -1958,6 +2095,8 @@ function App() {
     won:     <WONUpdateScreen ctx={ctx}/>,
     notifs:  <NotificationsScreen ctx={ctx}/>,
     settings:<SettingsScreen ctx={ctx}/>,
+    reports: <ReportsScreen ctx={ctx}/>,
+    collect: <CollectiblesScreen ctx={ctx}/>,
   };
 
   return (
@@ -1978,42 +2117,9 @@ function LoadingScreen() {
 }
 
 // ─── Setup ──────────────────────────────────────────────────
-function SetupScreen({ctx}) {
-  const [url,setUrl] = useState(localStorage.getItem('4s_api_url')||'');
-  function save() {
-    if (!url.trim()) return ctx.showToast('Paste the Apps Script URL first','bad');
-    localStorage.setItem('4s_api_url', url.trim());
-    ctx.showToast('API URL saved ✓');
-    ctx.nav('login');
-  }
-  return (
-    <div className="screen" style={{padding:'40px 24px',background:T.paper}}>
-      <FSLogo size={36}/>
-      <h1 style={{fontSize:28,fontWeight:700,letterSpacing:-1,lineHeight:1.1,marginTop:24,color:T.ink}}>First-time setup</h1>
-      <p style={{fontSize:13,color:T.ink3,lineHeight:1.6,marginTop:8}}>Paste your Google Apps Script Web App URL below. You only need to do this once per device.</p>
-      <div style={{marginTop:24,background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,overflow:'hidden'}}>
-        <div style={{padding:'12px 14px',borderBottom:`1px solid ${T.line}`}}>
-          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.8,textTransform:'uppercase',marginBottom:6}}>APPS SCRIPT URL</div>
-          <input value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/…/exec" style={{width:'100%',border:'none',outline:'none',fontSize:13,fontFamily:T.mono,color:T.ink,padding:0,background:'transparent'}}/>
-        </div>
-      </div>
-      <div style={{marginTop:16,padding:14,background:T.greenSoft,border:`1px solid ${T.greenLine}`,borderRadius:8,fontSize:12,color:T.ink3,lineHeight:1.6}}>
-        <b style={{color:T.green}}>How to get this URL:</b><br/>
-        1. Open script.google.com → paste Code.gs<br/>
-        2. Run → ensureSheets (one-time)<br/>
-        3. Deploy → New deployment → Web app<br/>
-        4. Execute as: Me | Anyone can access<br/>
-        5. Copy the URL here
-      </div>
-      <div style={{marginTop:20}}>
-        <Btn primary full size="lg" onClick={save}>Save & Continue →</Btn>
-      </div>
-      <div style={{marginTop:12,textAlign:'center'}}>
-        <span onClick={()=>ctx.nav('login')} style={{fontSize:12,color:T.ink4,cursor:'pointer',textDecoration:'underline'}}>Skip (use existing URL)</span>
-      </div>
-    </div>
-  );
-}
+// The first-time URL-setup screen was removed: the backend URL is baked in and
+// enforced in the background, so users are never asked for it. The router maps
+// any stray 'setup' route to the Login screen.
 
 // ─── Login ──────────────────────────────────────────────────
 function LoginScreen({ctx}) {
@@ -2098,9 +2204,226 @@ function LoginScreen({ctx}) {
   );
 }
 
+// ─── Reports / Sales summary ─────────────────────────────────
+// Booked orders grouped by day and by month, from the already-loaded orders.
+// Order date is "dd.mm.yy"; drafts are excluded from the counts.
+const _MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function _fmtAmt(n){ n = n||0; return n>99999 ? ('₹'+(n/100000).toFixed(2)+'L') : ('₹'+n.toLocaleString('en-IN')); }
+// "dd.mm.yy" → sortable/comparable ISO "20yy-mm-dd" (matches <input type=date> values).
+function _toISO(dmy){ const p = String(dmy||'').split('.'); return p.length===3 ? ('20'+p[2]+'-'+p[1]+'-'+p[0]) : ''; }
+function ReportsScreen({ctx}) {
+  const {orders,nav} = ctx;
+  const [from,setFrom]     = useState('');
+  const [to,setTo]         = useState('');
+  const [preset,setPreset] = useState('all');
+
+  const _pad = n => String(n).padStart(2,'0');
+  const _iso = d => d.getFullYear()+'-'+_pad(d.getMonth()+1)+'-'+_pad(d.getDate());
+  function applyPreset(id){
+    const now = new Date(), y = now.getFullYear(), m = now.getMonth();
+    setPreset(id);
+    if (id==='all')       { setFrom(''); setTo(''); }
+    else if (id==='month'){ setFrom(_iso(new Date(y,m,1)));  setTo(_iso(now)); }
+    else if (id==='year') { setFrom(_iso(new Date(y,0,1)));  setTo(_iso(now)); }
+  }
+
+  const booked = (orders||[]).filter(o => o && o.status !== 'draft').filter(o => {
+    const iso = _toISO(o.date);
+    if (!iso) return !from && !to;                 // undated: only when no range set
+    if (from && iso < from) return false;
+    if (to   && iso > to)   return false;
+    return true;
+  });
+  const totalCount = booked.length;
+  const totalAmt   = booked.reduce((s,o)=>s+(o.amt||0),0);
+
+  const monthMap = {}, dayMap = {}, salesMap = {}, branchMap = {};
+  booked.forEach(o => {
+    const p = String(o.date||'').split('.');       // [dd, mm, yy]
+    if (p.length === 3) {
+      const mk = p[2] + '.' + p[1];                // yy.mm — sorts chronologically
+      if (!monthMap[mk]) monthMap[mk] = { count:0, amt:0, label:(_MONTHS[(parseInt(p[1],10)||1)-1]||p[1])+' 20'+p[2] };
+      monthMap[mk].count++; monthMap[mk].amt += (o.amt||0);
+      const dk = p[2] + '.' + p[1] + '.' + p[0];
+      if (!dayMap[dk]) dayMap[dk] = { count:0, amt:0, label:o.date };
+      dayMap[dk].count++; dayMap[dk].amt += (o.amt||0);
+    }
+    const sp = (o.salesExec||'').trim() || '(unassigned)';
+    if (!salesMap[sp]) salesMap[sp] = { count:0, amt:0, label:sp };
+    salesMap[sp].count++; salesMap[sp].amt += (o.amt||0);
+    const br = (o.branch||'').trim();              // only present if the sheet carries it
+    if (br) { if (!branchMap[br]) branchMap[br] = { count:0, amt:0, label:br }; branchMap[br].count++; branchMap[br].amt += (o.amt||0); }
+  });
+  const byAmt  = (a,b)=> b[1].amt - a[1].amt;
+  const months = Object.entries(monthMap).sort((a,b)=>b[0].localeCompare(a[0]));
+  const days   = Object.entries(dayMap).sort((a,b)=>b[0].localeCompare(a[0])).slice(0, 60);
+  const sales  = Object.entries(salesMap).sort(byAmt);
+  const branches = Object.entries(branchMap).sort(byAmt);
+
+  const Row = ({label, sub, count, amt}) => (
+    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 14px',borderBottom:`1px solid ${T.line}`}}>
+      <div><div style={{fontSize:13,fontWeight:700,color:T.ink}}>{label}</div>{sub?<div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:1}}>{sub}</div>:null}</div>
+      <div style={{textAlign:'right'}}>
+        <div style={{fontSize:14,fontFamily:T.mono,fontWeight:700,color:T.ink}}>{_fmtAmt(amt)}</div>
+        <div style={{fontSize:10,color:T.ink4,marginTop:1}}>{count} order{count===1?'':'s'}</div>
+      </div>
+    </div>
+  );
+  const Section = ({title, rows, empty}) => (
+    <>
+      <div style={{padding:'14px 18px 6px',fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:1.2,textTransform:'uppercase'}}>{title}</div>
+      <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`}}>
+        {rows.map(([k,v]) => <Row key={k} label={v.label} count={v.count} amt={v.amt}/>)}
+        {rows.length===0 && <div style={{padding:20,textAlign:'center',fontSize:12,color:T.ink4}}>{empty||'No booked orders in this range.'}</div>}
+      </div>
+    </>
+  );
+  const chip = (id,label) => (
+    <span onClick={()=>applyPreset(id)} style={{padding:'6px 12px',borderRadius:99,background:preset===id?T.ink:'#fff',color:preset===id?'#fff':T.ink2,border:`1px solid ${preset===id?T.ink:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0}}>{label}</span>
+  );
+
+  return (
+    <div className="screen">
+      <div style={{flexShrink:0}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 8px'}}>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+          <div style={{flex:1}}>
+            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>SALES SUMMARY</div>
+            <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Orders &amp; amount</div>
+          </div>
+        </div>
+        {/* Date-range filter */}
+        <div style={{display:'flex',gap:6,padding:'2px 14px 8px',overflowX:'auto'}}>
+          {chip('all','All time')}{chip('month','This month')}{chip('year','This year')}{chip('custom','Custom')}
+        </div>
+        {preset==='custom' && (
+          <div style={{display:'flex',gap:8,alignItems:'center',padding:'0 14px 10px'}}>
+            <input type="date" value={from} onChange={e=>{setFrom(e.target.value);}} style={{flex:1,border:`1px solid ${T.line}`,borderRadius:6,padding:'8px 10px',fontFamily:T.mono,fontSize:12,color:T.ink,background:'#fff'}}/>
+            <span style={{fontSize:12,color:T.ink4}}>to</span>
+            <input type="date" value={to} onChange={e=>{setTo(e.target.value);}} style={{flex:1,border:`1px solid ${T.line}`,borderRadius:6,padding:'8px 10px',fontFamily:T.mono,fontSize:12,color:T.ink,background:'#fff'}}/>
+          </div>
+        )}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,padding:'2px 14px 12px'}}>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TOTAL ORDERS</div>
+            <div style={{fontSize:26,fontWeight:800,letterSpacing:-1,color:T.ink,lineHeight:1.1,marginTop:4}}>{totalCount}</div>
+          </div>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TOTAL AMOUNT</div>
+            <div style={{fontSize:26,fontWeight:800,letterSpacing:-1,color:T.green,lineHeight:1.1,marginTop:4}}>{_fmtAmt(totalAmt)}</div>
+          </div>
+        </div>
+      </div>
+      <div className="scroll">
+        <Section title="By salesperson" rows={sales}/>
+        {branches.length>0 && <Section title="By branch" rows={branches}/>}
+        <Section title="Month-wise" rows={months}/>
+        <Section title="Day-wise (latest 60)" rows={days}/>
+        <div style={{height:24}}/>
+      </div>
+      <BottomNav screen="home" nav={nav}/>
+    </div>
+  );
+}
+
+// ─── Collectibles / Outstanding payments ─────────────────────
+// Every booked order that still has a balance due, newest-largest first, with the
+// running total to collect. Uses orderReceived() so part-payments recorded on
+// receipts 2 & 3 shrink the balance. Tap a row to open the order and record a
+// payment; the WhatsApp icon sends the customer a balance reminder.
+function CollectiblesScreen({ctx}) {
+  const {orders,nav,loadOrders,loading,setOrder} = ctx;
+  const [salesFilter,setSalesFilter] = useState('');
+  useEffect(()=>{ loadOrders(); },[]);
+
+  const due = (orders||[])
+    .filter(o=>o && o.status!=='draft')
+    .map(o=>({o, ...orderReceived(o)}))
+    .filter(x=>x.balance>2);
+  const salespeople = [...new Set(due.map(x=>(x.o.salesExec||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+  const shown = due
+    .filter(x=>!salesFilter || (x.o.salesExec||'').trim().toLowerCase()===salesFilter.toLowerCase())
+    .sort((a,b)=>b.balance-a.balance);
+  const totalOutstanding = shown.reduce((s,x)=>s+x.balance,0);
+
+  const openOrder = o => { setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)}); nav('order'); };
+  function remind(o, balance){
+    const msg = `Dear ${o.customer||'Customer'},\n\nGentle reminder from 4S Interiors about your order *#${o.no||'—'}*.\n\n*Outstanding balance:* ₹${balance.toLocaleString('en-IN')}\n\nKindly arrange the payment at your convenience. For any help call 0674-2744906.\n\nThank you,\n4S Interiors, Patia, Bhubaneswar\n_Authorised Dealer — Godrej Interio_`;
+    const phone = (o.phone||'').replace(/\D/g,'');
+    window.open('https://wa.me/'+(phone?'91'+phone:'')+'?text='+encodeURIComponent(msg),'_blank');
+  }
+
+  return (
+    <div className="screen">
+      <div style={{flexShrink:0}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 8px'}}>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+          <div style={{flex:1}}>
+            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>COLLECTIBLES</div>
+            <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Outstanding payments</div>
+          </div>
+          <button onClick={()=>loadOrders()} title="Refresh" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.refresh(T.ink2,15)}</button>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1.3fr 1fr',gap:8,padding:'2px 14px 10px'}}>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TOTAL TO COLLECT</div>
+            <div style={{fontSize:24,fontWeight:800,letterSpacing:-1,color:totalOutstanding>0?T.bad:T.ok,lineHeight:1.1,marginTop:4}}>₹{Math.round(totalOutstanding).toLocaleString('en-IN')}</div>
+          </div>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>ORDERS</div>
+            <div style={{fontSize:24,fontWeight:800,letterSpacing:-1,color:T.ink,lineHeight:1.1,marginTop:4}}>{shown.length}</div>
+          </div>
+        </div>
+        {salespeople.length>0 && (
+          <div style={{padding:'0 14px 8px',display:'flex',gap:6,overflowX:'auto',alignItems:'center'}}>
+            <span style={{fontSize:11,color:T.ink4,fontWeight:700,flexShrink:0}}>SALES</span>
+            <span onClick={()=>setSalesFilter('')} style={{padding:'5px 10px',borderRadius:99,background:!salesFilter?T.green:'#fff',color:!salesFilter?'#fff':T.ink2,border:`1px solid ${!salesFilter?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0}}>All</span>
+            {salespeople.map(sp=>(
+              <span key={sp} onClick={()=>setSalesFilter(sp)} style={{padding:'5px 10px',borderRadius:99,background:salesFilter===sp?T.green:'#fff',color:salesFilter===sp?'#fff':T.ink2,border:`1px solid ${salesFilter===sp?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>{sp}</span>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="scroll">
+        {loading && orders.length===0 && [0,1,2,3].map(i=><SkeletonOrderRow key={i}/>)}
+        {shown.map(({o,total,received,balance})=>(
+          <div key={o.no} style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`,padding:'12px 18px',display:'grid',gridTemplateColumns:'1fr auto',gap:10,cursor:'pointer'}} onClick={()=>openOrder(o)}>
+            <div style={{minWidth:0}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3}}>
+                <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
+                {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:null}
+              </div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{o.customer}</div>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.salesExec}{o.plannedDly?' · dly '+prettyDate(o.plannedDly):''}</div>
+              <div style={{fontSize:11,color:T.ink3,marginTop:3,fontFamily:T.mono}}>Bill ₹{Math.round(total).toLocaleString('en-IN')} · Paid ₹{Math.round(received).toLocaleString('en-IN')}</div>
+            </div>
+            <div style={{textAlign:'right',display:'flex',flexDirection:'column',alignItems:'flex-end',gap:6}}>
+              <div>
+                <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.6}}>BALANCE</div>
+                <div style={{fontSize:17,fontFamily:T.mono,fontWeight:800,color:T.bad,letterSpacing:-0.4}}>₹{Math.round(balance).toLocaleString('en-IN')}</div>
+              </div>
+              <span title="Send balance reminder on WhatsApp" onClick={e=>{e.stopPropagation();remind(o,Math.round(balance));}} style={{width:32,height:28,borderRadius:5,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',14)}</span>
+            </div>
+          </div>
+        ))}
+        {!loading && shown.length===0 && (
+          <div style={{padding:'48px 24px',textAlign:'center'}}>
+            <div style={{width:52,height:52,borderRadius:14,background:T.greenSoft,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12}}><span style={{fontWeight:800,fontSize:22,color:T.green}}>₹</span></div>
+            <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>All clear</div>
+            <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>{salesFilter?'No balance due for this salesperson.':'No outstanding balances right now.'}</div>
+          </div>
+        )}
+        <div style={{height:24}}/>
+      </div>
+      <BottomNav screen="home" nav={nav}/>
+    </div>
+  );
+}
+
 // ─── Home ───────────────────────────────────────────────────
 function HomeScreen({ctx}) {
   const {user,orders,syncedAt,priceItems,priceSyncError,nav,loadOrders,syncPriceList,loading,unreadCount,loadMis} = ctx;
+  const isAdmin = normRole(user?.role) === 'admin';
   const todayOrders = orders.filter(o=>o.date===istToday({day:'2-digit',month:'2-digit',year:'2-digit'}).replace(/\//g,'.'));
   const pendingWON  = orders.filter(o=>!o.won&&o.status!=='draft').length;
   const mtd         = orders.reduce((s,o)=>s+o.amt,0);
@@ -2134,21 +2457,34 @@ function HomeScreen({ctx}) {
             </div>
           ))}
         </div>
+        {/* Resume an unsaved order draft (autosaved locally, restored after login). */}
+        {(()=>{ let draft=null; try{ const d=JSON.parse(localStorage.getItem('4s_draft')||'null'); if(d && !d.no && ((d.items&&d.items.length)||d.customer)) draft=d; }catch(e){} if(!draft) return null; return (
+          <div style={{margin:'0 18px 12px',padding:'11px 14px',background:T.warnSoft,border:'1px solid #e6cc95',borderRadius:8,display:'flex',alignItems:'center',gap:10}}>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:12,fontWeight:800,color:T.warn}}>Unsaved order in progress</div>
+              <div style={{fontSize:11,color:T.ink3,marginTop:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{draft.customer||'Draft'} · {(draft.items||[]).length} item{(draft.items||[]).length===1?'':'s'}</div>
+            </div>
+            <button onClick={()=>{ try{ctx.setOrder({...BLANK_ORDER(),...draft});}catch(e){} nav('order'); }} style={{flexShrink:0,height:32,padding:'0 14px',borderRadius:6,background:T.green,border:'none',color:'#fff',fontSize:12,fontWeight:700,cursor:'pointer'}}>Resume</button>
+            <button onClick={()=>{ if(!window.confirm('Discard the unsaved draft?'))return; try{localStorage.removeItem('4s_draft');}catch(e){} ctx.setOrder(BLANK_ORDER()); }} title="Discard draft" style={{flexShrink:0,width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.trash(T.ink4,14)}</button>
+          </div>
+        ); })()}
         <div style={{padding:'0 18px 12px'}}>
           <button onClick={()=>{ctx.setOrder({...BLANK_ORDER(),salesExec:user?.name||''});nav('order');}} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 18px',background:T.green,color:'#fff',border:'none',borderRadius:8,cursor:'pointer',textAlign:'left'}}>
             <div><div style={{fontSize:11,fontWeight:600,opacity:.7,letterSpacing:.5,textTransform:'uppercase'}}>NEW</div><div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4,marginTop:2}}>Book an order</div></div>
             <div style={{width:40,height:40,borderRadius:99,background:'#fff',display:'flex',alignItems:'center',justifyContent:'center'}}>{Icon.plus(T.green)}</div>
           </button>
         </div>
-        {/* Manual Order — same booking flow as "Book an order", but the booking
-            date is settable and 18% GST is baked into each item's price. Used to
-            replicate orders that were booked manually (on paper). */}
+        {/* Manual Order — admin only. Same booking flow as "Book an order", but
+            the booking date is settable and 18% GST is baked into each item's
+            price. Used to replicate orders that were booked manually (on paper). */}
+        {isAdmin && (
         <div style={{padding:'0 18px 12px'}}>
           <button onClick={()=>{ctx.setOrder({...BLANK_ORDER(),manualOrder:true,salesExec:user?.name||''});nav('order');}} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 18px',background:T.ink,color:'#fff',border:'none',borderRadius:8,cursor:'pointer',textAlign:'left'}}>
             <div><div style={{fontSize:11,fontWeight:600,opacity:.7,letterSpacing:.5,textTransform:'uppercase'}}>MANUAL</div><div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4,marginTop:2}}>Manual Order</div></div>
             <div style={{width:40,height:40,borderRadius:99,background:'#fff',display:'flex',alignItems:'center',justifyContent:'center'}}>{Icon.plus(T.ink)}</div>
           </button>
         </div>
+        )}
         {/* Price list status banner */}
         {!priceItems?.length && (
           <div style={{margin:'0 18px 10px',padding:'10px 14px',background:priceSyncError?T.badSoft:T.warnSoft,border:`1.5px solid ${priceSyncError?T.bad:T.warn}`,borderRadius:8,display:'flex',alignItems:'center',justifyContent:'space-between',gap:10}}>
@@ -2169,6 +2505,24 @@ function HomeScreen({ctx}) {
               {q.sub?<div style={{fontSize:10,fontWeight:700,fontFamily:T.mono,color:q.tone}}>{q.sub}</div>:null}
             </div>
           ))}
+        </div>
+        <div style={{padding:'0 18px 12px'}}>
+          <button onClick={()=>nav('reports')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 18px',background:T.green,color:'#fff',border:'none',borderRadius:8,cursor:'pointer',textAlign:'left'}}>
+            <div><div style={{fontSize:11,fontWeight:600,opacity:.7,letterSpacing:.5,textTransform:'uppercase'}}>REPORTS</div><div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4,marginTop:2}}>Sales summary</div></div>
+            <div style={{width:40,height:40,borderRadius:99,background:'#fff',display:'flex',alignItems:'center',justifyContent:'center'}}>{Icon.doc(T.green,20)}</div>
+          </button>
+        </div>
+        {/* Outstanding payments — live total still to collect across all booked orders */}
+        <div style={{padding:'0 18px 12px'}}>
+          {(()=>{ const due=(orders||[]).filter(o=>o&&o.status!=='draft').reduce((s,o)=>s+orderReceived(o).balance,0); return (
+          <button onClick={()=>nav('collect')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 18px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,cursor:'pointer',textAlign:'left'}}>
+            <div style={{display:'flex',alignItems:'center',gap:12}}>
+              <div style={{width:38,height:38,borderRadius:99,background:due>0?T.badSoft:T.greenSoft,display:'flex',alignItems:'center',justifyContent:'center'}}><span style={{fontWeight:800,fontSize:18,color:due>0?T.bad:T.green}}>₹</span></div>
+              <div><div style={{fontSize:14,fontWeight:700,color:T.ink,letterSpacing:-0.2}}>Outstanding payments</div><div style={{fontSize:11,color:T.ink4}}>Balances still to collect</div></div>
+            </div>
+            <div style={{textAlign:'right'}}><div style={{fontSize:15,fontWeight:800,fontFamily:T.mono,color:due>0?T.bad:T.ok}}>₹{Math.round(due).toLocaleString('en-IN')}</div><div style={{fontSize:10,color:T.ink4}}>{due>0?'to collect':'all clear'}</div></div>
+          </button>
+          );})()}
         </div>
         <div style={{padding:'0 18px 6px',display:'flex',alignItems:'baseline',justifyContent:'space-between'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:1.2,textTransform:'uppercase'}}>RECENT ORDERS</div>
@@ -2193,7 +2547,8 @@ function HomeScreen({ctx}) {
               </div>
             </div>
           ))}
-          {orders.length===0&&<div style={{padding:24,textAlign:'center',fontSize:13,color:T.ink4}}>No orders yet. Tap "Book an order" to start.</div>}
+          {loading && orders.length===0 && [0,1,2].map(i=><SkeletonOrderRow key={i}/>)}
+          {!loading && orders.length===0 && <div style={{padding:24,textAlign:'center',fontSize:13,color:T.ink4}}>No orders yet. Tap "Book an order" to start.</div>}
         </div>
         <div style={{height:24}}/>
       </div>
@@ -2203,8 +2558,184 @@ function HomeScreen({ctx}) {
 }
 
 // ─── Stock Search ────────────────────────────────────────────
+// Browse Items room ordering. Groups the list so it reads Living Room → Bedroom
+// → Dining → Wardrobe & Storage → everything else, using the price-list CATEGORY
+// (it.cat) first, then the matched Product Catalog room, then the description —
+// so it still works for SKUs that never matched the catalog. Precedence is
+// deliberate: dining and storage are checked before bedroom so a "Dining Room"
+// or "Home Storage" item is never pulled into bedroom, and storage is its own
+// group even when the feed files a wardrobe under bedroom furniture.
+function roomRank(it, catEntry) {
+  // Authoritative path: the backend ships the row's own CATEGORY column as
+  // it.room ("Living Room Furniture", "Bedroom Furniture", …). Rank from that
+  // alone so a stray word in the product name ("…Storage Ottoman") can't drag a
+  // living-room item into the storage group.
+  const rm = (it.room || '').toLowerCase();
+  if (rm) {
+    if (/dining/.test(rm)) return 2;
+    if (/storage|wardrobe|kreation|almirah|cabinet/.test(rm)) return 3;
+    if (/bed|mattress/.test(rm)) return 1;
+    if (/living|sofa|recliner|lounger|occasional|lounge/.test(rm)) return 0;
+    return 4;
+  }
+  // Fallback for items without a room label (raw Godrej tabs): infer from all
+  // available fields, most-specific first.
+  const s = ((it.cat||'') + ' ' + (it.item||'') + ' ' + (it.sheet||'') + ' ' +
+             (catEntry && catEntry.mainCat || '') + ' ' + (it.name||''))
+            .toLowerCase().replace(/[^a-z0-9]+/g, ' ');   // underscores → spaces so \b works
+  if (/\bdining\b|dintbl|din tbl/.test(s)) return 2;
+  if (/wardrobe|almirah|\bstorage\b|kreation|sideboard|chest of|shoe\s?rack|book\s?shelf|\bcabinet\b/.test(s)) return 3;
+  if (/bedroom|\bbeds?\b|mattress|dresser|bedside|night\s?stand/.test(s)) return 1;
+  if (/living room|\bsofa\b|recliner|lounger|coffee\s?table|\bottoman\b|settee|occasional/.test(s)) return 0;
+  return 4;
+}
+// A neutral image glyph used wherever a product photo is missing / fails to load.
+function PhIcon({size=28}) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={T.line2||T.ink4} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.4"/><path d="M4 18l5-5 4 4 3-3 4 4"/></svg>;
+}
+// 64px catalog thumbnail — the product's first photo, or a placeholder tile.
+function ProductThumb({src, size=64}) {
+  const [err,setErr] = React.useState(false);
+  const box = {width:size,height:size,borderRadius:10,flexShrink:0,border:`1px solid ${T.line}`,background:T.paper2};
+  if (!src || err) return <div style={{...box,display:'grid',placeItems:'center'}}><PhIcon size={size*0.5}/></div>;
+  return <img src={src} loading="lazy" decoding="async" alt="" onError={()=>setErr(true)} style={{...box,objectFit:'cover'}}/>;
+}
+
+// Premium product preview (Browse Items only). Shows the catalog photos, features,
+// measurements and colour/material swatches when the SKU matched a Product Catalog
+// row; otherwise a graceful "coming soon" state that keeps the SKU fully orderable.
+function ProductSheet({item, cat, onClose, onAdd}) {
+  const [ai,setAi]       = React.useState(0);
+  const [imgErr,setImgErr] = React.useState({});
+  const cplBase = Number(item.cpl)||Number(item.mrp)||0;
+  const cpl     = cplBase>0 ? Math.round(cplBase*(1+GST_RATE)) : 0;
+  const images  = (cat&&Array.isArray(cat.images))?cat.images:[];
+  const swatches= (cat&&Array.isArray(cat.swatches))?cat.swatches:[];
+  const stockTotal = (item.stock||[]).reduce((s,x)=>s+x.q,0);
+  const featureLines = (cat&&cat.features) ? String(cat.features).split(/\r?\n|•|•|;/).map(s=>s.replace(/^[-*\s]+/,'').trim()).filter(Boolean) : [];
+  const measure = (cat&&cat.measurements||'').trim();
+  const colour  = (cat&&cat.colourMaterial||'').trim();
+  const catLabel= [cat&&cat.mainCat, cat&&cat.subCat].filter(Boolean).join(' · ') || (item.cat||'');
+  // Catalog specs that stand on their own even when no photo URL was supplied —
+  // features, measurements and colour/material all come from the same Product
+  // Catalog sheet row, so they show whether or not the image cell is filled.
+  const hasSpecs = featureLines.length>0 || !!measure || !!colour || swatches.length>0;
+  const hasRich  = images.length>0 || hasSpecs;
+  const main = images[ai];
+  return (
+    <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(10,15,13,.45)',zIndex:9997,display:'flex',alignItems:'flex-end',justifyContent:'center'}}>
+      <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:430,background:T.paper,borderTopLeftRadius:16,borderTopRightRadius:16,maxHeight:'88vh',display:'flex',flexDirection:'column',animation:'slideUp .2s ease'}}>
+        <div style={{width:38,height:4,borderRadius:99,background:T.line2||T.line,margin:'9px auto 2px',flexShrink:0}}/>
+        <div className="scroll" style={{paddingBottom:14}}>
+          {images.length>0 ? (
+            <div style={{padding:'6px 16px 0'}}>
+              <div style={{aspectRatio:'16 / 11',borderRadius:14,overflow:'hidden',border:`1px solid ${T.line}`,background:T.paper2,display:'grid',placeItems:'center'}}>
+                {main && !imgErr[ai] ? <img src={main} loading="lazy" decoding="async" alt="" onError={()=>setImgErr(p=>({...p,[ai]:true}))} style={{width:'100%',height:'100%',objectFit:'cover'}}/> : <PhIcon size={72}/>}
+              </div>
+              {images.length>1 && (
+                <div style={{display:'flex',gap:8,marginTop:8,overflowX:'auto'}}>
+                  {images.map((u,i)=>(
+                    <div key={i} onClick={()=>setAi(i)} style={{width:54,height:46,borderRadius:8,flexShrink:0,overflow:'hidden',background:T.paper2,border:`1px solid ${i===ai?T.green:T.line}`,boxShadow:i===ai?`0 0 0 1px ${T.green}`:'none',cursor:'pointer',display:'grid',placeItems:'center'}}>
+                      {!imgErr[i] ? <img src={u} loading="lazy" alt="" onError={()=>setImgErr(p=>({...p,[i]:true}))} style={{width:'100%',height:'100%',objectFit:'cover'}}/> : <PhIcon size={20}/>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : hasSpecs ? (
+            // Photo missing, but the catalog row has specs — show a neutral photo
+            // placeholder and let the features / measurements / colour render below.
+            <div style={{padding:'6px 16px 0'}}>
+              <div style={{aspectRatio:'16 / 11',borderRadius:14,overflow:'hidden',border:`1px solid ${T.line}`,background:T.paper2,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:6}}>
+                <PhIcon size={56}/>
+                <div style={{fontSize:11,color:T.ink4,fontWeight:600}}>Photo coming soon</div>
+              </div>
+            </div>
+          ) : (
+            <div style={{padding:'16px 16px 2px'}}>
+              <div style={{border:`1.5px dashed ${T.line2||T.line}`,borderRadius:14,background:T.paper2,padding:'24px 18px',textAlign:'center',display:'flex',flexDirection:'column',alignItems:'center',gap:8}}>
+                <div style={{width:54,height:54,borderRadius:14,background:'#fff',border:`1px solid ${T.line}`,display:'grid',placeItems:'center'}}><PhIcon size={30}/></div>
+                <div style={{fontSize:14.5,fontWeight:800}}>Full preview coming soon</div>
+                <div style={{fontSize:12,color:T.ink4,maxWidth:250,lineHeight:1.5}}>This item isn’t in the Product Catalog yet — everything you need to order it is right here.</div>
+              </div>
+            </div>
+          )}
+
+          <div style={{padding:'12px 16px 2px'}}>
+            <div style={{fontSize:19,fontWeight:800,letterSpacing:-0.4,lineHeight:1.18,textWrap:'balance'}}>{item.name}</div>
+            <div style={{display:'flex',alignItems:'center',gap:8,marginTop:4,flexWrap:'wrap'}}>
+              {catLabel && <span style={{fontFamily:T.mono,fontSize:10,letterSpacing:1,textTransform:'uppercase',color:T.ink4}}>{catLabel}</span>}
+              {(item.altCode||item.code) && <span style={{fontFamily:T.mono,fontSize:10.5,fontWeight:700,color:item.altCode?T.green:T.ink4}}>{item.altCode||item.code}</span>}
+            </div>
+          </div>
+
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,margin:'12px 16px',padding:'12px 14px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:12}}>
+            <div>
+              <div style={{fontFamily:T.mono,fontWeight:800,fontSize:19}}>{cpl>0?'₹'+cpl.toLocaleString('en-IN'):'—'}</div>
+              <div style={{fontSize:9,color:T.ink4,fontWeight:600}}>{cpl>0?'incl. 18% GST':'price on request'}{stockTotal>0?' · '+stockTotal+' in stock':''}</div>
+            </div>
+            <button onClick={onAdd} style={{padding:'11px 16px',borderRadius:8,background:T.green,color:'#fff',border:'none',fontWeight:700,fontSize:13.5,display:'flex',gap:6,alignItems:'center',cursor:'pointer'}}>{Icon.plus('#fff',14)}Add to order</button>
+          </div>
+
+          {featureLines.length>0 && (
+            <div style={{padding:'2px 16px'}}>
+              <div style={{fontSize:10,fontWeight:800,letterSpacing:1.2,textTransform:'uppercase',color:T.ink4,margin:'10px 0 7px'}}>Features</div>
+              <div style={{display:'flex',flexDirection:'column',gap:7}}>
+                {featureLines.slice(0,12).map((f,i)=>(
+                  <div key={i} style={{display:'flex',gap:9,fontSize:13,color:T.ink2,alignItems:'flex-start'}}><span style={{width:6,height:6,borderRadius:99,background:T.green,marginTop:6,flexShrink:0}}/>{f}</div>
+                ))}
+              </div>
+            </div>
+          )}
+          {measure && (
+            <div style={{padding:'2px 16px'}}>
+              <div style={{fontSize:10,fontWeight:800,letterSpacing:1.2,textTransform:'uppercase',color:T.ink4,margin:'12px 0 7px'}}>Measurements</div>
+              <div style={{fontSize:13,color:T.ink2,fontFamily:T.mono,lineHeight:1.5,background:'#fff',border:`1px solid ${T.line}`,borderRadius:9,padding:'10px 12px',whiteSpace:'pre-wrap'}}>{measure}</div>
+            </div>
+          )}
+          {(colour || swatches.length>0) && (
+            <div style={{padding:'2px 16px'}}>
+              <div style={{fontSize:10,fontWeight:800,letterSpacing:1.2,textTransform:'uppercase',color:T.ink4,margin:'12px 0 7px'}}>Colour &amp; Material</div>
+              {colour && <div style={{fontSize:13,color:T.ink3,marginBottom:swatches.length?10:0}}>{colour}</div>}
+              {swatches.length>0 && (
+                <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+                  {swatches.map((u,i)=>(<SwatchChip key={i} src={u}/>))}
+                </div>
+              )}
+            </div>
+          )}
+          {!hasRich && (
+            <div style={{padding:'2px 16px'}}>
+              <div style={{fontSize:10,fontWeight:800,letterSpacing:1.2,textTransform:'uppercase',color:T.ink4,margin:'10px 0 7px'}}>Item details</div>
+              <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                {[['Code',item.altCode||item.code||'—'],['Category',item.cat||item.sheet||'—'],['Stock',stockTotal>0?String(stockTotal):'0']].map(([k,v])=>(
+                  <div key={k} style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:9,padding:'8px 11px',minWidth:70}}>
+                    <div style={{fontSize:8.5,letterSpacing:1,textTransform:'uppercase',color:T.ink4,fontWeight:700}}>{k}</div>
+                    <div style={{fontFamily:T.mono,fontWeight:800,fontSize:13,marginTop:2,color:k==='Stock'&&stockTotal>0?T.ok:T.ink}}>{v}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div style={{height:8}}/>
+        </div>
+      </div>
+    </div>
+  );
+}
+// A single colour/material swatch (image), hidden if it fails to load.
+function SwatchChip({src}) {
+  const [err,setErr] = React.useState(false);
+  if (err) return null;
+  return <span style={{width:40,height:40,borderRadius:10,border:'1px solid rgba(0,0,0,.12)',overflow:'hidden',background:T.paper2,display:'inline-block'}}><img src={src} loading="lazy" alt="" onError={()=>setErr(true)} style={{width:'100%',height:'100%',objectFit:'cover'}}/></span>;
+}
+
 function SearchScreen({ctx}) {
   const {items, priceItems, syncedAt, priceSyncedAt, nav, back, order, setOrder, syncPriceList, loading} = ctx;
+  // Product Catalog map (photos + specs), looked up by each item's catKey. Read
+  // from localStorage and re-parsed whenever the price list is re-synced.
+  const catalog = React.useMemo(() => { try { return JSON.parse(localStorage.getItem('4s_catalog_v1')||'{}'); } catch { return {}; } }, [priceSyncedAt, priceItems.length]);
+  const [preview, setPreview] = React.useState(null);
   const [q,   setQ]   = useState('');
   const [cat, setCat] = useState('all');
   const cartCount = (order.items||[]).reduce((s,i)=>s+(i.qty||0),0);
@@ -2252,14 +2783,22 @@ function SearchScreen({ctx}) {
 
   const {filtered, searchMode} = React.useMemo(() => {
     const { results, mode } = fuzzySearch(bycat, deferredQ);
-    // Show in-stock items first, then out-of-stock, then Made-To-Order. Stable
-    // within each tier so search relevance / browse order is preserved.
+    // When browsing (no query), group by room — Living Room → Bedroom → Dining →
+    // Wardrobe & Storage → others — so the catalogue reads in a natural showroom
+    // order. Search keeps relevance order untouched. Within each group, in-stock
+    // items come first, then out-of-stock, then Made-To-Order; stable otherwise.
+    const browsing = !deferredQ.trim();
     const sorted = results
       .map((it, i) => ({ it, i }))
-      .sort((a, b) => (availabilityTier(a.it) - availabilityTier(b.it)) || (a.i - b.i))
+      .sort((a, b) =>
+        // Discontinued items always sink below every active (continued) item.
+        ((a.it.discontinued ? 1 : 0) - (b.it.discontinued ? 1 : 0))
+        || (browsing ? (roomRank(a.it, catalog[a.it.catKey]) - roomRank(b.it, catalog[b.it.catKey])) : 0)
+        || (availabilityTier(a.it) - availabilityTier(b.it))
+        || (a.i - b.i))
       .map(x => x.it);
     return { filtered: sorted, searchMode: mode };
-  }, [bycat, deferredQ]);
+  }, [bycat, deferredQ, catalog]);
 
   // Cap what we actually render so a broad browse / match never mounts thousands
   // of rows (the cause of scroll + typing jank). Extras are one tap away by
@@ -2446,9 +2985,12 @@ function SearchScreen({ctx}) {
           const cplBase = Number(it.cpl) || Number(it.mrp) || 0;
           // MRP shown to the user = list price (CPL) with 18% GST already added in.
           const cpl = cplBase > 0 ? Math.round(cplBase * (1 + GST_RATE)) : 0;
+          const catEntry = catalog[it.catKey];
+          const thumb = catEntry && catEntry.images && catEntry.images[0];
           return (
-            <div key={(it.code||it.name||'')+'|'+(it.sheet||'')+'|'+fi} style={{padding:'12px 18px',borderBottom:`1px solid ${T.line}`}}>
+            <div key={(it.code||it.name||'')+'|'+(it.sheet||'')+'|'+fi} onClick={()=>setPreview(it)} style={{padding:'12px 18px',borderBottom:`1px solid ${T.line}`,cursor:'pointer'}}>
               <div style={{display:'flex',gap:10}}>
+                <ProductThumb src={thumb}/>
                 <div style={{flex:1,minWidth:0}}>
                   {/* LN Description — always the primary product name */}
                   <div style={{fontSize:13,fontWeight:600,color:T.ink,lineHeight:1.35,marginBottom:4}}>{it.name}</div>
@@ -2481,7 +3023,7 @@ function SearchScreen({ctx}) {
                     </div>
                     {cpl > 0 && <div style={{fontSize:8,color:T.ink4,fontWeight:600,textAlign:'right',marginTop:1}}>incl. 18% GST</div>}
                   </div>
-                  <button onClick={()=>addToOrder(it)} style={{height:32,padding:'0 12px',borderRadius:6,background:oos?T.warn:T.green,color:'#fff',border:'none',fontSize:13,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:4}}>
+                  <button onClick={e=>{e.stopPropagation();addToOrder(it);}} style={{height:32,padding:'0 12px',borderRadius:6,background:oos?T.warn:T.green,color:'#fff',border:'none',fontSize:13,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:4}}>
                     {Icon.plus('#fff',14)}{oos?'Book':'Add'}
                   </button>
                 </div>
@@ -2524,6 +3066,7 @@ function SearchScreen({ctx}) {
           <span style={{fontSize:13,fontWeight:700,display:'flex',alignItems:'center',gap:4}}>Continue booking →</span>
         </div>
       )}
+      {preview && <ProductSheet item={preview} cat={catalog[preview.catKey]} onClose={()=>setPreview(null)} onAdd={()=>{addToOrder(preview);setPreview(null);}}/>}
       <BottomNav screen="search" nav={nav}/>
     </div>
   );
@@ -2610,6 +3153,10 @@ function OrderFormScreen({ctx}) {
   }
 
   const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance} = orderTotals(o);
+  // Guided-form: once the user has tried to save, the validation summary + step
+  // progress stay live so they can see what's left and jump straight to it.
+  const [triedSave,setTriedSave] = React.useState(false);
+  const scrollToSec = sec => { try{ const el=document.getElementById('sec-'+sec); if(el) el.scrollIntoView({behavior:'smooth',block:'start'}); }catch(e){} };
 
   // Manager / Admin see cost + margin; Sales does not.
   const priv        = hasManagerAccess(user);
@@ -2712,62 +3259,63 @@ function OrderFormScreen({ctx}) {
     })}));
   }
 
-  async function handleSave() {
-    if(!o.customer) return ctx.showToast('Customer name is required','bad');
-    if(!o.phone)    return ctx.showToast('Phone number is required','bad');
-    if(!isValidPhone(o.phone)) return ctx.showToast('Enter a valid 10-digit mobile number','bad');
-    if(o.alt && !isValidPhone(o.alt)) return ctx.showToast('Alt. phone is not a valid mobile number','bad');
-    if(!o.email)    return ctx.showToast('E-mail is required','bad');
-    if(!isValidEmail(o.email)) return ctx.showToast('Enter a valid email address','bad');
-    // Customer GST No. is mandatory (printed on both PDF copies).
-    if(!o.gstNumber||!String(o.gstNumber).trim()) return ctx.showToast('Customer GST No. is required','bad');
-    if(!o.delivery) return ctx.showToast('Delivery address is required','bad');
-    // Pincode is a mandatory part of the delivery address.
-    if(!o.pincode||!String(o.pincode).trim()) return ctx.showToast('Pincode is required','bad');
-    if(!/^\d{6}$/.test(String(o.pincode).trim())) return ctx.showToast('Enter a valid 6-digit pincode','bad');
-    if(!o.floor)    return ctx.showToast('Floor is required','bad');
-    if(!o.landmark) return ctx.showToast('Nearest landmark is required','bad');
-    if(!o.liftAvailable) return ctx.showToast('Select whether a lift is available','bad');
-    // Lift type is mandatory when a lift is available — at least one must be picked.
-    if(o.liftAvailable==='Yes' && (!Array.isArray(o.liftTypes)||o.liftTypes.length===0)) return ctx.showToast('Select the lift type (Standard / Goods / Service)','bad');
-    // Delivery contact person required when the billing & delivery addresses differ
+  // Every required-field / validity check, collected into one list (instead of
+  // stopping at the first) so the guided form can show a full "what's still
+  // needed" summary and light up the step progress bar. Each error is tagged with
+  // its section id so tapping it (or the Save button) jumps straight there. The
+  // rules mirror the original one-at-a-time guards exactly.
+  function collectErrors() {
+    const e = []; const add = (sec,msg) => e.push({sec,msg});
+    if(!o.customer) add('customer','Customer name is required');
+    if(!o.phone) add('customer','Phone number is required');
+    else if(!isValidPhone(o.phone)) add('customer','Enter a valid 10-digit mobile number');
+    if(o.alt && !isValidPhone(o.alt)) add('customer','Alt. phone is not a valid mobile number');
+    if(!o.email) add('customer','E-mail is required');
+    else if(!isValidEmail(o.email)) add('customer','Enter a valid email address');
+    if(!o.gstNumber||!String(o.gstNumber).trim()) add('customer','Customer GST No. is required');
+    if(!o.awareness) add('customer','Select the Lead Source');
+    if(!o.purchasePattern||o.purchasePattern.length===0) add('customer','Select the purchase pattern');
+    if(!o.purchasingFor) add('customer','Select what they are purchasing for');
+    if(o.manualOrder && !o.date) add('customer','Set the Booking Date for the manual order');
+    if(!o.delivery) add('address','Delivery address is required');
+    if(!o.pincode||!String(o.pincode).trim()) add('address','Pincode is required');
+    else if(!/^\d{6}$/.test(String(o.pincode).trim())) add('address','Enter a valid 6-digit pincode');
+    if(!o.floor) add('address','Floor is required');
+    if(!o.landmark) add('address','Nearest landmark is required');
+    if(!o.liftAvailable) add('address','Select whether a lift is available');
+    if(o.liftAvailable==='Yes' && (!Array.isArray(o.liftTypes)||o.liftTypes.length===0)) add('address','Select the lift type (Standard / Goods / Service)');
     const addrDiffer = (o.billing||'').trim() && (o.delivery||'').trim() && (o.billing||'').trim()!==(o.delivery||'').trim();
-    if(addrDiffer && (!o.contactPersonName||!o.contactNumber)) return ctx.showToast('Delivery Contact Person Name & Number are required (billing & delivery addresses differ)','bad');
-    if(o.contactNumber && !isValidPhone(o.contactNumber)) return ctx.showToast('Contact number is not a valid mobile number','bad');
-    if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item','bad');
-    // SI No is mandatory for every order (printed as the Sl part of the PDF order no).
-    if(!o.slNo||!String(o.slNo).trim()) return ctx.showToast('SI No is required','bad');
-    // Receipt No: app orders get it auto-assigned on save (next app-booking number),
-    // so it's not entered here; a manual order must carry its paper receipt number.
-    if(o.manualOrder && (!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim())) return ctx.showToast('Receipt No is required for a manual order','bad');
-    // Payment Mode is mandatory (printed on both PDF copies).
-    if(!o.paymentMode||!String(o.paymentMode).trim()) return ctx.showToast('Select the Payment Mode','bad');
-    // Money Receipt No is mandatory on the order form.
-    if(!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim()) return ctx.showToast('Money Receipt No is required','bad');
-    // Manual orders must carry the actual (settable) booking date.
-    if(o.manualOrder && !o.date) return ctx.showToast('Set the Booking Date for the manual order','bad');
-    // Mandatory customer-profiling fields (DOB & anniversary are now optional)
-    if(!o.awareness)    return ctx.showToast('Select the Lead Source','bad');
-    if(!o.purchasePattern||o.purchasePattern.length===0) return ctx.showToast('Select the purchase pattern','bad');
-    if(!o.purchasingFor) return ctx.showToast('Select what they are purchasing for','bad');
-    // Sofa: sofa dims + entry-door site measurement are mandatory
-    if(hasSofa && (!o.sofaWidth||!o.sofaHeight||!o.sofaDepth)) return ctx.showToast('Enter Sofa width, height & depth (mandatory for sofas)','bad');
-    if(hasSofa && (!o.entryDoorWidth||!o.entryDoorHeight)) return ctx.showToast('Enter Entry Door width & height (required for sofa orders)','bad');
-    // Staircase measurement — required only for a SOFA with NO lift:
-    // staircase width + the landing area's length / width / depth.
-    if(needStaircase && (!o.staircaseWidth||!o.landingLength||!o.landingWidth||!o.landingDepth)) return ctx.showToast('Enter Staircase width & the landing area length/width/depth (required for a sofa with no lift)','bad');
-    // Modular wardrobe (Kalista / Kreation X2 / X3): every furniture block needs its
-    // wardrobe dims, and every room block needs its dims — both are mandatory.
+    if(addrDiffer && (!o.contactPersonName||!o.contactNumber)) add('address','Delivery Contact Person Name & Number are required (addresses differ)');
+    if(o.contactNumber && !isValidPhone(o.contactNumber)) add('address','Contact number is not a valid mobile number');
+    if(hasSofa && (!o.sofaWidth||!o.sofaHeight||!o.sofaDepth)) add('measure','Enter Sofa width, height & depth');
+    if(hasSofa && (!o.entryDoorWidth||!o.entryDoorHeight)) add('measure','Enter Entry Door width & height');
+    if(needStaircase && (!o.staircaseWidth||!o.landingLength||!o.landingWidth||!o.landingDepth)) add('measure','Enter Staircase width & the landing area length/width/depth');
     if(hasWardrobe){
-      if(!wardrobes.length) return ctx.showToast('Add at least one modular furniture measurement','bad');
+      if(!wardrobes.length) add('measure','Add at least one modular furniture measurement');
       for(let i=0;i<wardrobes.length;i++){ const w=wardrobes[i];
-        if(!w.length||!w.width||!w.height) return ctx.showToast(`Enter length, width & height for Modular Furniture ${i+1}`,'bad');
+        if(!w.length||!w.width||!w.height) add('measure',`Enter length, width & height for Modular Furniture ${i+1}`);
       }
-      if(!rooms.length) return ctx.showToast('Add at least one room measurement (mandatory for modular furniture)','bad');
+      if(!rooms.length) add('rooms','Add at least one room measurement (mandatory for modular furniture)');
       for(let i=0;i<rooms.length;i++){ const r=rooms[i];
-        if(!r.name||!(r.name||'').trim()) return ctx.showToast(`Enter the room name for Room ${i+1}`,'bad');
-        if(!r.width||!r.height||!r.depth) return ctx.showToast(`Enter width, height & depth for Room ${i+1}`,'bad');
+        if(!r.name||!(r.name||'').trim()) add('rooms',`Enter the room name for Room ${i+1}`);
+        if(!r.width||!r.height||!r.depth) add('rooms',`Enter width, height & depth for Room ${i+1}`);
       }
+    }
+    if(!o.items||o.items.length===0) add('items','Add at least one item');
+    if(!o.slNo||!String(o.slNo).trim()) add('internal','SI No is required');
+    if(o.manualOrder && (!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim())) add('internal','Receipt No is required for a manual order');
+    if(!o.paymentMode||!String(o.paymentMode).trim()) add('payment','Select the Payment Mode');
+    if(!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim()) add('payment','Money Receipt No is required');
+    return e;
+  }
+
+  async function handleSave() {
+    setTriedSave(true);
+    const errs = collectErrors();
+    if(errs.length){
+      ctx.showToast(errs.length+' field'+(errs.length>1?'s':'')+' still need'+(errs.length>1?'':'s')+' attention','bad');
+      scrollToSec(errs[0].sec);
+      return;
     }
     // Lead Source is now the awareness dropdown — keep the OPS "Source" column in sync.
     // This is the finalise/submit path: mark the order SUBMITTED so it locks down
@@ -2829,16 +3377,25 @@ function OrderFormScreen({ctx}) {
           <SectionHead n="01" label="Godrej SO / WON"/>
           <Field label="WON (Godrej SO No)" value={o.won} onChange={v=>setF('won',v)} mono hint="Godrej SO / WON number — add or update it here"/>
           <SectionHead n="02" label="Money Receipt"/>
-          {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:''}; return (
+          {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:'',amt:''}; return (
             <div key={i} style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
               <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
                 <Field label={`Money Receipt No ${i+1}`} value={mr.no} onChange={v=>setMRestricted(i,'no',v)} mono/>
               </div>
-              <div style={{flex:1}}>
+              <div style={{flex:1,borderRight:i>=1?`1px solid ${T.line}`:undefined}}>
                 <Field label={`Date ${i+1}`} value={mr.date} onChange={v=>setMRestricted(i,'date',v)} mono type="date"/>
               </div>
+              {i>=1 && <div style={{flex:1}}>
+                <Field label={`Amount ${i+1}`} value={mr.amt} onChange={v=>setMRestricted(i,'amt',v)} mono type="number" hint={i===1?'Later payment':undefined}/>
+              </div>}
             </div>
           );})}
+          {(()=>{ const {received,balance}=orderReceived(o); return (
+            <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12}}>
+              <span style={{color:T.ink3,fontWeight:600}}>Received so far <b style={{fontFamily:T.mono,color:T.ink}}>₹{received.toLocaleString('en-IN')}</b></span>
+              <span style={{color:balance>0?T.bad:T.ok,fontWeight:700}}>{balance>0?`Balance ₹${balance.toLocaleString('en-IN')}`:'Paid in full ✓'}</span>
+            </div>
+          );})()}
           <SectionHead n="03" label="Delivery"/>
           <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
             <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Delivery Status</div>
@@ -2859,6 +3416,12 @@ function OrderFormScreen({ctx}) {
     );
   }
 
+  // Live validation state drives the step progress bar and the save summary.
+  const liveErrors = collectErrors();
+  const STEPS = [['customer','Customer'],['address','Address'],['measure','Measure'],['items','Items'],['payment','Payment']];
+  const stepSecs = { customer:['customer'], address:['address'], measure:['measure','rooms'], items:['items'], payment:['payment','internal'] };
+  const stepDone = k => !liveErrors.some(e => stepSecs[k].includes(e.sec));
+
   return (
     <div className="screen">
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,flexShrink:0}}>
@@ -2876,6 +3439,16 @@ function OrderFormScreen({ctx}) {
         </div>
       </div>
       <StockRibbon syncedAt={ctx.syncedAt}/>
+      {/* Step progress — a tap jumps to that section; a filled dot means every
+          required field in it is done. Purely a guide; nothing is gated on it. */}
+      <div style={{display:'flex',gap:4,padding:'7px 10px',background:'#fff',borderBottom:`1px solid ${T.line}`,overflowX:'auto',flexShrink:0}}>
+        {STEPS.map(([k,label])=>{ const done=stepDone(k); return (
+          <div key={k} onClick={()=>scrollToSec(k)} style={{flex:'1 0 auto',display:'flex',alignItems:'center',gap:5,padding:'4px 9px',borderRadius:99,cursor:'pointer',background:done?T.greenSoft:T.paper2,border:`1px solid ${done?T.greenLine:T.line}`,whiteSpace:'nowrap'}}>
+            <span style={{width:14,height:14,borderRadius:99,flexShrink:0,display:'inline-flex',alignItems:'center',justifyContent:'center',background:done?T.green:'#fff',border:done?'none':`1.5px solid ${T.line2||T.line}`,color:'#fff',fontSize:9,fontWeight:800}}>{done?'✓':''}</span>
+            <span style={{fontSize:11,fontWeight:700,color:done?T.green:T.ink3}}>{label}</span>
+          </div>
+        );})}
+      </div>
       <div className="scroll">
         {o.manualOrder && (
           <>
@@ -2885,7 +3458,7 @@ function OrderFormScreen({ctx}) {
             <Field label="Booking Date" value={dmyToISO(o.date)} onChange={v=>setF('date',isoToDMY(v))} type="date" mono required hint="Manual order — the actual date this order was booked"/>
           </>
         )}
-        <SectionHead n="01" label="Customer"/>
+        <SectionHead n="01" label="Customer" id="sec-customer"/>
         <Field label="Customer Name" value={o.customer} onChange={v=>setF('customer',v)} required/>
         <Field label="Phone" value={o.phone} onChange={onPhoneChange} mono required type="tel" action="CALL" onAction={()=>o.phone&&window.open('tel:'+o.phone)} error={o.phone&&!isValidPhone(o.phone)?'Enter a valid 10-digit mobile number':undefined} hint={!o.no?'Returning customer? Their saved details fill in automatically.':undefined}/>
         {crmMatch && !o.no && (
@@ -2927,7 +3500,7 @@ function OrderFormScreen({ctx}) {
           </select>
         </div>
 
-        <SectionHead n="02" label="Address"/>
+        <SectionHead n="02" label="Address" id="sec-address"/>
         <Field label="Delivery Address" value={o.delivery} onChange={v=>setF('delivery',v)} multiline required/>
         <Field label="Pincode" value={o.pincode} onChange={v=>setF('pincode',v.replace(/[^\d]/g,'').slice(0,6))} mono required type="tel" hint="Mandatory · delivery address pincode (printed on the PDF)" error={o.pincode&&!/^\d{6}$/.test(o.pincode)?'Enter a valid 6-digit pincode':undefined}/>
         <Field label="Floor" value={o.floor} onChange={v=>setF('floor',v)} required hint="Mandatory"/>
@@ -2968,7 +3541,7 @@ function OrderFormScreen({ctx}) {
           </>
         );})()}
 
-        <SectionHead n="03" label="Site Measurements"/>
+        <SectionHead n="03" label="Site Measurements" id="sec-measure"/>
         <div style={{padding:'8px 14px',background:T.paper2||'#fafafa',borderBottom:`1px solid ${T.line}`,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
           <span style={{fontSize:11,color:T.ink4,fontWeight:700}}>ENTER IN</span>
           {[['cm','cm'],['ft','ft / in']].map(([u,lbl])=>(
@@ -3012,7 +3585,7 @@ function OrderFormScreen({ctx}) {
         )}
         {/* Rooms — sales picks how many rooms, then notes each room's dims.
             Mandatory when a modular wardrobe is in the order. */}
-        <SectionHead n="03b" label="Rooms"/>
+        <SectionHead n="03b" label="Rooms" id="sec-rooms"/>
         {hasWardrobe && (
           <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Modular wardrobe in order — room measurements are mandatory (printed on the PDF)</div>
         )}
@@ -3049,7 +3622,7 @@ function OrderFormScreen({ctx}) {
         <MeasureField label="Entry Door Width" value={o.entryDoorWidth} onChange={v=>setF('entryDoorWidth',v)} unit={measUnit} required={hasSofa} hint={hasSofa?'Mandatory for sofa orders':undefined}/>
         <MeasureField label="Entry Door Height" value={o.entryDoorHeight} onChange={v=>setF('entryDoorHeight',v)} unit={measUnit} required={hasSofa}/>
 
-        <SectionHead n="04" label={`Items · ${(o.items||[]).length}`} action="+ ADD ITEM" onAction={()=>nav('search')}/>
+        <SectionHead n="04" label={`Items · ${(o.items||[]).length}`} action="+ ADD ITEM" onAction={()=>nav('search')} id="sec-items"/>
         <div style={{background:'#fff'}}>
           {(o.items||[]).map((it,i)=>{
             const mrpVal   = it.mrp||it.cpl||0;                 // pre-GST list price (base)
@@ -3177,7 +3750,7 @@ function OrderFormScreen({ctx}) {
             {Icon.search(T.green,16)}<span style={{fontSize:13}}>Search & add item</span>
           </div>
         </div>
-        <SectionHead n="05" label="Commercials"/>
+        <SectionHead n="05" label="Commercials" id="sec-commercial"/>
         <Field label="Additional Order Discount %" value={o.orderDiscount} onChange={v=>setF('orderDiscount',v.replace(/[^\d.]/g,''))} mono type="number" hint="Extra discount on the whole order (on top of per-item discounts). Shown on the PDF."/>
         <Field label="SI No" value={o.slNo} onChange={v=>setF('slNo',v)} mono required hint="Mandatory · the order-form SI number · printed as the Sl part of the PDF's Order No. (Sl / Receipt)"/>
         {o.manualOrder
@@ -3190,7 +3763,7 @@ function OrderFormScreen({ctx}) {
         <Field label="WON (Godrej SO No)" value={o.won} onChange={v=>setF('won',v)} mono hint="Godrej SO / WON number — can be added or updated any time"/>
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setOrder(prev=>({...prev,plannedDly:v,followUp:followUpFromDelivery(v)||prev.followUp}))} mono required type="date" hint="Follow-up auto-set to 2 days before this date"/>
         <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
-        <SectionHead n="06" label="Payment"/>
+        <SectionHead n="06" label="Payment" id="sec-payment"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>PAYMENT MODE <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <select value={o.paymentMode} onChange={e=>setF('paymentMode',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.paymentMode?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
@@ -3207,17 +3780,28 @@ function OrderFormScreen({ctx}) {
           </select>
         </div>
         <Field label="Earnest Amount" value={o.earnest} onChange={v=>setF('earnest',v)} mono type="number" required error={(Number(o.earnest)||0) > total ? `Amount paid ₹${(Number(o.earnest)||0).toLocaleString('en-IN')} exceeds the order total ₹${total.toLocaleString('en-IN')}` : undefined} hint={total>0?`Order total: ₹${total.toLocaleString('en-IN')}`:undefined}/>
-        {/* Money receipt no + date — updatable up to 3 times */}
-        {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:''}; const setMR=(field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:''},{no:'',date:''},{no:'',date:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; }); return (
+        {/* Money receipt no + date — updatable up to 3 times. Receipt 1's amount is
+            the Earnest above; receipts 2 & 3 carry their own amount so a later
+            part-payment reduces the outstanding balance in the Collectibles view. */}
+        {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:'',amt:''}; const setMR=(field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:'',amt:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; }); return (
           <div key={i} style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
             <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
               <Field label={`Money Receipt No ${i+1}`} value={mr.no} onChange={v=>setMR('no',v)} mono/>
             </div>
-            <div style={{flex:1}}>
+            <div style={{flex:1,borderRight:i>=1?`1px solid ${T.line}`:undefined}}>
               <Field label={`Date ${i+1}`} value={mr.date} onChange={v=>setMR('date',v)} mono type="date"/>
             </div>
+            {i>=1 && <div style={{flex:1}}>
+              <Field label={`Amount ${i+1}`} value={mr.amt} onChange={v=>setMR('amt',v)} mono type="number" hint={i===1?'Later payment':undefined}/>
+            </div>}
           </div>
         );})}
+        {(()=>{ const {received,balance}=orderReceived(o); return (
+          <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12}}>
+            <span style={{color:T.ink3,fontWeight:600}}>Received so far <b style={{fontFamily:T.mono,color:T.ink}}>₹{received.toLocaleString('en-IN')}</b></span>
+            <span style={{color:balance>0?T.bad:T.ok,fontWeight:700}}>{balance>0?`Balance ₹${balance.toLocaleString('en-IN')}`:'Paid in full ✓'}</span>
+          </div>
+        );})()}
         <Field label="Follow-up Date" value={o.followUp} onChange={v=>setF('followUp',v)} mono type="date" hint="Auto-set to 2 days before planned delivery · reminder at 10:00 AM"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Delivery Status</div>
@@ -3227,7 +3811,7 @@ function OrderFormScreen({ctx}) {
           <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Order is Completed only when "Installation Done".</div>
           {/partial/i.test(o.deliveryStatus||'') && <PartialDeliverySummary order={o} onEdit={()=>setPartialPicker(true)}/>}
         </div>
-        <SectionHead n="07" label="Internal"/>
+        <SectionHead n="07" label="Internal" id="sec-internal"/>
         <Field label="Salesperson" value={o.salesExec??''} onChange={v=>setF('salesExec',v)} mono hint="Pre-filled with your name — edit or clear freely (your name is used if left blank)."/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Order Type <span style={{color:T.bad,marginLeft:3}}>*</span></div>
@@ -3259,6 +3843,21 @@ function OrderFormScreen({ctx}) {
           </div>
         </div>
       </div>
+      {/* Validation summary — appears after the first Save attempt and updates live
+          as fields are filled. Each line jumps to the section that needs it. */}
+      {triedSave && liveErrors.length>0 && (
+        <div style={{flexShrink:0,background:T.badSoft,borderTop:`1px solid ${T.bad}`,padding:'10px 14px',maxHeight:150,overflowY:'auto'}}>
+          <div style={{fontSize:12,fontWeight:800,color:T.bad,marginBottom:6}}>⚠ {liveErrors.length} thing{liveErrors.length>1?'s':''} needed before saving</div>
+          <div style={{display:'flex',flexDirection:'column',gap:4}}>
+            {liveErrors.slice(0,6).map((e,i)=>(
+              <div key={i} onClick={()=>scrollToSec(e.sec)} style={{fontSize:12,color:T.ink2,cursor:'pointer',display:'flex',gap:6,alignItems:'baseline'}}>
+                <span style={{color:T.bad,fontWeight:800}}>→</span><span style={{textDecoration:'underline',textDecorationColor:T.line2||T.line}}>{e.msg}</span>
+              </div>
+            ))}
+            {liveErrors.length>6 && <div style={{fontSize:11,color:T.ink4,fontWeight:600}}>+{liveErrors.length-6} more…</div>}
+          </div>
+        </div>
+      )}
       <div style={{display:'flex',gap:8,padding:'10px 14px',background:'#fff',borderTop:`1px solid ${T.line}`,flexShrink:0}}>
         <Btn onClick={()=>{ if((o.items&&o.items.length)&&!window.confirm('Discard changes to this order?'))return; try{localStorage.removeItem('4s_draft');}catch{} setOrder(BLANK_ORDER()); nav('home'); }}>Discard</Btn>
         <Btn onClick={handleSaveDraft}>Save Draft</Btn>
@@ -3286,9 +3885,44 @@ function PartialDeliverySummary({order, onEdit}) {
   );
 }
 
+// The WhatsApp order-confirmation message, shared by the PDF preview and the
+// order-history row so the wording stays identical everywhere.
+function orderWhatsAppMessage(o) {
+  const {total, earnest, balance} = orderTotals(o);
+  return `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${gstInclLine(i).toLocaleString('en-IN')}`).join('\n')}\n\n*Total (incl. GST):* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${earnest.toLocaleString('en-IN')}\n*Balance:* ₹${balance.toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
+}
+
+// Share the order PDF through the device share sheet (WhatsApp, Gmail, Drive…)
+// with the confirmation message as the caption — the salesperson taps once and
+// the actual PDF is attached. Devices without file-share support (most desktops)
+// fall back to downloading the PDF and opening a WhatsApp chat with the text, so
+// the file can be attached manually. A dismissed share sheet is a no-op.
+async function shareOrderPDF(o, copyType, showToast) {
+  const safeNo = (o.no||'draft').replace('/','‑');
+  const fname  = 'Order-'+safeNo+'-'+(copyType==='sales'?'Sales':'Customer')+'.pdf';
+  const text   = orderWhatsAppMessage(o);
+  let doc;
+  try { doc = generatePDF(o, copyType); }
+  catch(e) { if (showToast) showToast('Could not build the PDF','bad'); return; }
+  try {
+    const file = new File([doc.output('blob')], fname, {type:'application/pdf'});
+    if (navigator.canShare && navigator.canShare({files:[file]})) {
+      await navigator.share({files:[file], text});
+      return;
+    }
+  } catch(e) {
+    if (e && e.name === 'AbortError') return;   // user closed the share sheet
+    // any other error → fall through to the download + chat fallback
+  }
+  try { doc.save(fname); } catch(e) {}
+  const phone = (o.phone||'').replace(/\D/g,'');
+  window.open('https://wa.me/'+(phone?'91'+phone:'')+'?text='+encodeURIComponent(text), '_blank');
+  if (showToast) showToast('PDF saved — attach it in the WhatsApp chat','ok');
+}
+
 // ─── PDF Preview ─────────────────────────────────────────────
 function PDFPreviewScreen({ctx}) {
-  const {order,nav,back} = ctx;
+  const {order,nav,back,showToast} = ctx;
   const o = order;
   const {itemsSubtotal, orderDiscPct, orderDiscAmt, cgst, sgst, total, earnest, balance} = orderTotals(o);
   const qrRef = useRef(null);
@@ -3314,11 +3948,9 @@ function PDFPreviewScreen({ctx}) {
     generatePDF(o, 'sales').save('Order-'+safeNo+'-Sales.pdf');
   }
 
-  function whatsapp() {
-    const msg = `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${gstInclLine(i).toLocaleString('en-IN')}`).join('\n')}\n\n*Total (incl. GST):* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${earnest.toLocaleString('en-IN')}\n*Balance:* ₹${balance.toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
-    const phone = (o.phone||'').replace(/\D/g,'');
-    window.open('https://wa.me/91'+phone+'?text='+encodeURIComponent(msg),'_blank');
-  }
+  // Attach the customer PDF and open the device share sheet (WhatsApp is one tap
+  // away, with the file already attached). See shareOrderPDF for the fallback.
+  function whatsapp() { shareOrderPDF(o, 'customer', showToast); }
 
   return (
     <div className="screen" style={{background:T.ink2}}>
@@ -3393,7 +4025,7 @@ function PDFPreviewScreen({ctx}) {
           <button onClick={downloadSales} style={{flex:1,height:46,borderRadius:6,background:'rgba(255,255,255,.08)',border:'1px solid rgba(255,255,255,.15)',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',gap:6,cursor:'pointer',fontSize:13,fontWeight:600,fontFamily:T.sans}}>{Icon.download('#fff',16)}Sales PDF</button>
         </div>
         <div style={{display:'flex',gap:8}}>
-          <button onClick={whatsapp} style={{flex:2,height:46,borderRadius:6,background:'#25d366',border:'none',color:'#fff',fontWeight:700,fontFamily:T.sans,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:7,cursor:'pointer'}}>{Icon.whatsapp()}WhatsApp</button>
+          <button onClick={whatsapp} style={{flex:2,height:46,borderRadius:6,background:'#25d366',border:'none',color:'#fff',fontWeight:700,fontFamily:T.sans,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:7,cursor:'pointer'}}>{Icon.whatsapp()}Share PDF</button>
           <button onClick={()=>nav('home')} style={{flex:1,height:46,borderRadius:6,background:'#fff',border:'none',color:T.ink,fontWeight:700,fontFamily:T.sans,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>Done</button>
         </div>
       </div>
@@ -3544,7 +4176,7 @@ function ServiceScreen({ctx}){
 
 // ─── Order History ───────────────────────────────────────────
 function HistoryScreen({ctx}) {
-  const {orders,mis,nav,loadOrders,loadMis,doUpdateDelivery,doDeleteOrder,user,misLoading} = ctx;
+  const {orders,mis,nav,loadOrders,loadMis,doUpdateDelivery,doDeleteOrder,user,misLoading,loading} = ctx;
   const isAdmin = normRole(user?.role) === 'admin';
   // Default view: Pending orders of ALL salespersons.
   const [tab,setTab] = useState('pending');
@@ -3662,16 +4294,24 @@ function HistoryScreen({ctx}) {
                   style={{padding:'4px 6px',borderRadius:4,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:11,fontWeight:600,cursor:'pointer',WebkitAppearance:'none',appearance:'none',maxWidth:130}}>
                   {DELIVERY_STATUSES.map(s=><option key={s} value={s}>{s}</option>)}
                 </select>
-                <span title="Edit order" onClick={e=>{e.stopPropagation();openOrder(o);}} style={{width:28,height:24,borderRadius:4,background:T.greenSoft,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.edit(T.green,13)}</span>
-                <span title="Order PDF" onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)});nav('pdf');}} style={{width:28,height:24,borderRadius:4,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,13)}</span>
-                <span title={o.serviceFlag?'Service request':'Flag a service request'} onClick={e=>{e.stopPropagation();setServiceOrder(o);}} style={{width:28,height:24,borderRadius:4,background:o.serviceFlag?(/resolved/i.test(o.serviceStatus||'')?T.greenSoft:(T.badSoft||'#fdecec')):T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:13,fontWeight:700,color:o.serviceFlag?(/resolved/i.test(o.serviceStatus||'')?T.green:T.bad):T.ink3}}>⚠</span>
-                <span onClick={e=>{e.stopPropagation();const phone=(o.phone||'').replace(/\D/g,'');if(phone)window.open('https://wa.me/91'+phone);}} style={{width:28,height:24,borderRadius:4,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',13)}</span>
-                {isAdmin&&<span title="Delete order (admin)" onClick={e=>{e.stopPropagation();deleteOrder(o);}} style={{width:28,height:24,borderRadius:4,background:T.badSoft||'#fdecec',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.trash(T.bad,13)}</span>}
+                <span title="Edit order" onClick={e=>{e.stopPropagation();openOrder(o);}} style={{width:32,height:28,borderRadius:5,background:T.greenSoft,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.edit(T.green,14)}</span>
+                <span title="Order PDF" onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)});nav('pdf');}} style={{width:32,height:28,borderRadius:5,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,14)}</span>
+                <span title={o.serviceFlag?'Service request':'Flag a service request'} onClick={e=>{e.stopPropagation();setServiceOrder(o);}} style={{width:32,height:28,borderRadius:5,background:o.serviceFlag?(/resolved/i.test(o.serviceStatus||'')?T.greenSoft:(T.badSoft||'#fdecec')):T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:14,fontWeight:700,color:o.serviceFlag?(/resolved/i.test(o.serviceStatus||'')?T.green:T.bad):T.ink3}}>⚠</span>
+                <span title="Share PDF on WhatsApp" onClick={e=>{e.stopPropagation();shareOrderPDF(o,'customer',ctx.showToast);}} style={{width:32,height:28,borderRadius:5,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',14)}</span>
+                {isAdmin&&<span title="Delete order (admin)" onClick={e=>{e.stopPropagation();deleteOrder(o);}} style={{width:32,height:28,borderRadius:5,background:T.badSoft||'#fdecec',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.trash(T.bad,14)}</span>}
               </div>
             </div>
           </div>
         ))}
-        {shown.length===0&&<div style={{padding:32,textAlign:'center',fontSize:13,color:T.ink4}}>No orders match.</div>}
+        {loading && orders.length===0
+          ? [0,1,2,3,4].map(i=><SkeletonOrderRow key={i}/>)
+          : shown.length===0 && (
+              <div style={{padding:'48px 24px',textAlign:'center'}}>
+                <div style={{width:52,height:52,borderRadius:14,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12}}>{Icon.doc(T.ink4,24)}</div>
+                <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No orders here</div>
+                <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>{query||salesFilter?'Try clearing the search or the salesperson filter.':'Orders you book will appear here.'}</div>
+              </div>
+            )}
         <div style={{height:24}}/>
       </div>
       {partialOrder && <PartialDeliveryModal order={partialOrder} onCancel={()=>setPartialOrder(null)} onConfirm={confirmPartial}/>}
@@ -3764,7 +4404,8 @@ function requestNotifPermission() {
 }
 
 function NotificationsScreen({ctx}) {
-  const {notifications, mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, loadOrders, markNotifsSeen, nav, setOrder, showToast} = ctx;
+  const {user, notifications, mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, loadOrders, markNotifsSeen, nav, setOrder, showToast} = ctx;
+  const isAdmin = normRole(user?.role) === 'admin';
   // Mark everything read when this screen opens.
   useEffect(() => { markNotifsSeen(); }, []);
   const [perm, setPerm] = useState(('Notification' in window) ? Notification.permission : 'unsupported');
@@ -3773,9 +4414,10 @@ function NotificationsScreen({ctx}) {
   const committedCount = misList.filter(m=>m.committed).length;
 
   const groups = [
-    {kind:'overdue', label:'Overdue deliveries', icon:Icon.clock(T.bad,16), tone:T.bad, soft:T.badSoft||'#fdecec'},
-    {kind:'soon',    label:'Delivery approaching', icon:Icon.truck(T.warn,16), tone:T.warn, soft:T.warnSoft},
-    {kind:'mis',     label:'Committed in MIS — plan delivery', icon:Icon.bolt(T.green,14), tone:T.green, soft:T.greenSoft},
+    {kind:'overdue',  label:'Overdue deliveries', icon:Icon.clock(T.bad,16), tone:T.bad, soft:T.badSoft||'#fdecec'},
+    {kind:'followup', label:'Follow-ups due', icon:Icon.bell(T.ink2,15), tone:T.ink2, soft:T.paper2},
+    {kind:'soon',     label:'Delivery approaching', icon:Icon.truck(T.warn,16), tone:T.warn, soft:T.warnSoft},
+    {kind:'mis',      label:'Committed in MIS — plan delivery', icon:Icon.bolt(T.green,14), tone:T.green, soft:T.greenSoft},
   ];
 
   async function refreshMis() {
@@ -3814,7 +4456,8 @@ function NotificationsScreen({ctx}) {
             {Icon.cloud('#fff',14)} Force-fetch latest MIS from Gmail (CRM)
           </button>
           <div style={{fontSize:10.5,color:T.ink4,marginTop:6,lineHeight:1.5}}>Opens the CRM dashboard's MIS refresh (pulls the newest Godrej MIS e-mail into the sheet). Then tap <b>Update MIS</b> above.</div>
-          {/* Diagnostics — lets you confirm the feed is being read correctly */}
+          {/* Diagnostics — admin only; confirms the feed is being read correctly */}
+          {isAdmin && (<>
           <div onClick={()=>setShowDiag(v=>!v)} style={{marginTop:8,fontSize:11,fontWeight:700,color:T.green,cursor:'pointer'}}>{showDiag?'▾ Hide diagnostics':'▸ Diagnostics (confirm the feed)'}</div>
           {showDiag && (
             <div style={{marginTop:6,padding:'8px 10px',background:T.paper2,borderRadius:6,fontSize:10.5,fontFamily:T.mono,color:T.ink3,lineHeight:1.7}}>
@@ -3827,6 +4470,7 @@ function NotificationsScreen({ctx}) {
               </>}
             </div>
           )}
+          </>)}
         </div>
         {/* Native notification permission prompt */}
         {perm==='default' && (
@@ -3936,6 +4580,19 @@ function SettingsScreen({ctx}) {
   const [serial,setSerial]         = useState(null);   // {lastIssued,nextWillBe}
   const [serialInput,setSerialInput] = useState('');
   const [serialSaving,setSerialSaving] = useState(false);
+  // Audit log (admin) — who created / edited / deleted / updated which order.
+  const [audit,setAudit]           = useState(null);   // null = not loaded; [] = loaded empty
+  const [auditLoading,setAuditLoading] = useState(false);
+  async function loadAudit() {
+    if (!isAdmin) return;
+    setAuditLoading(true);
+    try {
+      const res = await apiGet('auditLog', {limit:100, by:user?.code}, 15000);
+      if (res && res.ok) setAudit(res.entries||[]);
+      else showToast(res?.error||'Could not load the audit log','bad');
+    } catch(e) { showToast(e.message,'bad'); }
+    finally { setAuditLoading(false); }
+  }
 
   async function loadSerial() {
     if (!isAdmin) return;
@@ -4009,49 +4666,8 @@ function SettingsScreen({ctx}) {
       </div>
       <div className="scroll">
 
-        {/* ── Apps Script URL card (moved to top) ── */}
-        <div style={{padding:'0 18px 14px'}}>
-          <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>APPS SCRIPT URL</div>
-          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,overflow:'hidden'}}>
-            <div style={{padding:'12px 14px',borderBottom:`1px solid ${T.line}`}}>
-              <input value={apiUrl} onChange={e=>setApiUrl(e.target.value)}
-                style={{width:'100%',border:'none',outline:'none',fontFamily:T.mono,fontSize:11,color:T.ink,background:'transparent'}}
-                placeholder="https://script.google.com/macros/s/…/exec"/>
-            </div>
-            <div style={{display:'flex',gap:8,padding:'10px 12px'}}>
-              <Btn full onClick={saveUrl}>Save URL</Btn>
-              <Btn full primary onClick={testConnection} disabled={pinging}>
-                {pinging ? 'Testing…' : 'Test connection'}
-              </Btn>
-            </div>
-          </div>
-          <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,margin:'14px 0 6px'}}>GOOGLE REVIEW LINK (for PDF QR)</div>
-          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
-            <input defaultValue={localStorage.getItem('4s_review_url')||''}
-              onBlur={e=>{ localStorage.setItem('4s_review_url', e.target.value.trim()); showToast('Review link saved ✓'); }}
-              style={{width:'100%',border:'none',outline:'none',fontFamily:T.mono,fontSize:11,color:T.ink,background:'transparent'}}
-              placeholder="https://g.page/r/…/review"/>
-            <div style={{fontSize:10,color:T.ink4,marginTop:6,lineHeight:1.5}}>Used for the "Scan to review us" QR on the order PDF. Or drop a <b>review-qr.png</b> into the app folder to use your exact QR image.</div>
-          </div>
-          {pingResult && (
-            <div style={{marginTop:8,padding:'12px',borderRadius:6,background:pingResult.ok?T.okSoft:T.badSoft,border:`1px solid ${pingResult.ok?T.ok:T.bad}`}}>
-              <div style={{fontSize:13,fontWeight:700,color:pingResult.ok?T.ok:T.bad}}>{pingResult.msg}</div>
-              {pingResult.detail && <div style={{fontSize:11,color:T.ink3,marginTop:3,fontFamily:T.mono}}>Sheets found: {pingResult.detail}</div>}
-              {pingResult.ok && pingResult.sheetUrl && (
-                <div style={{marginTop:8,padding:'8px 10px',background:'#fff',borderRadius:4,border:`1px solid ${T.greenLine}`}}>
-                  <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:.5,marginBottom:4}}>OPS SPREADSHEET</div>
-                  <a href={pingResult.sheetUrl} target="_blank" rel="noreferrer"
-                    style={{fontSize:11,color:T.green,fontFamily:T.mono,wordBreak:'break-all',textDecoration:'underline'}}>
-                    Open OPS sheet (APP_ORDERING_CREDS tab → manage logins) ↗
-                  </a>
-                </div>
-              )}
-              {!pingResult.ok && <div style={{fontSize:11,color:T.ink3,marginTop:6,lineHeight:1.6}}>
-                Make sure the Web App is deployed with <b>Execute as: Me</b> and <b>Anyone can access</b>. Then copy the latest deployment URL and paste above.
-              </div>}
-            </div>
-          )}
-        </div>
+        {/* Backend URL, Google review link and connection test are managed in
+            the background — no setup UI is shown to users. */}
 
         {/* ── App order serial counter (admin only) ── */}
         {isAdmin && (
@@ -4077,6 +4693,34 @@ function SettingsScreen({ctx}) {
                   style={{flex:1,border:`1px solid ${T.line}`,borderRadius:6,outline:'none',fontFamily:T.mono,fontSize:15,color:T.ink,background:'#fff',padding:'0 12px'}}/>
                 <Btn primary onClick={saveSerial} disabled={serialSaving}>{serialSaving?'Saving…':'Set number'}</Btn>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Audit log (admin only) ── */}
+        {isAdmin && (
+          <div style={{padding:'0 18px 14px'}}>
+            <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>AUDIT LOG — WHO CHANGED WHAT</div>
+            <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'14px'}}>
+              <div style={{fontSize:12,color:T.ink3,lineHeight:1.6,marginBottom:10}}>
+                Every order create, edit, delete, WON and delivery change is recorded with the staff member and the time. Newest first.
+              </div>
+              <Btn full icon={Icon.refresh(T.green,14)} onClick={loadAudit} disabled={auditLoading}>{auditLoading?'Loading…':(audit===null?'Load audit log':'Refresh')}</Btn>
+              {audit!==null && (
+                <div style={{marginTop:10,border:`1px solid ${T.line}`,borderRadius:6,overflow:'hidden'}}>
+                  {audit.length===0 && <div style={{padding:16,textAlign:'center',fontSize:12,color:T.ink4}}>No changes recorded yet.</div>}
+                  {audit.slice(0,100).map((a,i,arr)=>{ const tone=/DELETE/.test(a.action)?T.bad:/CREATE/.test(a.action)?T.ok:T.ink3; const label=(a.action||'').replace(/_/g,' '); return (
+                    <div key={i} style={{padding:'9px 12px',borderBottom:i<arr.length-1?`1px solid ${T.line}`:'none'}}>
+                      <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                        <span style={{fontSize:10,fontWeight:800,letterSpacing:.4,color:'#fff',background:tone,padding:'1px 6px',borderRadius:3}}>{label}</span>
+                        {a.orderNo && <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{a.orderNo}</span>}
+                      </div>
+                      {a.detail && <div style={{fontSize:11,color:T.ink3,marginTop:3,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{a.detail}</div>}
+                      <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{a.user||'—'} · {a.ts}</div>
+                    </div>
+                  );})}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -4116,6 +4760,18 @@ function SettingsScreen({ctx}) {
                     <span>Total SKUs</span>
                     <span style={{fontWeight:700,color:T.ok}}>{(priceItems||[]).length}</span>
                   </div>
+                  {(()=>{ let st=null; try{ st=JSON.parse(localStorage.getItem('4s_catalog_stats_v1')||'null'); }catch(e){} if(!st||!st.total) return null; const pct=Math.round((st.matched/st.total)*100); return (
+                    <div style={{marginTop:6,borderTop:`1px solid ${T.line}`,paddingTop:6}}>
+                      <div style={{display:'flex',justifyContent:'space-between',color:T.ink2}}>
+                        <span>Catalog photos matched</span>
+                        <span style={{fontWeight:700,color:pct>=50?T.ok:T.warn}}>{st.matched} of {st.total} · {pct}%</span>
+                      </div>
+                      <div style={{fontSize:9.5,color:T.ink4,marginTop:2}}>{st.products||0} catalog products linked. Unmatched items show a “coming soon” preview.</div>
+                      {isAdmin && Array.isArray(st.sample) && st.sample.length>0 && (
+                        <div style={{marginTop:5,fontSize:9,color:T.ink4,lineHeight:1.6}}>Sample unmatched: {st.sample.slice(0,6).join(' · ')}</div>
+                      )}
+                    </div>
+                  ); })()}
                 </>
               ) : (
                 <div style={{color:T.warn}}>No items loaded — tap "Sync now" to fetch from OPS sheet</div>
@@ -4125,13 +4781,15 @@ function SettingsScreen({ctx}) {
               <Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncPriceList} disabled={loading}>
                 {loading?'Loading…':(priceItems||[]).length===0?'Load price list':'Sync now'}
               </Btn>
+              {isAdmin && (
               <Btn full icon={Icon.refresh(T.green,14)} onClick={runDebug} disabled={debugging}>
                 {debugging?'Checking…':'Debug'}
               </Btn>
+              )}
             </div>
 
-            {/* Debug result */}
-            {debugResult && (
+            {/* Debug result — admin only */}
+            {isAdmin && debugResult && (
               <div style={{marginTop:10,padding:'10px 12px',background:T.paper,border:`1px solid ${debugResult.ok?T.greenLine:T.bad}`,borderRadius:6}}>
                 {debugResult.ok ? (
                   <>
