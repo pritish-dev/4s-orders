@@ -2265,6 +2265,10 @@ const _MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','No
 function _fmtAmt(n){ n = n||0; return n>99999 ? ('₹'+(n/100000).toFixed(2)+'L') : ('₹'+n.toLocaleString('en-IN')); }
 // "dd.mm.yy" → sortable/comparable ISO "20yy-mm-dd" (matches <input type=date> values).
 function _toISO(dmy){ const p = String(dmy||'').split('.'); return p.length===3 ? ('20'+p[2]+'-'+p[1]+'-'+p[0]) : ''; }
+// Sales figures are reported EX-GST. Every stored order amount (o.amt) is the
+// GST-inclusive bill (18% baked into each MRP), so the tax is carved back out
+// here — the sales summary shows the pre-GST sale value, never the taxed total.
+function _exGst(n){ return Math.round((Number(n)||0)/(1+GST_RATE)); }
 function ReportsScreen({ctx}) {
   const {orders,nav} = ctx;
   const [from,setFrom]     = useState('');
@@ -2282,7 +2286,7 @@ function ReportsScreen({ctx}) {
   const _todayISO = _iso(new Date());
   const todays    = (orders||[]).filter(o => o && o.status !== 'draft' && _toISO(o.date) === _todayISO);
   const todayCount = todays.length;
-  const todayAmt   = todays.reduce((s,o)=>s+(o.amt||0),0);
+  const todayAmt   = todays.reduce((s,o)=>s+_exGst(o.amt),0);
   function applyPreset(id){
     const now = new Date(), y = now.getFullYear(), m = now.getMonth();
     setPreset(id);
@@ -2299,7 +2303,7 @@ function ReportsScreen({ctx}) {
     return true;
   });
   const totalCount = booked.length;
-  const totalAmt   = booked.reduce((s,o)=>s+(o.amt||0),0);
+  const totalAmt   = booked.reduce((s,o)=>s+_exGst(o.amt),0);
 
   const monthMap = {}, dayMap = {}, salesMap = {}, branchMap = {};
   booked.forEach(o => {
@@ -2307,16 +2311,16 @@ function ReportsScreen({ctx}) {
     if (p.length === 3) {
       const mk = p[2] + '.' + p[1];                // yy.mm — sorts chronologically
       if (!monthMap[mk]) monthMap[mk] = { count:0, amt:0, label:(_MONTHS[(parseInt(p[1],10)||1)-1]||p[1])+' 20'+p[2] };
-      monthMap[mk].count++; monthMap[mk].amt += (o.amt||0);
+      monthMap[mk].count++; monthMap[mk].amt += _exGst(o.amt);
       const dk = p[2] + '.' + p[1] + '.' + p[0];
       if (!dayMap[dk]) dayMap[dk] = { count:0, amt:0, label:o.date };
-      dayMap[dk].count++; dayMap[dk].amt += (o.amt||0);
+      dayMap[dk].count++; dayMap[dk].amt += _exGst(o.amt);
     }
     const sp = (o.salesExec||'').trim() || '(unassigned)';
     if (!salesMap[sp]) salesMap[sp] = { count:0, amt:0, label:sp };
-    salesMap[sp].count++; salesMap[sp].amt += (o.amt||0);
+    salesMap[sp].count++; salesMap[sp].amt += _exGst(o.amt);
     const br = (o.branch||'').trim();              // only present if the sheet carries it
-    if (br) { if (!branchMap[br]) branchMap[br] = { count:0, amt:0, label:br }; branchMap[br].count++; branchMap[br].amt += (o.amt||0); }
+    if (br) { if (!branchMap[br]) branchMap[br] = { count:0, amt:0, label:br }; branchMap[br].count++; branchMap[br].amt += _exGst(o.amt); }
   });
   const byAmt  = (a,b)=> b[1].amt - a[1].amt;
   const months = Object.entries(monthMap).sort((a,b)=>b[0].localeCompare(a[0]));
@@ -2364,6 +2368,7 @@ function ReportsScreen({ctx}) {
           <div style={{flex:1}}>
             <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>SALES SUMMARY</div>
             <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Orders &amp; amount</div>
+            <div style={{fontSize:10,color:T.ink4,marginTop:1}}>All amounts shown are pre-GST (excl. 18% GST)</div>
           </div>
         </div>
         {/* Date-range filter */}
@@ -2383,7 +2388,7 @@ function ReportsScreen({ctx}) {
             <div style={{fontSize:26,fontWeight:800,letterSpacing:-1,color:T.ink,lineHeight:1.1,marginTop:4}}>{totalCount}</div>
           </div>
           <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
-            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TOTAL AMOUNT</div>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TOTAL AMOUNT · EX-GST</div>
             <div style={{fontSize:26,fontWeight:800,letterSpacing:-1,color:T.green,lineHeight:1.1,marginTop:4}}>{_fmtAmt(totalAmt)}</div>
           </div>
         </div>
@@ -2391,7 +2396,7 @@ function ReportsScreen({ctx}) {
         <div style={{padding:'0 14px 12px'}}>
           <div style={{background:`linear-gradient(135deg, ${T.green}, ${T.greenDeep})`,borderRadius:10,padding:'12px 16px',color:'#fff',display:'flex',alignItems:'center',justifyContent:'space-between',boxShadow:'0 4px 14px rgba(240,64,64,.28)'}}>
             <div>
-              <div style={{fontSize:10,fontWeight:700,letterSpacing:.8,opacity:.9,display:'flex',alignItems:'center',gap:6}}><span style={{width:7,height:7,borderRadius:99,background:'#fff'}}/>TODAY'S SALE</div>
+              <div style={{fontSize:10,fontWeight:700,letterSpacing:.8,opacity:.9,display:'flex',alignItems:'center',gap:6}}><span style={{width:7,height:7,borderRadius:99,background:'#fff'}}/>TODAY'S SALE · EX-GST</div>
               <div style={{fontSize:11,opacity:.85,marginTop:3,fontFamily:T.mono}}>{istToday({day:'2-digit',month:'short',year:'numeric'})}</div>
             </div>
             <div style={{textAlign:'right'}}>
