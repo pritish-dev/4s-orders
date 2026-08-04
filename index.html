@@ -1468,7 +1468,7 @@ const BLANK_ORDER = () => ({
 // Delivery-status options. The order is only "Completed" once installation is done.
 // "Partial Delivery" means some items are delivered and the rest are still Pending
 // for delivery (the delivered items are tracked per-order).
-const DELIVERY_STATUSES = ['Pending', 'Scheduled for Delivery', 'Partial Delivery', 'Delivered', 'Installation Done'];
+const DELIVERY_STATUSES = ['Pending', 'Scheduled for Delivery', 'Rescheduled for Delivery', 'Partial Delivery', 'Delivered', 'Installation Done'];
 // Godrej modular product families. On the CUSTOMER copy of the PDF, every item
 // belonging to one family is collapsed into a single line (family name + the
 // summed line total). The SALES copy stays fully itemised.
@@ -2032,10 +2032,10 @@ function App() {
     finally { setLoading(false); }
   }
 
-  async function doUpdateDelivery(orderNo, internalNo, deliveryStatus, deliveredItems) {
+  async function doUpdateDelivery(orderNo, internalNo, deliveryStatus, deliveredItems, plannedDly) {
     setLoading(true);
     try {
-      const res = await apiPost({ action:'updateDelivery', orderNo, internalNo, deliveryStatus, deliveredItems, updatedBy: user?.name });
+      const res = await apiPost({ action:'updateDelivery', orderNo, internalNo, deliveryStatus, deliveredItems, plannedDly, updatedBy: user?.name });
       if (res.ok) { showToast('Delivery status updated ✓'); loadOrders(); return true; }
       else { showToast(res.error||'Update failed','bad'); return false; }
     } catch(e) { showToast(e.message,'bad'); return false; }
@@ -2270,9 +2270,19 @@ function ReportsScreen({ctx}) {
   const [from,setFrom]     = useState('');
   const [to,setTo]         = useState('');
   const [preset,setPreset] = useState('all');
+  // Collapsible breakdown sections — all collapsed by default (show counts only).
+  const [open,setOpen] = useState({});
+  const toggle = id => setOpen(p=>({...p,[id]:!p[id]}));
 
   const _pad = n => String(n).padStart(2,'0');
   const _iso = d => d.getFullYear()+'-'+_pad(d.getMonth()+1)+'-'+_pad(d.getDate());
+
+  // Today's Sale — always computed over ALL orders (independent of the date-range
+  // filter above) so the highlighted box reflects the current day only.
+  const _todayISO = _iso(new Date());
+  const todays    = (orders||[]).filter(o => o && o.status !== 'draft' && _toISO(o.date) === _todayISO);
+  const todayCount = todays.length;
+  const todayAmt   = todays.reduce((s,o)=>s+(o.amt||0),0);
   function applyPreset(id){
     const now = new Date(), y = now.getFullYear(), m = now.getMonth();
     setPreset(id);
@@ -2323,15 +2333,25 @@ function ReportsScreen({ctx}) {
       </div>
     </div>
   );
-  const Section = ({title, rows, empty}) => (
-    <>
-      <div style={{padding:'14px 18px 6px',fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:1.2,textTransform:'uppercase'}}>{title}</div>
-      <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`}}>
-        {rows.map(([k,v]) => <Row key={k} label={v.label} count={v.count} amt={v.amt}/>)}
-        {rows.length===0 && <div style={{padding:20,textAlign:'center',fontSize:12,color:T.ink4}}>{empty||'No booked orders in this range.'}</div>}
-      </div>
-    </>
-  );
+  // Collapsible breakdown section — the header is clickable and shows the group
+  // count; the rows stay hidden until it is expanded.
+  const Section = ({id, title, rows, empty}) => {
+    const isOpen = !!open[id];
+    return (
+      <>
+        <div onClick={()=>toggle(id)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 18px 8px',cursor:'pointer'}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:1.2,textTransform:'uppercase'}}>{title} <span style={{color:T.ink3}}>· {rows.length}</span></div>
+          <span style={{fontSize:11,color:T.ink4,fontFamily:T.mono}}>{isOpen?'HIDE ▲':'SHOW ▼'}</span>
+        </div>
+        {isOpen && (
+          <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`}}>
+            {rows.map(([k,v]) => <Row key={k} label={v.label} count={v.count} amt={v.amt}/>)}
+            {rows.length===0 && <div style={{padding:20,textAlign:'center',fontSize:12,color:T.ink4}}>{empty||'No booked orders in this range.'}</div>}
+          </div>
+        )}
+      </>
+    );
+  };
   const chip = (id,label) => (
     <span onClick={()=>applyPreset(id)} style={{padding:'6px 12px',borderRadius:99,background:preset===id?T.ink:'#fff',color:preset===id?'#fff':T.ink2,border:`1px solid ${preset===id?T.ink:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0}}>{label}</span>
   );
@@ -2367,12 +2387,25 @@ function ReportsScreen({ctx}) {
             <div style={{fontSize:26,fontWeight:800,letterSpacing:-1,color:T.green,lineHeight:1.1,marginTop:4}}>{_fmtAmt(totalAmt)}</div>
           </div>
         </div>
+        {/* Today's Sale — always visible, highlighted, current day only */}
+        <div style={{padding:'0 14px 12px'}}>
+          <div style={{background:`linear-gradient(135deg, ${T.green}, ${T.greenDeep})`,borderRadius:10,padding:'12px 16px',color:'#fff',display:'flex',alignItems:'center',justifyContent:'space-between',boxShadow:'0 4px 14px rgba(240,64,64,.28)'}}>
+            <div>
+              <div style={{fontSize:10,fontWeight:700,letterSpacing:.8,opacity:.9,display:'flex',alignItems:'center',gap:6}}><span style={{width:7,height:7,borderRadius:99,background:'#fff'}}/>TODAY'S SALE</div>
+              <div style={{fontSize:11,opacity:.85,marginTop:3,fontFamily:T.mono}}>{istToday({day:'2-digit',month:'short',year:'numeric'})}</div>
+            </div>
+            <div style={{textAlign:'right'}}>
+              <div style={{fontSize:24,fontWeight:800,letterSpacing:-0.8,lineHeight:1}}>{_fmtAmt(todayAmt)}</div>
+              <div style={{fontSize:11,opacity:.9,marginTop:2}}>{todayCount} order{todayCount===1?'':'s'} today</div>
+            </div>
+          </div>
+        </div>
       </div>
       <div className="scroll">
-        <Section title="By salesperson" rows={sales}/>
-        {branches.length>0 && <Section title="By branch" rows={branches}/>}
-        <Section title="Month-wise" rows={months}/>
-        <Section title="Day-wise (latest 60)" rows={days}/>
+        <Section id="sales" title="By salesperson" rows={sales}/>
+        {branches.length>0 && <Section id="branch" title="By branch" rows={branches}/>}
+        <Section id="month" title="Month-wise" rows={months}/>
+        <Section id="day" title="Day-wise (latest 60)" rows={days}/>
         <div style={{height:24}}/>
       </div>
       <BottomNav screen="home" nav={nav}/>
@@ -3131,10 +3164,13 @@ function OrderFormScreen({ctx}) {
   const {order,setOrder,nav,back,user,doSaveOrder,doDeleteOrder,doUpdateDelivery} = ctx;
   const o = order;
   const [partialPicker,setPartialPicker] = React.useState(false);
+  const [reschedulePicker,setReschedulePicker] = React.useState(false);
   // Delivery-status change: "Partial Delivery" opens the item picker so we can
   // record which items are delivered (the rest stay Pending for Delivery).
+  // "Rescheduled for Delivery" opens a date picker to set the new delivery date.
   function handleDeliveryChange(val){
     if(/partial/i.test(val)){ setPartialPicker(true); return; }
+    if(/rescheduled/i.test(val)){ setReschedulePicker(true); return; }
     setOrder(prev=>({...prev,deliveryStatus:val}));
   }
   async function confirmPartialDelivery(deliveredItems){
@@ -3143,6 +3179,13 @@ function OrderFormScreen({ctx}) {
     // Persist immediately if the order already exists (the plain save path does
     // not carry the delivered-items list).
     if(order.no) await doUpdateDelivery(order.no, order.internalNo, 'Partial Delivery', deliveredItems);
+  }
+  async function confirmReschedule(newDate){
+    setReschedulePicker(false);
+    if(!newDate) return;
+    setOrder(prev=>({...prev,deliveryStatus:'Rescheduled for Delivery',plannedDly:newDate,followUp:followUpFromDelivery(newDate)||prev.followUp}));
+    // Persist the new date immediately if the order already exists.
+    if(order.no) await doUpdateDelivery(order.no, order.internalNo, 'Rescheduled for Delivery', null, newDate);
   }
   // Admins can permanently delete an already-saved order straight from the edit screen.
   const isAdmin = normRole(user?.role) === 'admin';
@@ -3493,6 +3536,7 @@ function OrderFormScreen({ctx}) {
           <Btn primary full onClick={handleRestrictedSave}>Save Changes</Btn>
         </div>
         {partialPicker && <PartialDeliveryModal order={o} onCancel={()=>setPartialPicker(false)} onConfirm={confirmPartialDelivery}/>}
+        {reschedulePicker && <RescheduleModal order={o} onCancel={()=>setReschedulePicker(false)} onConfirm={confirmReschedule}/>}
       </div>
     );
   }
@@ -4267,20 +4311,26 @@ function HistoryScreen({ctx}) {
   const [query,setQuery] = useState('');
   const [salesFilter,setSalesFilter] = useState('');
   const [partialOrder,setPartialOrder] = useState(null);   // order awaiting the partial-delivery picker
+  const [rescheduleOrder,setRescheduleOrder] = useState(null); // order awaiting the reschedule date picker
   const [serviceOrder,setServiceOrder] = useState(null);   // order whose service request is being raised/edited
+  const [statusView,setStatusView] = useState(null);       // null=ledger · 'menu'=category grid · <catId>=that category's orders
   useEffect(()=>{ loadOrders(); loadMis({silent:true}); },[]);
-  // Delivery-status category helpers (Partial Delivery contains "Deliver", so match precisely).
+  // Delivery-status category helpers. "rescheduled for delivery" also contains
+  // "scheduled", so anchor both with ^ to keep the two buckets separate.
   const st = o => (o.deliveryStatus||'').toLowerCase();
   const isCompleted = o => o.status==='completed' || /installation done/i.test(o.deliveryStatus||'');
-  const tabs = [
-    {id:'pending',  label:'Pending',    filter:o=>!isCompleted(o) && (!st(o) || /^pending/.test(st(o)))},
-    {id:'pendwon',  label:'Pend WON',   filter:o=>!o.won&&o.status!=='draft'},
-    {id:'scheduled',label:'Scheduled',  filter:o=>/scheduled/.test(st(o))},
-    {id:'delivered',label:'Delivered',  filter:o=>/^delivered/.test(st(o))},
-    {id:'partial',  label:'Partial',    filter:o=>/partial/.test(st(o))},
-    {id:'completed',label:'Completed',  filter:o=>isCompleted(o)},
-    {id:'all',      label:'All',        filter:()=>true},
+  // The order-status categories (shared by the Order Status drill-down grid and the
+  // ledger tab strip). Each has an accent colour for its count box.
+  const CATS = [
+    {id:'pending',    label:'Pending',      tone:T.warn,  filter:o=>!isCompleted(o) && (!st(o) || /^pending/.test(st(o)))},
+    {id:'pendwon',    label:'Pending Won',  tone:T.warn,  filter:o=>!o.won&&o.status!=='draft'},
+    {id:'scheduled',  label:'Scheduled',    tone:T.ink,   filter:o=>/^scheduled/.test(st(o))},
+    {id:'rescheduled',label:'Rescheduled',  tone:T.green, filter:o=>/^rescheduled/.test(st(o))},
+    {id:'delivered',  label:'Delivered',    tone:T.ok,    filter:o=>/^delivered/.test(st(o))},
+    {id:'partial',    label:'Partial',      tone:T.warn,  filter:o=>/partial/.test(st(o))},
+    {id:'completed',  label:'Completed',    tone:T.ok,    filter:o=>isCompleted(o)},
   ];
+  const tabs = [...CATS.map(({id,label,filter})=>({id,label,filter})), {id:'all',label:'All',filter:()=>true}];
   const active = tabs.find(t=>t.id===tab)||tabs[0];
 
   // Distinct salespersons for the filter dropdown
@@ -4294,11 +4344,17 @@ function HistoryScreen({ctx}) {
     if(!val || val===(o.deliveryStatus||'Pending')) return;
     // Partial Delivery needs the item picker to record which items were delivered.
     if(/partial/i.test(val)){ setPartialOrder(o); return; }
+    // Rescheduled for Delivery needs a new date.
+    if(/rescheduled/i.test(val)){ setRescheduleOrder(o); return; }
     await doUpdateDelivery(o.no, o.internalNo, val);
   }
   async function confirmPartial(deliveredItems){
     const o = partialOrder; setPartialOrder(null);
     if(o) await doUpdateDelivery(o.no, o.internalNo, 'Partial Delivery', deliveredItems);
+  }
+  async function confirmReschedule(newDate){
+    const o = rescheduleOrder; setRescheduleOrder(null);
+    if(o && newDate) await doUpdateDelivery(o.no, o.internalNo, 'Rescheduled for Delivery', null, newDate);
   }
 
   if(wonOrder) return <WONUpdateScreen ctx={ctx} orderOverride={wonOrder} onClose={()=>setWonOrder(null)}/>;
@@ -4311,38 +4367,11 @@ function HistoryScreen({ctx}) {
     await doDeleteOrder(o.no, o.internalNo);
   }
 
-  return (
-    <div className="screen">
-      <div style={{flexShrink:0}}>
-        <div style={{padding:'14px 18px 8px',display:'flex',justifyContent:'space-between',alignItems:'flex-end'}}>
-          <div><div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>LEDGER · {orders.length} ORDERS</div><div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2}}>Orders</div></div>
-          <Btn size="sm" icon={Icon.refresh(T.ink2,14)} onClick={()=>{loadOrders();loadMis({});}} disabled={misLoading}>Refresh</Btn>
-        </div>
-        {/* Search by Order ID or SO No (WON) */}
-        <div style={{padding:'2px 18px 8px'}}>
-          <div style={{display:'flex',alignItems:'center',gap:8,background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'8px 12px'}}>
-            {Icon.search(T.ink4,16)}
-            <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search by Order ID or SO No (WON)" style={{flex:1,border:'none',outline:'none',fontSize:14,fontFamily:T.sans,color:T.ink,background:'transparent'}}/>
-            {query&&<span onClick={()=>setQuery('')} style={{cursor:'pointer'}}>{Icon.close(T.ink4,14)}</span>}
-          </div>
-        </div>
-        {/* Filter by salesperson */}
-        <div style={{padding:'0 18px 8px',display:'flex',gap:6,overflowX:'auto',alignItems:'center'}}>
-          <span style={{fontSize:11,color:T.ink4,fontWeight:700,flexShrink:0}}>SALES</span>
-          <span onClick={()=>setSalesFilter('')} style={{padding:'5px 10px',borderRadius:99,background:!salesFilter?T.green:'#fff',color:!salesFilter?'#fff':T.ink2,border:`1px solid ${!salesFilter?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0}}>All</span>
-          {salespeople.map(sp=>(
-            <span key={sp} onClick={()=>setSalesFilter(sp)} style={{padding:'5px 10px',borderRadius:99,background:salesFilter===sp?T.green:'#fff',color:salesFilter===sp?'#fff':T.ink2,border:`1px solid ${salesFilter===sp?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>{sp}</span>
-          ))}
-        </div>
-        <div style={{padding:'0 18px 10px',display:'flex',gap:6,overflowX:'auto'}}>
-          {tabs.map(t=>{
-            const n = orders.filter(t.filter).length;
-            return <span key={t.id} onClick={()=>setTab(t.id)} style={{padding:'6px 11px',borderRadius:99,background:t.id===tab?T.ink:'#fff',color:t.id===tab?'#fff':T.ink2,border:`1px solid ${t.id===tab?T.ink:T.line}`,fontSize:12,fontWeight:600,display:'inline-flex',gap:5,alignItems:'center',cursor:'pointer',flexShrink:0}}>{t.label}<span style={{fontFamily:T.mono,opacity:.7,fontSize:11}}>{n}</span></span>;
-          })}
-        </div>
-      </div>
-      <div className="scroll">
-        {shown.map(o=>(
+  // A single order row — reused by the ledger list and the Order-Status category
+  // list. Shows the delivery date and the outstanding balance (or "Fully Paid").
+  const orderCard = o => {
+    const bal = Math.round(orderReceived(o).balance);
+    return (
           <div key={o.no} style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`,padding:'12px 18px',display:'grid',gridTemplateColumns:'1fr auto',gap:10,cursor:'pointer'}} onClick={()=>openOrder(o)}>
             <div style={{minWidth:0}}>
               <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3,flexWrap:'wrap'}}>
@@ -4356,6 +4385,7 @@ function HistoryScreen({ctx}) {
                 const dlIso = (o.plannedDly&&o.plannedDly.length>=8?o.plannedDly:'')||(misForOrder(mis,o)?.deliveryDate)||'';
                 return dlIso ? <div style={{fontSize:11,color:T.ink3,marginTop:2}}>Delivery: <span style={{fontFamily:T.mono,fontWeight:600,color:T.ink2}}>{prettyDate(dlIso)}</span></div> : null;
               })()}
+              <div style={{fontSize:11,marginTop:2}}>Balance: <span style={{fontFamily:T.mono,fontWeight:700,color:bal>0?T.bad:T.ok}}>{bal>0?'₹'+bal.toLocaleString('en-IN'):'Fully Paid'}</span></div>
               {(() => {
                 const m = misForOrder(mis, o);
                 const partialPending = /partial/i.test(o.deliveryStatus||'') ? Math.max(0,(o.items||[]).length-(o.deliveryStatus?(o.deliveredItems||[]).length:0)) : 0;
@@ -4385,7 +4415,118 @@ function HistoryScreen({ctx}) {
               </div>
             </div>
           </div>
-        ))}
+    );
+  };
+
+  // ── Order Status drill-down ────────────────────────────────────────────────
+  // The category grid shows only the count per status; tapping a category opens
+  // its order list. Reached from the "Order Status" box on the ledger.
+  if (statusView === 'menu') {
+    return (
+      <div className="screen">
+        <div style={{flexShrink:0}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 8px'}}>
+            <button onClick={()=>setStatusView(null)} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>ORDERS · BY STATUS</div>
+              <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Order Status</div>
+            </div>
+          </div>
+        </div>
+        <div className="scroll" style={{padding:'6px 14px 20px'}}>
+          <div style={{fontSize:12,color:T.ink4,padding:'6px 4px 12px'}}>Tap a status to see the orders in it.</div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+            {CATS.map(c=>{
+              const n = orders.filter(c.filter).length;
+              return (
+                <div key={c.id} onClick={()=>setStatusView(c.id)} style={{background:'#fff',border:`1px solid ${T.line}`,borderLeft:`4px solid ${c.tone}`,borderRadius:10,padding:'14px 16px',cursor:'pointer',display:'flex',flexDirection:'column',gap:4}}>
+                  <div style={{fontSize:30,fontWeight:800,letterSpacing:-1,color:c.tone,lineHeight:1}}>{n}</div>
+                  <div style={{fontSize:13,fontWeight:700,color:T.ink}}>{c.label}</div>
+                  <div style={{fontSize:10,color:T.ink4}}>{n===1?'1 order':n+' orders'}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <BottomNav screen="history" nav={nav}/>
+      </div>
+    );
+  }
+  if (statusView && statusView !== 'menu') {
+    const cat = CATS.find(c=>c.id===statusView) || CATS[0];
+    const catOrders = orders.filter(cat.filter);
+    return (
+      <div className="screen">
+        <div style={{flexShrink:0}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 10px'}}>
+            <button onClick={()=>setStatusView('menu')} title="Back to statuses" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>ORDER STATUS</div>
+              <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>{cat.label} · {catOrders.length}</div>
+            </div>
+          </div>
+        </div>
+        <div className="scroll">
+          {catOrders.map(orderCard)}
+          {catOrders.length===0 && (
+            <div style={{padding:'48px 24px',textAlign:'center'}}>
+              <div style={{width:52,height:52,borderRadius:14,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12}}>{Icon.doc(T.ink4,24)}</div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No orders in {cat.label}</div>
+              <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>Orders with this status will appear here.</div>
+            </div>
+          )}
+          <div style={{height:24}}/>
+        </div>
+        {partialOrder && <PartialDeliveryModal order={partialOrder} onCancel={()=>setPartialOrder(null)} onConfirm={confirmPartial}/>}
+        {rescheduleOrder && <RescheduleModal order={rescheduleOrder} onCancel={()=>setRescheduleOrder(null)} onConfirm={confirmReschedule}/>}
+        {serviceOrder && <ServiceRequestModal order={serviceOrder} ctx={ctx} onClose={()=>setServiceOrder(null)}/>}
+        <BottomNav screen="history" nav={nav}/>
+      </div>
+    );
+  }
+
+  return (
+    <div className="screen">
+      <div style={{flexShrink:0}}>
+        <div style={{padding:'14px 18px 8px',display:'flex',justifyContent:'space-between',alignItems:'flex-end'}}>
+          <div><div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>LEDGER · {orders.length} ORDERS</div><div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2}}>Orders</div></div>
+          <Btn size="sm" icon={Icon.refresh(T.ink2,14)} onClick={()=>{loadOrders();loadMis({});}} disabled={misLoading}>Refresh</Btn>
+        </div>
+        {/* Order Status drill-down entry — opens the by-status category page */}
+        <div style={{padding:'2px 18px 8px'}}>
+          <div onClick={()=>setStatusView('menu')} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'14px 16px',background:T.ink,color:'#fff',borderRadius:10,cursor:'pointer'}}>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              <div style={{width:34,height:34,borderRadius:8,background:'rgba(255,255,255,.14)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>📦</div>
+              <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>Order Status</div><div style={{fontSize:11,opacity:.7}}>View counts by status · tap to open</div></div>
+            </div>
+            <span style={{fontSize:18,opacity:.8}}>›</span>
+          </div>
+        </div>
+        {/* Search by Order ID or SO No (WON) */}
+        <div style={{padding:'2px 18px 8px'}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'8px 12px'}}>
+            {Icon.search(T.ink4,16)}
+            <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search by Order ID or SO No (WON)" style={{flex:1,border:'none',outline:'none',fontSize:14,fontFamily:T.sans,color:T.ink,background:'transparent'}}/>
+            {query&&<span onClick={()=>setQuery('')} style={{cursor:'pointer'}}>{Icon.close(T.ink4,14)}</span>}
+          </div>
+        </div>
+        {/* Filter by salesperson */}
+        <div style={{padding:'0 18px 8px',display:'flex',gap:6,overflowX:'auto',alignItems:'center'}}>
+          <span style={{fontSize:11,color:T.ink4,fontWeight:700,flexShrink:0}}>SALES</span>
+          <span onClick={()=>setSalesFilter('')} style={{padding:'5px 10px',borderRadius:99,background:!salesFilter?T.green:'#fff',color:!salesFilter?'#fff':T.ink2,border:`1px solid ${!salesFilter?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0}}>All</span>
+          {salespeople.map(sp=>(
+            <span key={sp} onClick={()=>setSalesFilter(sp)} style={{padding:'5px 10px',borderRadius:99,background:salesFilter===sp?T.green:'#fff',color:salesFilter===sp?'#fff':T.ink2,border:`1px solid ${salesFilter===sp?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>{sp}</span>
+          ))}
+        </div>
+        <div style={{padding:'0 18px 10px',display:'flex',gap:6,overflowX:'auto'}}>
+          {tabs.map(t=>{
+            const n = orders.filter(t.filter).length;
+            return <span key={t.id} onClick={()=>setTab(t.id)} style={{padding:'6px 11px',borderRadius:99,background:t.id===tab?T.ink:'#fff',color:t.id===tab?'#fff':T.ink2,border:`1px solid ${t.id===tab?T.ink:T.line}`,fontSize:12,fontWeight:600,display:'inline-flex',gap:5,alignItems:'center',cursor:'pointer',flexShrink:0}}>{t.label}<span style={{fontFamily:T.mono,opacity:.7,fontSize:11}}>{n}</span></span>;
+          })}
+        </div>
+      </div>
+      <div className="scroll">
+        {shown.map(orderCard)}
         {loading && orders.length===0
           ? [0,1,2,3,4].map(i=><SkeletonOrderRow key={i}/>)
           : shown.length===0 && (
@@ -4398,6 +4539,7 @@ function HistoryScreen({ctx}) {
         <div style={{height:24}}/>
       </div>
       {partialOrder && <PartialDeliveryModal order={partialOrder} onCancel={()=>setPartialOrder(null)} onConfirm={confirmPartial}/>}
+      {rescheduleOrder && <RescheduleModal order={rescheduleOrder} onCancel={()=>setRescheduleOrder(null)} onConfirm={confirmReschedule}/>}
       {serviceOrder && <ServiceRequestModal order={serviceOrder} ctx={ctx} onClose={()=>setServiceOrder(null)}/>}
       <BottomNav screen="history" nav={nav}/>
     </div>
@@ -4603,6 +4745,33 @@ function NotificationsScreen({ctx}) {
 // ─── Partial-delivery item picker ────────────────────────────
 // Shown when the delivery status is set to "Partial Delivery": pick the items
 // that have actually been delivered; the remaining items stay Pending for delivery.
+// Reschedule-delivery date picker. Shown when the delivery status is set to
+// "Rescheduled for Delivery" — anyone using the app can move the order to a new
+// planned delivery date, which is written to the CRM sheet on confirm.
+function RescheduleModal({order, onCancel, onConfirm}) {
+  const cur = (order.plannedDly && order.plannedDly.length>=8) ? order.plannedDly : '';
+  const [date, setDate] = useState(cur);
+  return (
+    <div style={{position:'fixed',inset:0,zIndex:9995,background:'rgba(10,15,13,.45)',display:'flex',alignItems:'flex-end',justifyContent:'center'}} onClick={onCancel}>
+      <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:430,background:T.paper,borderTopLeftRadius:16,borderTopRightRadius:16,display:'flex',flexDirection:'column',animation:'slideUp .2s ease'}}>
+        <div style={{padding:'14px 18px 10px',borderBottom:`1px solid ${T.line}`}}>
+          <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.3}}>Reschedule Delivery</div>
+          <div style={{fontSize:11.5,color:T.ink4,marginTop:2}}>Pick a new delivery date for <b>{order.customer||'this order'}</b>. The order moves to <b>Rescheduled for Delivery</b>.</div>
+        </div>
+        <div style={{padding:'16px 18px'}}>
+          {cur && <div style={{fontSize:11,color:T.ink4,marginBottom:8}}>Current date: <span style={{fontFamily:T.mono,fontWeight:600,color:T.ink2}}>{prettyDate(cur)}</span></div>}
+          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.8,marginBottom:6}}>NEW DELIVERY DATE</div>
+          <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={{width:'100%',border:`1.5px solid ${T.green}`,borderRadius:8,padding:'12px 14px',fontFamily:T.mono,fontSize:16,color:T.ink,background:'#fff'}}/>
+        </div>
+        <div style={{padding:'10px 16px 14px',borderTop:`1px solid ${T.line}`,background:'#fff',display:'flex',gap:8}}>
+          <Btn onClick={onCancel}>Cancel</Btn>
+          <Btn primary full onClick={()=>onConfirm(date)} disabled={!date}>Save new date</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PartialDeliveryModal({order, onCancel, onConfirm}) {
   const items = order.items || [];
   const already = order.deliveredItems || [];
