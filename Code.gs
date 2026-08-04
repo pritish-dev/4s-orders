@@ -2086,6 +2086,12 @@ function handleUpdateDelivery(body) {
     try { deliveredJson = JSON.stringify(body.deliveredItems); } catch (e) { deliveredJson = ''; }
   }
 
+  // "Rescheduled for Delivery": the app sends `plannedDly` — the new planned
+  // delivery date (yyyy-mm-dd). When present, overwrite the "CUSTOMER DELIVERY
+  // DATE (TO BE)" column so the new date shows everywhere (order card, MIS
+  // reminders). Any status may carry a new date; we only write it when supplied.
+  var newDate = String(body.plannedDly || '').trim();
+
   var sh;
   try { sh = _openCRMSheet(); }
   catch (e) { return { ok: false, error: e.message }; }
@@ -2101,6 +2107,7 @@ function handleUpdateDelivery(body) {
   var cIntNo   = colOf(CRM_H.INT_NO);
   var cDeliv   = colOf(CRM_H.DELIVERY);
   var cDelItems= colOf(['DELIVERED ITEMS DATA', 'DELIVERED ITEMS']);
+  var cPlanned = colOf(['CUSTOMER DELIVERY DATE (TO BE)']);
   if (cDeliv < 0) return { ok: false, error: 'No "Delivery Remarks" column found in the CRM sheet.' };
 
   var lastRow = sh.getLastRow();
@@ -2115,11 +2122,13 @@ function handleUpdateDelivery(body) {
       sh.getRange(i + 2, cDeliv + 1).setValue(status);
       // Store the delivered-items list on partial delivery; clear it otherwise.
       if (cDelItems >= 0) sh.getRange(i + 2, cDelItems + 1).setValue(isPartial ? deliveredJson : '');
+      // Stamp the new planned delivery date when the app sent one (reschedule).
+      if (newDate && cPlanned >= 0) sh.getRange(i + 2, cPlanned + 1).setValue(newDate);
       updated++;
     }
   }
   if (!updated) return { ok: false, error: 'Order not found: ' + orderNo };
-  _appendLog(updatedBy, orderNo, 'UPDATE_DELIVERY', 'Delivery: ' + status);
+  _appendLog(updatedBy, orderNo, 'UPDATE_DELIVERY', 'Delivery: ' + status + (newDate ? ' · new date ' + newDate : ''));
   return { ok: true, rows: updated };
 }
 
