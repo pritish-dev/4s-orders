@@ -1852,11 +1852,59 @@ function _writeOrderToCRM(o) {
   return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: built.length };
 }
 
+// One line's GST-inclusive, whole-rupee billed amount — the exact figure written
+// to the ORDER AMOUNT column and summed as the order total on read. Kept as a
+// single helper so the writer, the total and the reconciler never drift.
+function _lineBilledAmount(unitItem, qty, orderDiscPct) {
+  var lineNet = Math.round((Number(unitItem) || 0) * (Number(qty) || 0) * (1 - orderDiscPct));
+  return Math.round(lineNet * 1.18);
+}
+
+// Reconcile a paid-in-full advance against the billed total. Each MRP line is
+// rounded to the whole rupee, so the money actually received (advance + later
+// money-receipt amounts) can land 1–2 rupees off the billed total on an order
+// the customer has paid in full. When that gap is within the per-line rounding
+// budget, snap the advance so received == billed exactly; otherwise leave it
+// untouched so a real outstanding balance is never hidden. This is the single
+// source of truth shared by the order writer and the one-off sheet reconciler,
+// so the CRM never shows a phantom ₹1–₹2 difference on a fully-paid order.
+function _reconciledAdvance(advReceived, laterReceiptTotal, billedTotal, lineCount) {
+  var adv = Number(advReceived) || 0;
+  if (adv <= 0) return adv;                                 // no advance booked — nothing to reconcile
+  var received    = adv + (Number(laterReceiptTotal) || 0);
+  var gap         = (Number(billedTotal) || 0) - received;  // >0 under, <0 over, purely by rounding
+  var roundBudget = 2 + 10 * (Number(lineCount) || 0);      // same tolerance the app displays with
+  if (gap !== 0 && Math.abs(gap) <= roundBudget) {
+    var snapped = adv + gap;                                // adv + later == billedTotal
+    if (snapped >= 0) return snapped;
+  }
+  return adv;
+}
+
 // Builds the per-item rows for one order (values matched to columns by header).
 function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, won, slBaseRow) {
   var items = o.items || [];
   if (!items.length) return [];
   var orderDiscPct = Math.max(0, parseFloat(o.orderDiscount) || 0) / 100;
+
+  // Billed order total, computed up-front (identical per-line rounding to the
+  // AMOUNT column below) so the advance can be reconciled against it before it
+  // is written on the first row.
+  var billedTotal = 0;
+  for (var bi = 0; bi < items.length; bi++) {
+    var bIt       = items[bi];
+    var bUnitMrp  = Number(bIt.mrp) || Number(bIt.cpl) || 0;
+    var bUnitItem = (bIt.unitPrice !== undefined && bIt.unitPrice !== '') ? (Number(bIt.unitPrice) || 0) : bUnitMrp;
+    billedTotal  += _lineBilledAmount(bUnitItem, bIt.qty, orderDiscPct);
+  }
+  // Later part-payments recorded as amounts on money receipts 2 & 3.
+  var _mrs = Array.isArray(o.moneyReceipts) ? o.moneyReceipts : [];
+  var _later = 0;
+  for (var _mi = 1; _mi < _mrs.length; _mi++) _later += Number(_mrs[_mi] && _mrs[_mi].amt) || 0;
+  // ADV RECEIVED to persist — snapped to close a pure-rounding gap on a
+  // fully-paid order so ADV + later receipts == billed total exactly.
+  var advToWrite = _reconciledAdvance(o.earnest, _later, billedTotal, items.length);
+
   var out = [];
 
   for (var i = 0; i < items.length; i++) {
@@ -1904,7 +1952,7 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['CROSS CHECK GROSS AMT (Order Value Without Tax)', 'CROSS CHECK GROSS AMT'], lineNet);
     put(['CUSTOMER DELIVERY DATE (TO BE)'], o.plannedDly || '');
     put(CRM_H.SALES, o.salesExec || '');
-    if (i === 0) put(['ADV RECEIVED'], Number(o.earnest) || 0);   // order-level — first row only
+    if (i === 0) put(['ADV RECEIVED'], advToWrite);   // order-level — first row only (rounding-reconciled)
     put(['REFERENCE ORDER NO.', 'REFERENCE ORDER NO'], o.poRef || '');
     put(['DELIVERY REMARKS(DELIVERED/PENDING)', 'DELIVERY REMARKS'], o.deliveryStatus || 'Pending');
     put(['POSTED BY'], o.salesExec || '');
@@ -2011,6 +2059,100 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     out.push(row);
   }
   return out;
+}
+
+// ─── ONE-OFF: RECONCILE FULLY-PAID ADVANCES ──────────────────────────────────
+// Historic rows can carry an ADV RECEIVED that sits 1–2 rupees off the billed
+// order total purely from per-line GST rounding. The app already shows such an
+// order as "Paid in full" (balance 0), but the raw sheet cells still differ —
+// that leftover ₹1–₹2 is exactly what shows up in the sheet. This scans the CRM
+// tab and, for every order paid in full within the rounding budget, rewrites its
+// ADV RECEIVED so ADV + later money-receipt amounts equal the billed total
+// exactly. Run once from the Apps Script editor:
+//
+//   previewFullyPaidAdvanceFixes()  → logs what WOULD change, writes nothing.
+//   reconcileFullyPaidAdvances()    → applies the fixes to the sheet.
+//
+// Both return { ok, applied, scanned, adjusted, changes[] } and log a per-order
+// breakdown to Logger, so you can preview first and apply once it looks right.
+function previewFullyPaidAdvanceFixes() { return _reconcileAdvances(false); }
+function reconcileFullyPaidAdvances()   { return _reconcileAdvances(true); }
+
+function _reconcileAdvances(apply) {
+  var sh = _openCRMSheet();
+  var C  = _crmCols(sh);
+  var colOf = C.colOf;
+  var cOrderNo = colOf(CRM_H.ORDER_NO);
+  var cPhone   = colOf(CRM_H.PHONE);
+  var cAdv     = colOf(['ADV RECEIVED']);
+  var cAmt     = colOf(CRM_H.AMOUNT);
+  var cMr2a    = colOf(['MONEY RECEIPT AMT 2', 'MONEY RECEIPT AMOUNT 2']);
+  var cMr3a    = colOf(['MONEY RECEIPT AMT 3', 'MONEY RECEIPT AMOUNT 3']);
+  if (cAdv < 0 || cAmt < 0) {
+    var msg0 = 'ADV RECEIVED or ORDER AMOUNT column not found — nothing to reconcile.';
+    Logger.log(msg0);
+    return { ok: false, error: msg0 };
+  }
+
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return { ok: true, applied: !!apply, scanned: 0, adjusted: 0, changes: [] };
+  var data = sh.getRange(2, 1, lastRow - 1, sh.getLastColumn()).getValues();
+
+  function num(v) { return Number(v) || 0; }
+  function str(v) { return String(v == null ? '' : v).trim(); }
+
+  // Group rows by order (ORDER NO | PHONE) exactly as the app reads them: the
+  // first-seen row of each key is where ADV RECEIVED and the money-receipt
+  // amounts live, and every row of the order contributes to the billed total.
+  var map = {}, order = [];
+  for (var i = 0; i < data.length; i++) {
+    var r  = data[i];
+    var no = str(r[cOrderNo]);
+    var ph = cPhone >= 0 ? str(r[cPhone]) : '';
+    if (!no && !ph) continue;
+    var key = no + '|' + ph;
+    if (!map[key]) {
+      map[key] = {
+        no: no, phone: ph,
+        advRow: i + 2,                 // 1-based sheet row of the first (ADV-bearing) line
+        adv:    num(r[cAdv]),
+        later:  (cMr2a >= 0 ? num(r[cMr2a]) : 0) + (cMr3a >= 0 ? num(r[cMr3a]) : 0),
+        billed: 0, lines: 0,
+      };
+      order.push(key);
+    }
+    map[key].billed += num(r[cAmt]);
+    map[key].lines  += 1;
+  }
+
+  var changes = [];
+  for (var k = 0; k < order.length; k++) {
+    var m = map[order[k]];
+    var newAdv = _reconciledAdvance(m.adv, m.later, m.billed, m.lines);
+    if (newAdv !== m.adv) {
+      changes.push({ order: m.no, phone: m.phone, row: m.advRow,
+                     from: m.adv, to: newAdv, delta: newAdv - m.adv,
+                     billed: m.billed, later: m.later });
+    }
+  }
+
+  if (apply) {
+    for (var c = 0; c < changes.length; c++) {
+      sh.getRange(changes[c].row, cAdv + 1).setValue(changes[c].to);
+    }
+    SpreadsheetApp.flush();
+  }
+
+  Logger.log((apply ? 'APPLIED ' : 'PREVIEW ') + changes.length +
+             ' advance fix(es) across ' + order.length + ' order(s).');
+  for (var d = 0; d < changes.length; d++) {
+    var ch = changes[d];
+    Logger.log('  Order ' + (ch.order || '—') + ' (row ' + ch.row + '): ADV ' +
+               ch.from + ' → ' + ch.to + '  (Δ' + (ch.delta > 0 ? '+' : '') + ch.delta +
+               ', billed ' + ch.billed + ')');
+  }
+  return { ok: true, applied: !!apply, scanned: order.length,
+           adjusted: changes.length, changes: changes };
 }
 
 // ─── UPDATE WON ───────────────────────────────────────────────────────────────
