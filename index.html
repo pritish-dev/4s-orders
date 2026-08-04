@@ -458,9 +458,21 @@ function orderTotals(o) {
   const itemsSubtotal = items.reduce((s, i) => s + gstInclLine(i), 0);
   const orderDiscPct  = Math.max(0, parseFloat(o.orderDiscount) || 0) / 100;
   const orderDiscAmt  = rnd(itemsSubtotal * orderDiscPct);
-  // Total = MRP subtotal less any order-wide discount. GST is NOT added on top —
-  // it is already part of every MRP line.
-  const total         = itemsSubtotal - orderDiscAmt;
+  // Re-derived order value = MRP subtotal less any order-wide discount. GST is NOT
+  // added on top — it is already part of every MRP line.
+  const derivedTotal  = itemsSubtotal - orderDiscAmt;
+  // The 18% GST is carved OUT of, and folded back INTO, each MRP line at the whole
+  // rupee, so re-deriving the order value from the stored per-unit (GST-exclusive)
+  // MRPs can miss the amount actually billed at save time by up to a rupee or two per
+  // line. The billed total is persisted once (o.amt = sum of the CRM "AMOUNT" column);
+  // when it is within that per-line rounding budget of the re-derived figure it is the
+  // real amount the customer was charged, so trust it — a manually-priced order then
+  // shows its exact total and never a phantom ₹1–₹3 balance. A materially different
+  // o.amt (items edited since the last save) falls outside the budget, so the fresh
+  // re-derived value is used instead.
+  const roundBudget   = 2 + 10 * items.length;
+  const billedTotal   = Number(o.amt) || 0;
+  const total         = (billedTotal > 0 && Math.abs(billedTotal - derivedTotal) <= roundBudget) ? billedTotal : derivedTotal;
   // Carve the 18% GST already contained in the total back out, so the bill can
   // still show a CGST/SGST breakup without ever inflating the amount payable.
   const taxable       = Math.round(total / (1 + GST_RATE));
@@ -468,12 +480,12 @@ function orderTotals(o) {
   const cgst          = Math.round(gstTotal / 2);
   const sgst          = gstTotal - cgst;
   // MRPs are GST-inclusive and every line is rounded to the whole rupee, so a
-  // "paid in full" amount can land a rupee or two under the rounded total. Treat
-  // a residual of up to ₹2 as fully paid so the customer who paid the whole
-  // amount never sees the received amount short by a rupee or a phantom balance.
+  // "paid in full" amount can land a few rupees under the rounded total. Treat a
+  // residual within the same per-line rounding budget as fully paid so the customer
+  // who paid the whole amount never sees a phantom balance.
   const earnestRaw    = Number(o.earnest) || 0;
   const balanceRaw    = total - earnestRaw;
-  const paidInFull    = earnestRaw > 0 && balanceRaw > 0 && balanceRaw <= 2;
+  const paidInFull    = earnestRaw > 0 && balanceRaw > 0 && balanceRaw <= roundBudget;
   const earnest       = paidInFull ? total : earnestRaw;
   const balance       = total - earnest;
   return { itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance, manual: !!o.manualOrder };
@@ -491,7 +503,8 @@ function orderReceived(o) {
   let received  = (Number(o.earnest) || 0) + later;
   if (received > total) received = total;            // never record more than the bill
   let balance = total - received;
-  if (balance > 0 && balance <= 2) { received = total; balance = 0; }   // ₹2 rounding tolerance
+  const roundBudget = 2 + 10 * ((o.items || []).length);   // per-line GST rounding tolerance
+  if (balance > 0 && balance <= roundBudget) { received = total; balance = 0; }
   return { total, received, balance };
 }
 
@@ -847,7 +860,12 @@ function generatePDF(order, copyType) {
 
   // Single source of truth for money (items subtotal → order discount → GST)
   const T2       = orderTotals(order);
-  const subtotal = T2.itemsSubtotal;
+  // Show the sub-total tied to the (authoritative) total so the printed block always
+  // balances: Sub Total − Order Disc = Total = Taxable + CGST + SGST. For a freshly
+  // priced order this equals the items subtotal exactly; when the total has been
+  // snapped to the persisted billed amount it keeps the invoice arithmetic exact
+  // instead of off by the per-line GST rounding.
+  const subtotal = T2.total + T2.orderDiscAmt;
   const cgst     = T2.cgst;
   const sgst     = T2.sgst;
   const totalAmt = T2.total;
@@ -3887,7 +3905,7 @@ function OrderFormScreen({ctx}) {
         </div>
         <div style={{padding:'14px 14px 18px'}}>
           <div style={{background:T.ink,color:'#fff',borderRadius:8,padding:'14px 16px',fontFamily:T.mono}}>
-            <div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>Items subtotal (incl. GST)</span><span>₹{itemsSubtotal.toLocaleString('en-IN')}</span></div>
+            <div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>Items subtotal (incl. GST)</span><span>₹{(total+orderDiscAmt).toLocaleString('en-IN')}</span></div>
             {orderDiscAmt>0&&<div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13,color:'#ffd27a'}}><span>Order disc {(orderDiscPct*100).toLocaleString('en-IN')}%</span><span>−₹{orderDiscAmt.toLocaleString('en-IN')}</span></div>}
             {/* GST is already inside each MRP — CGST/SGST shown here are carved OUT
                 of the inclusive total (never added on top). */}
@@ -4064,7 +4082,7 @@ function PDFPreviewScreen({ctx}) {
             </div>
             <div style={{display:'flex',justifyContent:'flex-end',marginBottom:12}}>
               <div style={{width:170,fontFamily:T.mono,fontSize:9}}>
-                <div style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>Subtotal (incl. GST)</span><span>₹{itemsSubtotal.toLocaleString('en-IN')}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>Subtotal (incl. GST)</span><span>₹{(total+orderDiscAmt).toLocaleString('en-IN')}</span></div>
                 {orderDiscAmt>0&&<div style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.bad}}><span>Order disc {(orderDiscPct*100).toLocaleString('en-IN')}%</span><span>−₹{orderDiscAmt.toLocaleString('en-IN')}</span></div>}
                 {[['CGST 9% (incl.)',cgst],['SGST 9% (incl.)',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>{k}</span><span>₹{v.toLocaleString('en-IN')}</span></div>)}
                 <div style={{borderTop:`1px solid ${T.ink}`,marginTop:2,paddingTop:3,display:'flex',justifyContent:'space-between',fontWeight:700,fontSize:11,color:T.ink}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
