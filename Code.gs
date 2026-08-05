@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v50';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v51';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -1653,6 +1653,8 @@ function handleSaveOrder(o) {
   var who = o.byName || o.by || o.salesExec || '';
   var act = (o.no || o.internalNo) ? 'EDIT_ORDER' : 'CREATE_ORDER';
   _appendLog(who, res.orderNo, act, (o.customer || '') + (o.totalWithTax ? ' · ₹' + (Number(o.totalWithTax) || 0) : ''));
+  // WhatsApp alert — only for a brand-new booking, never on an edit/re-save.
+  if (act === 'CREATE_ORDER') { try { _waNotifyOrder(o, res.orderNo); } catch (e) {} }
   return { ok: true, orderNo: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo, crmRows: res.rows };
 }
 
@@ -2040,6 +2042,7 @@ function handleUpdateWON(body) {
   var cOrderNo = colOf(CRM_H.ORDER_NO);
   var cIntNo   = colOf(CRM_H.INT_NO);
   var cWon     = colOf(CRM_H.WON);
+  var cCust    = colOf(CRM_H.CUSTOMER);
   if (cWon < 0) return { ok: false, error: 'No "Godrej SO No" (WON) column found in the CRM sheet.' };
 
   var lastRow = sh.getLastRow();
@@ -2064,6 +2067,8 @@ function handleUpdateWON(body) {
   }
   if (!updated) return { ok: false, error: 'No matching items to update for order: ' + orderNo };
   _appendLog(updatedBy, orderNo, 'UPDATE_WON', 'WON: ' + won + (itemIndexes ? ' items:' + itemIndexes.join(',') : ''));
+  var wonCust = cCust >= 0 && matchRows.length ? String(data[matchRows[0]][cCust] || '') : '';
+  try { _waNotifyWON(orderNo || ('#' + internalNo), wonCust, won, updatedBy); } catch (e) {}
   return { ok: true, rows: updated };
 }
 
@@ -2106,6 +2111,7 @@ function handleUpdateDelivery(body) {
   var cOrderNo = colOf(CRM_H.ORDER_NO);
   var cIntNo   = colOf(CRM_H.INT_NO);
   var cDeliv   = colOf(CRM_H.DELIVERY);
+  var cCust    = colOf(CRM_H.CUSTOMER);
   var cDelItems= colOf(['DELIVERED ITEMS DATA', 'DELIVERED ITEMS']);
   var cPlanned = colOf(['CUSTOMER DELIVERY DATE (TO BE)']);
   if (cDeliv < 0) return { ok: false, error: 'No "Delivery Remarks" column found in the CRM sheet.' };
@@ -2114,7 +2120,7 @@ function handleUpdateDelivery(body) {
   if (lastRow < 2) return { ok: false, error: 'Order not found: ' + orderNo };
   var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
 
-  var updated = 0;
+  var updated = 0, delivCust = '';
   for (var i = 0; i < data.length; i++) {
     var matchOrder = cOrderNo >= 0 && orderNo    && String(data[i][cOrderNo] || '').trim() === orderNo;
     var matchInt   = cIntNo   >= 0 && internalNo && Number(data[i][cIntNo]) === internalNo;
@@ -2124,11 +2130,13 @@ function handleUpdateDelivery(body) {
       if (cDelItems >= 0) sh.getRange(i + 2, cDelItems + 1).setValue(isPartial ? deliveredJson : '');
       // Stamp the new planned delivery date when the app sent one (reschedule).
       if (newDate && cPlanned >= 0) sh.getRange(i + 2, cPlanned + 1).setValue(newDate);
+      if (!delivCust && cCust >= 0) delivCust = String(data[i][cCust] || '');
       updated++;
     }
   }
   if (!updated) return { ok: false, error: 'Order not found: ' + orderNo };
   _appendLog(updatedBy, orderNo, 'UPDATE_DELIVERY', 'Delivery: ' + status + (newDate ? ' · new date ' + newDate : ''));
+  try { _waNotifyDelivery(orderNo || ('#' + internalNo), delivCust, status + (newDate ? ' · new date ' + newDate : ''), updatedBy); } catch (e) {}
   return { ok: true, rows: updated };
 }
 
@@ -2162,6 +2170,7 @@ function handleUpdateService(body) {
   var C = _crmCols(sh), colOf = C.colOf, ncol = C.header.length;
   var cOrderNo = colOf(CRM_H.ORDER_NO);
   var cIntNo   = colOf(CRM_H.INT_NO);
+  var cCust  = colOf(CRM_H.CUSTOMER);
   var cFlag  = colOf(['SERVICE FLAG','SERVICE REQUIRED','HAS SERVICE REQUEST']);
   var cIssue = colOf(['SERVICE ISSUE','ISSUE DESCRIPTION','SERVICE ISSUE DESCRIPTION']);
   var cRais  = colOf(['SERVICE RAISED DATE','ISSUE RAISED DATE','SERVICE REQUEST DATE']);
@@ -2174,11 +2183,12 @@ function handleUpdateService(body) {
   if (lastRow < 2) return { ok: false, error: 'Order not found: ' + orderNo };
   var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
 
-  var updated = 0;
+  var updated = 0, svcCust = '';
   for (var i = 0; i < data.length; i++) {
     var matchOrder = cOrderNo >= 0 && orderNo    && String(data[i][cOrderNo] || '').trim() === orderNo;
     var matchInt   = cIntNo   >= 0 && internalNo && Number(data[i][cIntNo]) === internalNo;
     if (!matchOrder && !matchInt) continue;
+    if (!svcCust && cCust >= 0) svcCust = String(data[i][cCust] || '');
     var rowN = i + 2;
     sh.getRange(rowN, cFlag + 1).setValue(flagOn ? 'Yes' : '');
     if (cIssue >= 0) sh.getRange(rowN, cIssue + 1).setValue(issue);
@@ -2190,6 +2200,8 @@ function handleUpdateService(body) {
   }
   if (!updated) return { ok: false, error: 'Order not found: ' + orderNo };
   _appendLog(updatedBy, orderNo, 'UPDATE_SERVICE', (flagOn ? (status || 'Open') : 'Cleared') + (issue ? ' · ' + issue.slice(0, 60) : ''));
+  // Alert only when a request is active (raised/updated), not when it's cleared.
+  if (flagOn) { try { _waNotifyService(orderNo || ('#' + internalNo), svcCust, status || 'Open', issue, updatedBy); } catch (e) {} }
   return { ok: true, rows: updated };
 }
 
@@ -2746,4 +2758,412 @@ function _writeNormalizedTab(ss, tabName, items) {
   });
   sh.getRange(1, 1, rows.length, 6).setValues(rows);
   _boldRow1(sh);
+}
+
+// ============================================================================
+//  WHATSAPP ALERTS  (Meta WhatsApp Cloud API — official)
+// ----------------------------------------------------------------------------
+//  Fires WhatsApp messages to one or more phone numbers when key order events
+//  happen (new order, WON/Godrej SO added, delivery update, service request)
+//  and a daily sales summary at 9:30 PM.
+//
+//  All sending is BEST-EFFORT: every call is wrapped so a WhatsApp failure can
+//  NEVER break an order save / update. If WhatsApp is not configured, every
+//  call is a silent no-op.
+//
+//  ── ONE-TIME SETUP (see WHATSAPP_SETUP.md for the full walk-through) ──
+//   1. Get a Meta WhatsApp Cloud API phone-number ID + a (permanent) token.
+//   2. In the Apps Script editor, run  waConfigure({...})  once with your
+//      token, phone-number ID and recipient number(s). Example:
+//
+//        waConfigure({
+//          token:      'EAAG...your permanent token...',
+//          phoneId:    '123456789012345',
+//          recipients: '9876543210, 9123456789',   // owner / manager numbers
+//          mode:       'text',        // 'text' (quick start) or 'template'
+//          enabled:    true,
+//          events:     'order,won,delivery,service,summary'
+//        });
+//
+//   3. Run  installWhatsAppTriggers()  once to schedule the 9:30 PM summary.
+//   4. Run  waTest()  to send yourself a test message.
+//
+//  Values live in Script Properties (never in this file / git), so the token
+//  is not committed anywhere.
+// ============================================================================
+
+var WA_API_VERSION = 'v21.0';
+var WA_PROP = {
+  ENABLED:    'WA_ENABLED',      // 'true' to switch the whole feature on
+  TOKEN:      'WA_TOKEN',        // Meta permanent access token
+  PHONE_ID:   'WA_PHONE_ID',     // Meta phone-number ID (the sender)
+  RECIPIENTS: 'WA_RECIPIENTS',   // comma-separated numbers to alert
+  MODE:       'WA_MODE',         // 'text' (session) or 'template'
+  EVENTS:     'WA_EVENTS',       // comma-separated: order,won,delivery,service,summary
+  LANG:       'WA_TEMPLATE_LANG',// template language code (default 'en')
+  DEFAULT_CC: 'WA_DEFAULT_CC'    // default country code for 10-digit numbers (default '91')
+};
+
+// Per-event template names (used only in 'template' mode). Override any of them
+// with a Script Property of the same UPPER_SNAKE key if your approved template
+// is named differently, e.g. WA_TPL_ORDER = 'my_order_template'.
+var WA_TEMPLATES = {
+  order:    'order_booked',
+  won:      'won_added',
+  delivery: 'delivery_update',
+  service:  'service_request',
+  summary:  'daily_summary'
+};
+
+function _waProps() { return PropertiesService.getScriptProperties(); }
+
+function _waCfg() {
+  var p = _waProps();
+  return {
+    enabled:    String(p.getProperty(WA_PROP.ENABLED) || '').toLowerCase() === 'true',
+    token:      String(p.getProperty(WA_PROP.TOKEN) || '').trim(),
+    phoneId:    String(p.getProperty(WA_PROP.PHONE_ID) || '').trim(),
+    recipients: _waRecipients(),
+    mode:       (String(p.getProperty(WA_PROP.MODE) || 'text').toLowerCase() === 'template') ? 'template' : 'text',
+    events:     _waEventSet(),
+    lang:       String(p.getProperty(WA_PROP.LANG) || 'en').trim() || 'en',
+    cc:         (String(p.getProperty(WA_PROP.DEFAULT_CC) || '91').replace(/\D/g, '') || '91')
+  };
+}
+
+// Ready to send only when the master switch is on and token/phoneId/recipients exist.
+function _waReady(cfg) {
+  cfg = cfg || _waCfg();
+  return !!(cfg.enabled && cfg.token && cfg.phoneId && cfg.recipients.length);
+}
+
+function _waRecipients() {
+  var raw = String(_waProps().getProperty(WA_PROP.RECIPIENTS) || '');
+  return raw.split(/[,;\s]+/).map(function (s) { return _waNormNum(s); })
+            .filter(function (s) { return s.length >= 10; });
+}
+
+// Which events are enabled. Empty/unset → all events on.
+function _waEventSet() {
+  var raw = String(_waProps().getProperty(WA_PROP.EVENTS) || '').toLowerCase().trim();
+  if (!raw) return { order: 1, won: 1, delivery: 1, service: 1, summary: 1 };
+  var set = {};
+  raw.split(/[,;\s]+/).forEach(function (e) { if (e) set[e] = 1; });
+  return set;
+}
+
+// Normalise a phone number for the Cloud API: digits only, no leading '+'.
+// A bare 10-digit Indian number gets the default country code prepended.
+function _waNormNum(v) {
+  var d = String(v || '').replace(/\D/g, '');
+  if (!d) return '';
+  if (d.length === 10) {
+    var cc = String(_waProps().getProperty(WA_PROP.DEFAULT_CC) || '91').replace(/\D/g, '') || '91';
+    d = cc + d;
+  }
+  return d;
+}
+
+// Look up a per-event template name (Script-Property override wins).
+function _waTemplateName(eventKey) {
+  var override = String(_waProps().getProperty('WA_TPL_' + String(eventKey).toUpperCase()) || '').trim();
+  return override || WA_TEMPLATES[eventKey] || eventKey;
+}
+
+// Low-level POST to the Cloud API. Returns { ok, code, body }. Never throws.
+function _waPost(cfg, payload) {
+  try {
+    var url = 'https://graph.facebook.com/' + WA_API_VERSION + '/' + cfg.phoneId + '/messages';
+    var res = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: 'Bearer ' + cfg.token },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+    var code = res.getResponseCode();
+    var body = res.getContentText();
+    return { ok: code >= 200 && code < 300, code: code, body: body };
+  } catch (e) {
+    return { ok: false, code: 0, body: String(e && e.message || e) };
+  }
+}
+
+// Send a plain-text (session) message. Only delivers inside the 24h customer-
+// service window; great for testing and for numbers that recently messaged the
+// business. For guaranteed business-initiated delivery use 'template' mode.
+function _waSendText(cfg, to, text) {
+  return _waPost(cfg, {
+    messaging_product: 'whatsapp',
+    to: to,
+    type: 'text',
+    text: { preview_url: false, body: String(text || '').slice(0, 4000) }
+  });
+}
+
+// Send an approved template message with positional body parameters. Works for
+// business-initiated messages at any time (the reliable production path).
+function _waSendTemplate(cfg, to, templateName, params) {
+  var parameters = (params || []).map(function (v) {
+    // Template params can't contain newlines/tabs/long space runs — flatten them.
+    var s = String(v == null ? '' : v).replace(/[\r\n\t]+/g, ' ').replace(/ {2,}/g, ' ').trim();
+    return { type: 'text', text: s || '-' };
+  });
+  return _waPost(cfg, {
+    messaging_product: 'whatsapp',
+    to: to,
+    type: 'template',
+    template: {
+      name: templateName,
+      language: { code: cfg.lang },
+      components: parameters.length ? [{ type: 'body', parameters: parameters }] : []
+    }
+  });
+}
+
+// High-level dispatch used by the event hooks. Sends to every recipient using
+// the configured mode. `textBody` is used in 'text' mode; `templateParams` in
+// 'template' mode. Best-effort: logs outcomes, never throws.
+function _waDispatch(eventKey, textBody, templateParams) {
+  try {
+    var cfg = _waCfg();
+    if (!_waReady(cfg)) return;                 // not configured — silent no-op
+    if (!cfg.events[eventKey]) return;          // this event is switched off
+    var tpl = _waTemplateName(eventKey);
+    var okN = 0, failN = 0, lastErr = '';
+    for (var i = 0; i < cfg.recipients.length; i++) {
+      var to = cfg.recipients[i];
+      var r = (cfg.mode === 'template')
+        ? _waSendTemplate(cfg, to, tpl, templateParams || [])
+        : _waSendText(cfg, to, textBody || '');
+      if (r.ok) { okN++; }
+      else { failN++; lastErr = 'HTTP ' + r.code + ': ' + String(r.body || '').slice(0, 300); }
+    }
+    try { Logger.log('[WA] ' + eventKey + ' → ok:' + okN + ' fail:' + failN + (lastErr ? ' | ' + lastErr : '')); } catch (e) {}
+    if (failN) { try { _appendLog('WhatsApp', '', 'WA_SEND_FAIL', eventKey + ' · ' + lastErr); } catch (e) {} }
+  } catch (e) {
+    try { Logger.log('[WA] dispatch error: ' + (e && e.message)); } catch (e2) {}
+  }
+}
+
+var _WA_RS = '₹';   // ₹
+
+// Format a number as Indian rupees with thousands separators (no decimals).
+function _waMoney(n) {
+  var v = Math.round(Number(n) || 0);
+  var s = String(Math.abs(v));
+  // Indian grouping: last 3 digits, then pairs.
+  var last3 = s.slice(-3), rest = s.slice(0, -3);
+  if (rest) last3 = ',' + last3;
+  rest = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',');
+  return (v < 0 ? '-' : '') + _WA_RS + rest + last3;
+}
+
+// ─── Event hooks — called from the order handlers (all best-effort) ───────────
+
+function _waNotifyOrder(o, orderNo) {
+  var customer = String(o.customer || '—');
+  var amount   = Number(o.totalWithTax) || 0;
+  var items    = Array.isArray(o.items) ? o.items.length : 0;
+  var exec     = String(o.salesExec || o.byName || o.by || '—');
+  var text = '🆕 *New Order — 4S Interiors*\n\n'
+           + 'Order: ' + orderNo + '\n'
+           + 'Customer: ' + customer + '\n'
+           + 'Amount: ' + _waMoney(amount) + '\n'
+           + 'Items: ' + items + '\n'
+           + 'Sales: ' + exec;
+  _waDispatch('order', text, [orderNo, customer, _waMoney(amount), String(items), exec]);
+}
+
+function _waNotifyWON(orderNo, customer, won, by) {
+  customer = String(customer || '—');
+  var text = '✅ *Godrej SO / WON added — 4S Interiors*\n\n'
+           + 'Order: ' + orderNo + '\n'
+           + 'Customer: ' + customer + '\n'
+           + 'WON: ' + won + '\n'
+           + 'Updated by: ' + String(by || '—');
+  _waDispatch('won', text, [String(orderNo || '—'), customer, String(won || '—'), String(by || '—')]);
+}
+
+function _waNotifyDelivery(orderNo, customer, status, by) {
+  customer = String(customer || '—');
+  var text = '🚚 *Delivery Update — 4S Interiors*\n\n'
+           + 'Order: ' + orderNo + '\n'
+           + 'Customer: ' + customer + '\n'
+           + 'Status: ' + status + '\n'
+           + 'Updated by: ' + String(by || '—');
+  _waDispatch('delivery', text, [String(orderNo || '—'), customer, String(status || '—'), String(by || '—')]);
+}
+
+function _waNotifyService(orderNo, customer, status, issue, by) {
+  customer = String(customer || '—');
+  var text = '🛠️ *Service Request — 4S Interiors*\n\n'
+           + 'Order: ' + orderNo + '\n'
+           + 'Customer: ' + customer + '\n'
+           + 'Status: ' + status + '\n'
+           + 'Issue: ' + (issue || '—') + '\n'
+           + 'Logged by: ' + String(by || '—');
+  _waDispatch('service', text, [String(orderNo || '—'), customer, String(status || '—'), String(issue || '—'), String(by || '—')]);
+}
+
+// ─── DAILY SALES SUMMARY (9:30 PM trigger) ────────────────────────────────────
+// Scans the CRM tab, groups the day's rows into orders (by ORDER NO / internal
+// no), and reports today's order count, total value and top sales exec.
+function sendDailySalesSummary() {
+  try {
+    var cfg = _waCfg();
+    if (!_waReady(cfg) || !cfg.events.summary) return;
+
+    var stats = _waComputeDailyStats(new Date());
+    var tz    = Session.getScriptTimeZone() || 'Asia/Kolkata';
+    var dstr  = Utilities.formatDate(new Date(), tz, 'dd MMM yyyy');
+
+    var topLine = stats.topExec ? (stats.topExec + ' (' + _waMoney(stats.topExecAmt) + ')') : '—';
+    var text = '📊 *Daily Sales Summary — 4S Interiors*\n'
+             + dstr + '\n\n'
+             + 'Orders today: ' + stats.orders + '\n'
+             + 'Total value: ' + _waMoney(stats.total) + '\n'
+             + 'Items: ' + stats.items + '\n'
+             + 'Top exec: ' + topLine;
+    _waDispatch('summary', text, [dstr, String(stats.orders), _waMoney(stats.total), topLine]);
+  } catch (e) {
+    try { Logger.log('[WA] summary error: ' + (e && e.message)); } catch (e2) {}
+  }
+}
+
+// Aggregate today's orders from the CRM sheet. Amount is the per-item ORDER
+// AMOUNT (with tax); summed per order and overall.
+function _waComputeDailyStats(when) {
+  var out = { orders: 0, items: 0, total: 0, topExec: '', topExecAmt: 0 };
+  var sh;
+  try { sh = _openCRMSheet(); } catch (e) { return out; }
+  var C = _crmCols(sh), colOf = C.colOf, ncol = C.header.length;
+  var cOrderNo = colOf(CRM_H.ORDER_NO);
+  var cIntNo   = colOf(CRM_H.INT_NO);
+  var cDate    = colOf(CRM_H.DATE);
+  var cAmount  = colOf(CRM_H.AMOUNT);
+  var cSales   = colOf(CRM_H.SALES);
+  if (cDate < 0) return out;
+
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return out;
+  var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
+
+  var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+  var todayKey = Utilities.formatDate(when || new Date(), tz, 'yyyy-MM-dd');
+
+  var seen = {};            // order key → true (count each order once)
+  var execAmt = {};         // exec → summed amount
+  for (var i = 0; i < data.length; i++) {
+    var d = _parseCrmDate(data[i][cDate]);
+    if (!d) continue;
+    if (Utilities.formatDate(d, tz, 'yyyy-MM-dd') !== todayKey) continue;
+
+    out.items++;
+    var amt = cAmount >= 0 ? (Number(data[i][cAmount]) || 0) : 0;
+    out.total += amt;
+
+    var key = (cOrderNo >= 0 ? String(data[i][cOrderNo] || '').trim() : '')
+            || (cIntNo >= 0 ? ('#' + String(data[i][cIntNo] || '').trim()) : '')
+            || ('row' + i);
+    if (!seen[key]) { seen[key] = true; out.orders++; }
+
+    var exec = cSales >= 0 ? String(data[i][cSales] || '').trim() : '';
+    if (exec) execAmt[exec] = (execAmt[exec] || 0) + amt;
+  }
+
+  Object.keys(execAmt).forEach(function (k) {
+    if (execAmt[k] > out.topExecAmt) { out.topExecAmt = execAmt[k]; out.topExec = k; }
+  });
+  return out;
+}
+
+// ─── EDITOR HELPERS — run these once from the Apps Script editor ──────────────
+
+// Configure WhatsApp. Pass only the keys you want to change; others are left
+// as-is. Returns the resulting status. Example in the module header above.
+function waConfigure(opts) {
+  opts = opts || {};
+  var p = _waProps();
+  function set(key, val) { if (val !== undefined && val !== null) p.setProperty(key, String(val)); }
+  set(WA_PROP.TOKEN,      opts.token);
+  set(WA_PROP.PHONE_ID,   opts.phoneId);
+  set(WA_PROP.RECIPIENTS, opts.recipients);
+  if (opts.mode !== undefined)    set(WA_PROP.MODE, opts.mode);
+  if (opts.events !== undefined)  set(WA_PROP.EVENTS, opts.events);
+  if (opts.lang !== undefined)    set(WA_PROP.LANG, opts.lang);
+  if (opts.cc !== undefined)      set(WA_PROP.DEFAULT_CC, opts.cc);
+  if (opts.enabled !== undefined) set(WA_PROP.ENABLED, opts.enabled ? 'true' : 'false');
+  return waStatus();
+}
+
+// Show current WhatsApp config (token is masked). Safe to run any time.
+function waStatus() {
+  var cfg = _waCfg();
+  var st = {
+    enabled:      cfg.enabled,
+    ready:        _waReady(cfg),
+    mode:         cfg.mode,
+    tokenSet:     !!cfg.token,
+    phoneIdSet:   !!cfg.phoneId,
+    recipients:   cfg.recipients,
+    events:       Object.keys(cfg.events),
+    lang:         cfg.lang,
+    defaultCC:    cfg.cc,
+    summaryTrigger: _waHasSummaryTrigger()
+  };
+  Logger.log(JSON.stringify(st, null, 2));
+  return st;
+}
+
+// Send a test message to all configured recipients right now.
+function waTest() {
+  var cfg = _waCfg();
+  if (!cfg.token || !cfg.phoneId) return { ok: false, error: 'Set token + phoneId first via waConfigure(...).' };
+  if (!cfg.recipients.length)     return { ok: false, error: 'No recipients configured.' };
+  var results = [];
+  for (var i = 0; i < cfg.recipients.length; i++) {
+    var to = cfg.recipients[i];
+    var r = (cfg.mode === 'template')
+      ? _waSendTemplate(cfg, to, _waTemplateName('order'), ['TEST/0', 'Test Customer', _waMoney(0), '0', 'System'])
+      : _waSendText(cfg, to, '✅ 4S Interiors WhatsApp alerts are connected. This is a test message.');
+    results.push({ to: to, ok: r.ok, code: r.code, body: String(r.body || '').slice(0, 200) });
+  }
+  Logger.log(JSON.stringify(results, null, 2));
+  return { ok: results.every(function (x) { return x.ok; }), results: results };
+}
+
+// ─── TRIGGERS ─────────────────────────────────────────────────────────────────
+
+var WA_SUMMARY_FN = 'sendDailySalesSummary';
+
+function _waHasSummaryTrigger() {
+  try {
+    return ScriptApp.getProjectTriggers().some(function (t) {
+      return t.getHandlerFunction() === WA_SUMMARY_FN;
+    });
+  } catch (e) { return false; }
+}
+
+// Install (idempotently) the 9:30 PM daily summary trigger. Run once.
+function installWhatsAppTriggers() {
+  removeWhatsAppTriggers();
+  ScriptApp.newTrigger(WA_SUMMARY_FN)
+    .timeBased()
+    .atHour(21)        // 9 PM
+    .nearMinute(30)    // ~9:30 PM (fires within the 21:30 window), script TZ = Asia/Kolkata
+    .everyDays(1)
+    .create();
+  Logger.log('Installed daily WhatsApp summary trigger (~21:30 ' + (Session.getScriptTimeZone() || 'Asia/Kolkata') + ').');
+  return { ok: true };
+}
+
+// Remove any existing summary trigger(s).
+function removeWhatsAppTriggers() {
+  var removed = 0;
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === WA_SUMMARY_FN) { ScriptApp.deleteTrigger(t); removed++; }
+  });
+  if (removed) Logger.log('Removed ' + removed + ' summary trigger(s).');
+  return { ok: true, removed: removed };
 }
