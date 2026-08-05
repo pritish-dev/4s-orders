@@ -114,6 +114,34 @@ self.addEventListener('push', e => {
       icon: '/4s-orders/icon.svg',
       badge: '/4s-orders/icon.svg',
       vibrate: [200, 100, 200],
+      tag: data.notifId || undefined,
+      // Carry the target so a tap can deep-link into the right order (see below).
+      data: { orderNo: data.orderNo || '', notifId: data.notifId || '' },
     })
   );
+});
+
+// ── Notification click → reopen the app on the relevant order ──────────────
+// A tapped OS notification should bring the app to the foreground and jump to
+// the order it's about (falling back to the Notifications list). We focus an
+// already-open window and postMessage the target to it; if no window is open we
+// open one, carrying the order number in the URL hash for a cold start.
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const data = event.notification.data || {};
+  const orderNo = data.orderNo != null ? String(data.orderNo) : '';
+  const base = self.registration.scope; // e.g. https://…/4s-orders/
+  event.waitUntil((async () => {
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of clients) {
+      if (client.url.startsWith(base) && 'focus' in client) {
+        try { await client.focus(); } catch (e) {}
+        client.postMessage({ type: '4s-notif-click', orderNo });
+        return;
+      }
+    }
+    if (self.clients.openWindow) {
+      await self.clients.openWindow(base + (orderNo ? ('#notif=' + encodeURIComponent(orderNo)) : ''));
+    }
+  })());
 });

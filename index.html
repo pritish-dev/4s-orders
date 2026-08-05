@@ -2109,6 +2109,53 @@ function App() {
     prevUnreadRef.current = unreadCount;
   }, [unreadCount]);
 
+  // ── Deep-link from a tapped OS notification ───────────────────────────────
+  // Tapping a notification should reopen the app AND jump to the order it's
+  // about (or the Notifications list). The target reaches us three ways:
+  //   1. service-worker `notificationclick` → postMessage to this page
+  //   2. cold start: the SW opened a new window with `#notif=<orderNo>` in the URL
+  //   3. in-page `new Notification` onclick (Android app / no service worker)
+  // Orders may still be loading when the tap arrives, so we hold the target in
+  // state and let a resolver effect apply it once the user + orders are ready.
+  const [notifTarget, setNotifTarget] = useState(null); // { orderNo } | null
+  const ordersRef = useRef(orders);
+  useEffect(() => { ordersRef.current = orders; }, [orders]);
+
+  useEffect(() => {
+    if (notifTarget == null) return;
+    if (!user) return;                       // wait until signed in
+    const orderNo = notifTarget.orderNo;
+    const list = ordersRef.current || [];
+    if (orderNo && !list.length) { nav('notifs'); return; }  // orders still loading — show the list meanwhile
+    setNotifTarget(null);
+    const o = orderNo ? list.find(x => String(x.no) === String(orderNo)) : null;
+    if (o) { setOrder({ ...BLANK_ORDER(), ...normalizeLoadedOrder(o) }); nav('order'); }
+    else nav('notifs');
+  }, [notifTarget, user, orders, nav, setOrder]);
+
+  // (1) messages from the service worker's notificationclick handler
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    const onMsg = e => {
+      const d = e.data || {};
+      if (d.type === '4s-notif-click') { try { window.focus(); } catch (e) {} setNotifTarget({ orderNo: d.orderNo || '' }); }
+    };
+    navigator.serviceWorker.addEventListener('message', onMsg);
+    return () => navigator.serviceWorker.removeEventListener('message', onMsg);
+  }, []);
+
+  // (2) cold start via a `#notif=<orderNo>` hash left by clients.openWindow
+  useEffect(() => {
+    try {
+      const m = /[#&?]notif=([^&]*)/.exec(window.location.hash || '');
+      if (m) {
+        history.replaceState(history.state, '', window.location.pathname + window.location.search);
+        const orderNo = decodeURIComponent(m[1] || '');
+        setTimeout(() => setNotifTarget({ orderNo }), 0);   // after session-restore sets the screen
+      }
+    } catch (e) {}
+  }, []);
+
   // Fire a native (OS) notification once per new event, so the sales team is
   // alerted even when the app is only in the background. Guarded by permission.
   const pushedRef = useRef(null);
@@ -2121,11 +2168,17 @@ function App() {
     const fresh = notifications.filter(n => !pushedRef.current.has(n.id));
     if (!fresh.length) return;
     fresh.slice(0, 5).forEach(n => {
+      // Carry the target order so a tap can deep-link straight to it.
+      const payload = { orderNo: n.orderNo != null ? String(n.orderNo) : '', notifId: n.id };
       try {
-        if (navigator.serviceWorker && navigator.serviceWorker.ready) {
-          navigator.serviceWorker.ready.then(reg => reg.showNotification('4S Orders · ' + n.title, { body: n.body, icon: '/4s-orders/icon.svg', badge: '/4s-orders/icon.svg', tag: n.id, vibrate: [150,80,150] })).catch(()=>{});
+        // Use the service worker only when one actually controls this page
+        // (its notificationclick handler does the routing). Otherwise fall back
+        // to an in-page Notification whose onclick routes directly.
+        if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+          navigator.serviceWorker.ready.then(reg => reg.showNotification('4S Orders · ' + n.title, { body: n.body, icon: '/4s-orders/icon.svg', badge: '/4s-orders/icon.svg', tag: n.id, vibrate: [150,80,150], data: payload })).catch(()=>{});
         } else {
-          new Notification('4S Orders · ' + n.title, { body: n.body, icon: '/4s-orders/icon.svg', tag: n.id });
+          const notif = new Notification('4S Orders · ' + n.title, { body: n.body, icon: '/4s-orders/icon.svg', tag: n.id, data: payload });
+          notif.onclick = function () { try { window.focus(); } catch (e) {} setNotifTarget({ orderNo: payload.orderNo }); this.close(); };
         }
       } catch (e) {}
       pushedRef.current.add(n.id);
