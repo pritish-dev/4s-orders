@@ -904,8 +904,13 @@ function generatePDF(order, copyType) {
   const cgst     = T2.cgst;
   const sgst     = T2.sgst;
   const totalAmt = T2.total;
-  const earnest  = T2.earnest;
-  const balance  = T2.balance;
+  // Payment block: use the full running ledger (booking earnest + any later money
+  // receipts) with the same GST-rounding tolerance the app uses, so a fully-paid
+  // order prints Balance ₹0 — never a phantom ₹1–₹2 residual — and Paid + Balance
+  // always equals the Total exactly.
+  const RCV      = orderReceived(order);
+  const balance  = RCV.balance;
+  const earnest  = totalAmt - balance;   // amount collected so far (clamped so the block balances)
   const orderDiscPct = T2.orderDiscPct;
   const orderDiscAmt = T2.orderDiscAmt;
   const taxable      = T2.taxable;
@@ -3520,8 +3525,12 @@ function OrderFormScreen({ctx}) {
       }
     }
     if(!o.items||o.items.length===0) add('items','Add at least one item');
-    if(!o.slNo||!String(o.slNo).trim()) add('internal','SI No is required');
-    if(o.manualOrder && (!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim())) add('internal','Receipt No is required for a manual order');
+    // An existing order (already saved / loaded for edit) already carries its SI No,
+    // Order No and Receipt No — never re-prompt for them on an edit, only require
+    // them when creating a brand-new order.
+    const isExistingOrder = !!(String(o.no||'').trim() || o.internalNo);
+    if(!isExistingOrder && (!o.slNo||!String(o.slNo).trim())) add('internal','SI No is required');
+    if(!isExistingOrder && o.manualOrder && (!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim())) add('internal','Receipt No is required for a manual order');
     if(!o.paymentMode||!String(o.paymentMode).trim()) add('payment','Select the Payment Mode');
     if(!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim()) add('payment','Money Receipt No is required');
     return e;
