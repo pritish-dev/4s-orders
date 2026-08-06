@@ -1840,10 +1840,50 @@ function _writeOrderToCRM(o) {
   var incomingStage = String(o.orderStatus || '').trim().toLowerCase();
   o.orderStatus = (existingStage === 'submitted') ? 'submitted' : incomingStage;
 
-  // Replace: delete the order's old rows (bottom-up) so item count can change.
+  // EDIT IN PLACE: when this order already exists on the sheet, overwrite its own
+  // rows where they sit — keeping its SL NO. and its position in the sheet — instead
+  // of deleting them and appending a fresh block at the bottom. This is what makes an
+  // edit update the existing entry rather than look like a brand-new row, and it can
+  // never create a duplicate. The block grows/shrinks in place when the item count
+  // changes. Rows for one order are always written contiguously; if for any reason
+  // the matched rows are not contiguous we fall back to the safe delete-then-append.
+  var cSl = colOf(['SL NO.', 'SL NO']);
+  var sortedIdx = matchRows.slice().sort(function(a, b){ return a - b; });
+  var contiguous = sortedIdx.length > 0;
+  for (var ci = 1; ci < sortedIdx.length; ci++) {
+    if (sortedIdx[ci] !== sortedIdx[0] + ci) { contiguous = false; break; }
+  }
+
+  if (matchRows.length && contiguous) {
+    var firstSheetRow = sortedIdx[0] + 2;   // 1-based, +1 header
+    // Keep the order's existing SL NO. as the base so its serial never changes on edit.
+    var existingSl = cSl >= 0 ? Number(data[sortedIdx[0]][cSl]) : 0;
+    var slBase = (existingSl && !isNaN(existingSl)) ? existingSl : (firstSheetRow - 1);
+    var built = _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wonToWrite, slBase);
+
+    if (!built.length) {
+      // Order now has no items — remove its rows (bottom-up) so nothing stale remains.
+      var delRows = sortedIdx.map(function(x){ return x + 2; }).sort(function(a, b){ return b - a; });
+      for (var d = 0; d < delRows.length; d++) sh.deleteRow(delRows[d]);
+      return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: 0 };
+    }
+
+    var oldCount = matchRows.length, newCount = built.length;
+    var overwrite = Math.min(oldCount, newCount);
+    sh.getRange(firstSheetRow, 1, overwrite, ncol).setValues(built.slice(0, overwrite));
+    if (newCount > oldCount) {
+      sh.insertRowsAfter(firstSheetRow + oldCount - 1, newCount - oldCount);
+      sh.getRange(firstSheetRow + oldCount, 1, newCount - oldCount, ncol).setValues(built.slice(oldCount));
+    } else if (oldCount > newCount) {
+      for (var dd = oldCount - 1; dd >= newCount; dd--) sh.deleteRow(firstSheetRow + dd);
+    }
+    return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: newCount };
+  }
+
+  // New order (or non-contiguous legacy rows): delete any old rows, append at bottom.
   if (matchRows.length) {
-    var sheetRows = matchRows.map(function(x){ return x + 2; }).sort(function(a,b){ return b - a; });
-    for (var d = 0; d < sheetRows.length; d++) sh.deleteRow(sheetRows[d]);
+    var sheetRows = matchRows.map(function(x){ return x + 2; }).sort(function(a, b){ return b - a; });
+    for (var d2 = 0; d2 < sheetRows.length; d2++) sh.deleteRow(sheetRows[d2]);
   }
 
   var built = _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wonToWrite, sh.getLastRow());
@@ -2010,6 +2050,25 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
 
     out.push(row);
   }
+
+  // Reconcile the summed per-line AMOUNTs to the single authoritative order total the
+  // app displayed and the customer paid against (o.totalWithTax). The per-line GST is
+  // carved out and folded back in at the whole rupee, so the sheet's line-by-line sum
+  // can drift ±1–2 from the app's total — which then surfaces as a phantom ₹1–₹2
+  // balance in every downstream report. Nudge the last line by that small drift so
+  // ORDER AMOUNT on the sheet equals the collected amount exactly. Only a GST-rounding
+  // drift is absorbed; a materially different total (real pricing change) is left alone.
+  var cAmtR = colOf(CRM_H.AMOUNT);
+  var want  = Math.round(Number(o.totalWithTax) || 0);
+  if (cAmtR >= 0 && want > 0 && out.length) {
+    var sum = 0;
+    for (var s = 0; s < out.length; s++) sum += Number(out[s][cAmtR]) || 0;
+    var diff = want - sum;
+    if (diff !== 0 && Math.abs(diff) <= 2 * out.length + 2) {
+      out[out.length - 1][cAmtR] = (Number(out[out.length - 1][cAmtR]) || 0) + diff;
+    }
+  }
+
   return out;
 }
 
