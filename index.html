@@ -4388,6 +4388,9 @@ function HistoryScreen({ctx}) {
   const [rescheduleOrder,setRescheduleOrder] = useState(null); // order awaiting the reschedule date picker
   const [serviceOrder,setServiceOrder] = useState(null);   // order whose service request is being raised/edited
   const [statusView,setStatusView] = useState(null);       // null=ledger · 'menu'=category grid · <catId>=that category's orders
+  const [dateView,setDateView] = useState(false);          // false=ledger · true=by-date drill-down
+  const [dateFrom,setDateFrom] = useState('');             // ISO yyyy-mm-dd range start for the by-date view
+  const [dateTo,setDateTo]     = useState('');             // ISO yyyy-mm-dd range end for the by-date view
   useEffect(()=>{ loadOrders(); loadMis({silent:true}); },[]);
   // Delivery-status category helpers. "rescheduled for delivery" also contains
   // "scheduled", so anchor both with ^ to keep the two buckets separate.
@@ -4559,6 +4562,83 @@ function HistoryScreen({ctx}) {
     );
   }
 
+  // ── Orders by Date drill-down ──────────────────────────────────────────────
+  // Groups orders by their booking date (Today, Yesterday, then each earlier day)
+  // and offers a from–to range filter. Reached from the "Orders by Date" box on
+  // the ledger. Salesperson + search filters from the ledger still apply here.
+  if (dateView) {
+    // Relative heading for a booking date's ISO (yyyy-mm-dd).
+    const dateBucketLabel = iso => {
+      const dd = daysFromToday(iso);
+      if (dd === 0)  return 'Today';
+      if (dd === -1) return 'Yesterday';
+      return prettyDate(iso);
+    };
+    const dated = orders.filter(o=>o.status!=='draft').filter(matchesQuery).filter(matchesSales);
+    const groupsMap = {};
+    let rangeCount = 0, rangeAmt = 0, undated = 0;
+    dated.forEach(o=>{
+      const iso = _toISO(o.date);
+      if(!iso){ undated++; return; }
+      if(dateFrom && iso < dateFrom) return;
+      if(dateTo   && iso > dateTo)   return;
+      (groupsMap[iso]=groupsMap[iso]||[]).push(o);
+      rangeCount++; rangeAmt += (o.amt||0);
+    });
+    const groups = Object.keys(groupsMap).sort((a,b)=> a<b?1:-1).map(iso=>({iso,orders:groupsMap[iso]}));
+    const inp = {padding:'8px 10px',borderRadius:8,border:`1px solid ${T.line}`,background:'#fff',color:T.ink,fontSize:13,fontFamily:T.mono,width:'100%',WebkitAppearance:'none',appearance:'none'};
+    const lbl = {fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:.5,marginBottom:4};
+    return (
+      <div className="screen">
+        <div style={{flexShrink:0}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 8px'}}>
+            <button onClick={()=>setDateView(false)} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>ORDERS · BY DATE</div>
+              <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Orders by Date</div>
+            </div>
+          </div>
+          {/* From–to date-range filter */}
+          <div style={{padding:'2px 14px 8px'}}>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr auto',gap:8,alignItems:'end'}}>
+              <div><div style={lbl}>FROM</div><input type="date" value={dateFrom} max={dateTo||undefined} onChange={e=>setDateFrom(e.target.value)} style={inp}/></div>
+              <div><div style={lbl}>TO</div><input type="date" value={dateTo} min={dateFrom||undefined} onChange={e=>setDateTo(e.target.value)} style={inp}/></div>
+              <button onClick={()=>{setDateFrom('');setDateTo('');}} disabled={!dateFrom&&!dateTo} style={{padding:'8px 12px',borderRadius:8,border:`1px solid ${T.line}`,background:(!dateFrom&&!dateTo)?T.paper2:'#fff',color:(!dateFrom&&!dateTo)?T.ink4:T.ink2,fontSize:12,fontWeight:600,cursor:(!dateFrom&&!dateTo)?'default':'pointer'}}>Clear</button>
+            </div>
+            <div style={{fontSize:11,color:T.ink4,marginTop:8}}>
+              <span style={{fontWeight:700,color:T.ink2}}>{rangeCount}</span> {rangeCount===1?'order':'orders'}
+              {(dateFrom||dateTo) && ' in range'} · <span style={{fontFamily:T.mono,fontWeight:700,color:T.ink2}}>₹{Math.round(rangeAmt).toLocaleString('en-IN')}</span>
+            </div>
+          </div>
+        </div>
+        <div className="scroll">
+          {groups.map(g=>(
+            <div key={g.iso}>
+              <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between',gap:8,padding:'12px 18px 6px',background:T.paper2,borderBottom:`1px solid ${T.line}`}}>
+                <span style={{fontSize:13,fontWeight:700,color:T.ink}}>{dateBucketLabel(g.iso)}</span>
+                <span style={{fontSize:11,color:T.ink4,fontFamily:T.mono}}>{g.orders.length} {g.orders.length===1?'order':'orders'} · ₹{Math.round(g.orders.reduce((s,o)=>s+(o.amt||0),0)).toLocaleString('en-IN')}</span>
+              </div>
+              {g.orders.map(orderCard)}
+            </div>
+          ))}
+          {groups.length===0 && (
+            <div style={{padding:'48px 24px',textAlign:'center'}}>
+              <div style={{width:52,height:52,borderRadius:14,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12}}>{Icon.doc(T.ink4,24)}</div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No orders {(dateFrom||dateTo)?'in this date range':'to show'}</div>
+              <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>{(dateFrom||dateTo)?'Try widening or clearing the date range.':'Orders you book will appear here, grouped by day.'}</div>
+            </div>
+          )}
+          {undated>0 && <div style={{padding:'10px 18px 0',fontSize:11,color:T.ink4}}>{undated} order{undated===1?'':'s'} without a booking date {(dateFrom||dateTo)?'excluded from the range':'not shown'}.</div>}
+          <div style={{height:24}}/>
+        </div>
+        {partialOrder && <PartialDeliveryModal order={partialOrder} onCancel={()=>setPartialOrder(null)} onConfirm={confirmPartial}/>}
+        {rescheduleOrder && <RescheduleModal order={rescheduleOrder} onCancel={()=>setRescheduleOrder(null)} onConfirm={confirmReschedule}/>}
+        {serviceOrder && <ServiceRequestModal order={serviceOrder} ctx={ctx} onClose={()=>setServiceOrder(null)}/>}
+        <BottomNav screen="history" nav={nav}/>
+      </div>
+    );
+  }
+
   return (
     <div className="screen">
       <div style={{flexShrink:0}}>
@@ -4572,6 +4652,16 @@ function HistoryScreen({ctx}) {
             <div style={{display:'flex',alignItems:'center',gap:10}}>
               <div style={{width:34,height:34,borderRadius:8,background:'rgba(255,255,255,.14)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>📦</div>
               <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>Order Status</div><div style={{fontSize:11,opacity:.7}}>View counts by status · tap to open</div></div>
+            </div>
+            <span style={{fontSize:18,opacity:.8}}>›</span>
+          </div>
+        </div>
+        {/* Orders by Date drill-down entry — opens the by-date grouped page */}
+        <div style={{padding:'2px 18px 8px'}}>
+          <div onClick={()=>setDateView(true)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'14px 16px',background:T.ink,color:'#fff',borderRadius:10,cursor:'pointer'}}>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              <div style={{width:34,height:34,borderRadius:8,background:'rgba(255,255,255,.14)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>🗓️</div>
+              <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>Orders by Date</div><div style={{fontSize:11,opacity:.7}}>Today, Yesterday & date range · tap to open</div></div>
             </div>
             <span style={{fontSize:18,opacity:.8}}>›</span>
           </div>
