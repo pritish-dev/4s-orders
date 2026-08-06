@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '57';
+  var V = '58';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -831,19 +831,26 @@ function warehouseTagOf(stock) {
   return labels.join(', ');
 }
 
-// The warehouses that actually hold stock for an item, as sales-copy labels:
-//   ZBF11T → 'KB', ZBF34S → '34S'. Returns [] when the item is out of stock
-// everywhere (or stocked in some other warehouse). Used to decide whether the
-// salesperson must PICK a delivery warehouse (stocked in both) or it's automatic.
+// Delivery-warehouse choices offered on the order form. BOTH warehouses are
+// ALWAYS selectable (34S = ZBF34S, KB = ZBF11T) so the salesperson can decide
+// where to deliver from regardless of where the item is currently stocked — the
+// picker is never hidden. 34S is listed first (the preferred default when the
+// item is in stock there).
 function warehouseOptionsOf(stock) {
+  return ['34S', 'KB'];
+}
+
+// Default delivery warehouse for a freshly added item: the warehouse that
+// actually holds the stock (34S preferred when it's there), falling back to KB
+// when the item isn't stocked in 34S (or is out of stock everywhere).
+function warehouseDefaultOf(stock) {
   const arr = Array.isArray(stock) ? stock : [];
   const qtyIn = (code) => arr
     .filter(s => String(s.b || '').toUpperCase().indexOf(code) >= 0)
     .reduce((t, s) => t + (Number(s.q) || 0), 0);
-  const opts = [];
-  if (qtyIn('11T') > 0) opts.push('KB');
-  if (qtyIn('34S') > 0) opts.push('34S');
-  return opts;
+  if (qtyIn('34S') > 0) return '34S';
+  if (qtyIn('11T') > 0) return 'KB';
+  return 'KB';
 }
 
 // copyType: 'sales' (default, fully itemised) or 'customer' (modular families
@@ -2982,13 +2989,13 @@ function SearchScreen({ctx}) {
         discontinued:!!item.discontinued, discSince:item.discSince||'',
         branch:((item.stock||[]).filter(s=>s.q>0)[0]||{}).b||'',
         inStock:(item.stock||[]).reduce((s,x)=>s+x.q,0),
-        // Warehouse tag for the sales-copy PDF: KB (ZBF11T) or 34S (ZBF34S),
-        // captured when the item is added. When the item is stocked in BOTH
-        // warehouses the salesperson chooses which to deliver from (dropdown in the
-        // order form); a single-warehouse item is auto-tagged. whOptions drives
-        // whether that dropdown is shown.
+        // Warehouse tag for the sales-copy PDF: KB (ZBF11T) or 34S (ZBF34S).
+        // Both warehouses are always offered in the order-form picker so the
+        // salesperson can choose the delivery source even when the item isn't
+        // stocked in one of them. whTag defaults to where the stock actually is
+        // (34S preferred) and the salesperson can override it.
         whOptions:warehouseOptionsOf(item.stock),
-        whTag:(warehouseOptionsOf(item.stock)[0]||'KB'),
+        whTag:warehouseDefaultOf(item.stock),
       }];
     }
     setOrder({...order,items:newItems});
@@ -3917,21 +3924,17 @@ function OrderFormScreen({ctx}) {
                       />
                     )}
                   </div>
-                  {/* Delivery warehouse for the SALES-copy tag. A dropdown when the
-                      item is stocked in BOTH warehouses so the salesperson chooses
-                      the delivery source; a plain auto-label otherwise. */}
-                  {(()=>{const opts=Array.isArray(it.whOptions)?it.whOptions:[];const cur=it.whTag||opts[0]||'KB';return(
+                  {/* Delivery warehouse for the SALES-copy tag. Both warehouses are
+                      always offered so the salesperson can pick the delivery source
+                      even when the item isn't stocked in one of them. */}
+                  {(()=>{const opts=['34S','KB'];const cur=it.whTag||'34S';return(
                     <div style={{display:'flex',gap:8,marginTop:8,alignItems:'center',flexWrap:'wrap'}}>
                       <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>WAREHOUSE</span>
-                      {opts.length>1 ? (
-                        <select value={cur} onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,whTag:v}:x)}));}}
-                          style={{border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 8px',fontFamily:T.sans,fontSize:12,fontWeight:700,color:T.ink,background:'#fff',cursor:'pointer'}}>
-                          {opts.map(w=><option key={w} value={w}>{w==='KB'?'KB (ZBF11T)':w==='34S'?'34S (ZBF34S)':w}</option>)}
-                        </select>
-                      ) : (
-                        <span style={{fontSize:11,fontWeight:700,color:T.ink2,padding:'3px 8px',borderRadius:4,background:T.paper2,border:`1px solid ${T.line}`}}>{cur}</span>
-                      )}
-                      {opts.length>1 && <span style={{fontSize:9,color:T.ink4}}>stocked in both — pick delivery source</span>}
+                      <select value={cur} onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,whTag:v}:x)}));}}
+                        style={{border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 8px',fontFamily:T.sans,fontSize:12,fontWeight:700,color:T.ink,background:'#fff',cursor:'pointer'}}>
+                        {opts.map(w=><option key={w} value={w}>{w==='KB'?'KB (ZBF11T)':w==='34S'?'34S (ZBF34S)':w}</option>)}
+                      </select>
+                      <span style={{fontSize:9,color:T.ink4}}>pick delivery warehouse</span>
                     </div>
                   );})()}
                 </div>
