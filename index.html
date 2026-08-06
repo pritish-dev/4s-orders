@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '55';
+  var V = '57';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -944,6 +944,10 @@ function generatePDF(order, copyType) {
   const itemAreaBottom = footerY - 2;
 
   // ── HEADER BAND (drawn at top of every page) ──────────────
+  // LOGO IS LOCKED. The order-form logo (the interio-logo.png "interio by
+  // Godrej" mark rendered below, the fs-logo.png store mark, and this header
+  // layout) MUST NOT be changed — no extra text, no re-styling, no swapping the
+  // PNGs — unless the showroom owner explicitly asks for it. See CLAUDE.md.
   function drawHeaderBand(y) {
     const hH = 20, leftW = 105, rightW = cw - leftW;
     doc.setFillColor(...DRED);
