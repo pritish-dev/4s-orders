@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '56';
+  var V = '57';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -956,22 +956,10 @@ function generatePDF(order, copyType) {
     // Larger logo: fill almost the whole right cell (minimal padding).
     const A = PDF_ASSETS.interio;
     if (A && A.data) {
-      const boxH = hH-2, ar = A.w/A.h;
-      let h = boxH, w = h*ar;
-      // "Patia" showroom label sits to the right of the interio wordmark, so the
-      // header reads "interio by Godrej Patia" (the logo PNG itself only carries
-      // "interio by Godrej").
-      doc.setFont('helvetica','bold'); doc.setFontSize(12);
-      const pW = doc.getTextWidth('Patia'), gap = 3.5;
-      let groupW = w + gap + pW;
-      const maxW = rightW-3;
-      if (groupW > maxW) { w = maxW - gap - pW; h = w/ar; groupW = maxW; }
-      const gx = ml+leftW + (rightW-groupW)/2;
-      try {
-        doc.addImage(A.data,'PNG', gx, y+(hH-h)/2, w, h, 'interio', 'FAST');
-        doc.setTextColor(70,70,70);
-        doc.text('Patia', gx + w + gap, y + hH/2 + 3);
-      } catch(e) { _interioText(y, leftW); }
+      const boxW = rightW-3, boxH = hH-2, ar = A.w/A.h;
+      let w = boxW, h = w/ar;
+      if (h > boxH) { h = boxH; w = h*ar; }
+      try { doc.addImage(A.data,'PNG', ml+leftW+(rightW-w)/2, y+(hH-h)/2, w, h, 'interio', 'FAST'); } catch(e) { _interioText(y, leftW); }
     } else {
       _interioText(y, leftW);
     }
@@ -986,11 +974,7 @@ function generatePDF(order, copyType) {
     doc.text('interio', lx, y + 11);
     doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(...NAVY);
     doc.text('by Godrej', lx, y + 17.5);
-    const bw = doc.getTextWidth('by Godrej');
-    doc.setFontSize(6); doc.text('®', lx + bw + 1, y + 15);
-    // showroom location — keeps the wordmark reading "interio by Godrej Patia"
-    doc.setFontSize(10); doc.setTextColor(70,70,70);
-    doc.text('Patia', lx + bw + 5, y + 17.5);
+    doc.setFontSize(6); doc.text('®', lx + 32, y + 15);
   }
 
   // ── TOP BLOCK (page 1 only): store / customer / instructions ─
