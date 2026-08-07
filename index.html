@@ -475,10 +475,13 @@ function orderTotals(o) {
   const total         = (billedTotal > 0 && Math.abs(billedTotal - derivedTotal) <= roundBudget) ? billedTotal : derivedTotal;
   // Carve the 18% GST already contained in the total back out, so the bill can
   // still show a CGST/SGST breakup without ever inflating the amount payable.
-  const taxable       = Math.round(total / (1 + GST_RATE));
-  const gstTotal      = total - taxable;
+  const gstTotal      = total - Math.round(total / (1 + GST_RATE));
+  // CGST and SGST are both 9%, so they must ALWAYS be equal — split the GST into
+  // two equal halves and let the taxable value absorb the odd rupee, so the
+  // breakup still balances (Taxable + CGST + SGST = Total) without CGST ≠ SGST.
   const cgst          = Math.round(gstTotal / 2);
-  const sgst          = gstTotal - cgst;
+  const sgst          = cgst;
+  const taxable       = total - cgst - sgst;
   // MRPs are GST-inclusive and every line is rounded to the whole rupee, so a
   // "paid in full" amount can land a few rupees under the rounded total. Treat a
   // residual within the same per-line rounding budget as fully paid so the customer
