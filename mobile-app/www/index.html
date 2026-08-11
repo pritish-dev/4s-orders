@@ -2450,6 +2450,27 @@ function _toISO(dmy){ const p = String(dmy||'').split('.'); return p.length===3 
 // GST-inclusive bill (18% baked into each MRP), so the tax is carved back out
 // here — the sales summary shows the pre-GST sale value, never the taxed total.
 function _exGst(n){ return Math.round((Number(n)||0)/(1+GST_RATE)); }
+// Channel split for the sales summary. Every order line carries a delivery
+// warehouse (it.whTag): items delivered from KB (ZBF11T), 34S (ZBF34S) or with
+// no tag at all belong to the FRANCHISE channel; only items explicitly tagged
+// "4S" belong to the 4Sinteriors channel. An order can mix both, so the order's
+// pre-GST value is apportioned by each line's total between the two channels.
+function _isFourS(whTag){ return String(whTag||'').trim().toUpperCase() === '4S'; }
+function _channelSplit(o){
+  const total = _exGst(o && o.amt);            // whole order, pre-GST
+  const items = (o && o.items) || [];
+  let fourSLine = 0, sumLine = 0;
+  items.forEach(it => {
+    const t = Number(it && it.total) || 0;
+    sumLine += t;
+    if (_isFourS(it && it.whTag)) fourSLine += t;
+  });
+  // No line data (or no priced lines) → treat the whole order as Franchise,
+  // matching the "not marked anything → Franchise" rule.
+  if (sumLine <= 0) return { franchise: total, foursint: 0 };
+  const foursint = Math.round(total * fourSLine / sumLine);
+  return { franchise: total - foursint, foursint };
+}
 function ReportsScreen({ctx}) {
   const {orders,nav} = ctx;
   const [from,setFrom]     = useState('');
@@ -2485,6 +2506,15 @@ function ReportsScreen({ctx}) {
   });
   const totalCount = booked.length;
   const totalAmt   = booked.reduce((s,o)=>s+_exGst(o.amt),0);
+
+  // Franchise (KB / 34S / untagged) vs 4Sinteriors (items tagged "4S") split.
+  let franchiseAmt = 0, franchiseCount = 0, foursAmt = 0, foursCount = 0;
+  booked.forEach(o => {
+    const sp = _channelSplit(o);
+    franchiseAmt += sp.franchise; foursAmt += sp.foursint;
+    if (sp.franchise > 0) franchiseCount++;
+    if (sp.foursint  > 0) foursCount++;
+  });
 
   const monthMap = {}, dayMap = {}, salesMap = {}, branchMap = {};
   booked.forEach(o => {
@@ -2571,6 +2601,19 @@ function ReportsScreen({ctx}) {
           <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
             <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TOTAL AMOUNT · EX-GST</div>
             <div style={{fontSize:26,fontWeight:800,letterSpacing:-1,color:T.green,lineHeight:1.1,marginTop:4}}>{_fmtAmt(totalAmt)}</div>
+          </div>
+        </div>
+        {/* Channel split — Franchise (KB / 34S / untagged) vs 4Sinteriors (4S) */}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,padding:'2px 14px 12px'}}>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>FRANCHISE · EX-GST</div>
+            <div style={{fontSize:22,fontWeight:800,letterSpacing:-1,color:T.ink,lineHeight:1.1,marginTop:4}}>{_fmtAmt(franchiseAmt)}</div>
+            <div style={{fontSize:10,color:T.ink4,marginTop:2}}>{franchiseCount} order{franchiseCount===1?'':'s'}</div>
+          </div>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>4SINTERIORS · EX-GST</div>
+            <div style={{fontSize:22,fontWeight:800,letterSpacing:-1,color:T.ink,lineHeight:1.1,marginTop:4}}>{_fmtAmt(foursAmt)}</div>
+            <div style={{fontSize:10,color:T.ink4,marginTop:2}}>{foursCount} order{foursCount===1?'':'s'}</div>
           </div>
         </div>
         {/* Today's Sale — always visible, highlighted, current day only */}
