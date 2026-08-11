@@ -598,6 +598,13 @@ const Icon = {
   bell: (c='currentColor',s=20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M6 9a6 6 0 0112 0c0 5 2 6 2 6H4s2-1 2-6z" stroke={c} strokeWidth="2" strokeLinejoin="round"/><path d="M10 20a2 2 0 004 0" stroke={c} strokeWidth="2" strokeLinecap="round"/></svg>,
   truck: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M3 6h10v9H3zM13 9h4l3 3v3h-7z" stroke={c} strokeWidth="2" strokeLinejoin="round"/><circle cx="7" cy="18" r="1.6" stroke={c} strokeWidth="2"/><circle cx="17" cy="18" r="1.6" stroke={c} strokeWidth="2"/></svg>,
   clock: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke={c} strokeWidth="2"/><path d="M12 7v5l3 2" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>,
+  phone: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M22 16.9v3a2 2 0 01-2.2 2 19.8 19.8 0 01-8.6-3.1 19.5 19.5 0 01-6-6A19.8 19.8 0 012.1 4.2 2 2 0 014.1 2h3a2 2 0 012 1.7c.1 1 .4 1.9.7 2.8a2 2 0 01-.5 2.1L8.1 9.9a16 16 0 006 6l1.3-1.3a2 2 0 012.1-.4c.9.3 1.8.6 2.8.7a2 2 0 011.7 2z" stroke={c} strokeWidth="2" strokeLinejoin="round"/></svg>,
+  mail: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="14" rx="2" stroke={c} strokeWidth="2"/><path d="M4 7l8 5 8-5" stroke={c} strokeWidth="2" strokeLinejoin="round"/></svg>,
+  copy: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><rect x="9" y="9" width="11" height="11" rx="2" stroke={c} strokeWidth="2"/><path d="M5 15V5a2 2 0 012-2h8" stroke={c} strokeWidth="2" strokeLinecap="round"/></svg>,
+  headset: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M4 13v-1a8 8 0 0116 0v1" stroke={c} strokeWidth="2" strokeLinecap="round"/><rect x="2" y="13" width="4.5" height="6.5" rx="1.6" stroke={c} strokeWidth="2"/><rect x="17.5" y="13" width="4.5" height="6.5" rx="1.6" stroke={c} strokeWidth="2"/><path d="M20 19.5a4 4 0 01-4 4h-2" stroke={c} strokeWidth="2" strokeLinecap="round"/></svg>,
+  box: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" stroke={c} strokeWidth="2" strokeLinejoin="round"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9" stroke={c} strokeWidth="2" strokeLinejoin="round"/></svg>,
+  wrench: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M15 6.5a4 4 0 00-5.3 5.2L3.5 18l2.5 2.5 6.3-6.2A4 4 0 0017.5 9l-2.4 2.4-1.9-.5-.5-1.9z" stroke={c} strokeWidth="2" strokeLinejoin="round"/></svg>,
+  escalate: (c='currentColor',s=16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M12 20V5M6 11l6-6 6 6" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>,
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -2322,6 +2329,7 @@ function App() {
     won:     <WONUpdateScreen ctx={ctx}/>,
     notifs:  <NotificationsScreen ctx={ctx}/>,
     settings:<SettingsScreen ctx={ctx}/>,
+    salessupport:<SalesSupportScreen ctx={ctx}/>,
     reports: <ReportsScreen ctx={ctx}/>,
     collect: <CollectiblesScreen ctx={ctx}/>,
   };
@@ -5008,6 +5016,273 @@ function requestNotifPermission() {
   return Notification.requestPermission().catch(() => 'denied');
 }
 
+// ═══════════════════════════════════════════════════════════
+// SALES SUPPORT SYSTEM — Godrej Interio contacts & escalation
+// Front-line contacts, the escalation ladder for each department
+// and the standing CC list, sourced from the OPS sheet tab
+// "SALES SUPPORT SYSTEM". Sales staff can call a contact and copy
+// any phone / email straight from the app.
+// ═══════════════════════════════════════════════════════════
+async function ssCopy(text, label, showToast) {
+  const val = String(text || '').trim();
+  if (!val) { showToast && showToast('Nothing to copy', 'warn'); return; }
+  try {
+    await navigator.clipboard.writeText(val);
+    showToast && showToast((label || 'Copied') + ' copied ✓');
+  } catch (e) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = val; ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      document.execCommand('copy'); ta.remove();
+      showToast && showToast((label || 'Copied') + ' copied ✓');
+    } catch (_) { showToast && showToast('Could not copy — long-press to select', 'bad'); }
+  }
+}
+
+function ssBtnStyle(color, filled) {
+  return { display:'inline-flex', alignItems:'center', gap:4, height:28, padding:'0 10px', borderRadius:6, cursor:'pointer',
+    fontFamily:T.sans, fontSize:11, fontWeight:700, letterSpacing:0.2, whiteSpace:'nowrap',
+    background: filled ? color : '#fff', color: filled ? '#fff' : color, border:`1px solid ${filled ? color : T.line}` };
+}
+
+// Top escalation authority — every department (except Service) rolls up to the BCM.
+const SS_DAWN  = { name:'Dibyendu Dawn',  role:'Branch Commercial Manager (BCM)', email:'dawn@godrej.com',   phone:'' };
+// Shared department head for Logistics and Spare.
+const SS_NITIN = { name:'Nitin Mohapatra', role:'Department Head — Logistics & Spare', email:'nitinm@godrej.com', phone:'9674999102' };
+
+const SS_DEPTS = [
+  {
+    id:'cst', name:'CST', full:'Customer Support Team', icon:Icon.headset, accent:T.green,
+    handles:'Order status, invoice & billing queries, dispatch tracking and day-to-day customer support.',
+    contacts:[
+      { name:'Manash Nath',    role:'Customer Support', email:'manashn@godrej.com',   phone:'7873078768' },
+      { name:'Sushil Routray', role:'Customer Support', email:'sushilkr@godrej.com',   phone:'8249957212' },
+      { name:'Padmaja Pradhan',role:'Customer Support', email:'padmajap.is@godrej.com',phone:'9668074904' },
+    ],
+    ladder:[
+      { tag:'Department Head', person:{ name:'Dillip Pratihari', role:'CST Department Head', email:'dilipp@godrej.com', phone:'7873078721' } },
+      { tag:'Final · BCM',     person:SS_DAWN },
+    ],
+  },
+  {
+    id:'logistics', name:'Logistics', full:'Logistics & Delivery', icon:Icon.truck, accent:T.warn,
+    handles:'Delivery scheduling, transport, dispatch and material movement.',
+    contacts:[
+      { name:'Ashis Dash',  role:'Logistics Coordinator', email:'ashisd@godrej.com',          phone:'8249128908' },
+      { name:'Sudhir Panda',role:'Logistics Coordinator', email:'psudhir@godrej.com',         phone:'7978981367' },
+      { name:'Manoj Ram',   role:'Logistics Coordinator', email:'slfgodrejinterio@gmail.com', phone:'9668226231' },
+      { name:'Ratha Babu',  role:'Logistics Coordinator', email:'',                            phone:'9861078109' },
+    ],
+    ladder:[
+      { tag:'Team Lead',       person:{ name:'Saroj Sahoo', role:'Logistics Team Lead', email:'saroj@godrej.com', phone:'8819005439' } },
+      { tag:'Department Head', person:SS_NITIN },
+      { tag:'Final · BCM',     person:SS_DAWN },
+    ],
+  },
+  {
+    id:'spare', name:'Spare', full:'Spare Parts', icon:Icon.box, accent:T.purple,
+    handles:'Spare parts, component replacements and part-availability requests.',
+    contacts:[
+      { name:'Swadhin', role:'Spare Parts Contact', email:'', phone:'' },
+    ],
+    ladder:[
+      { tag:'Supervisor',      person:{ name:'Somnath Panda', role:'Spare Supervisor', email:'snp@godrej.com', phone:'7873078726' } },
+      { tag:'Department Head', person:SS_NITIN },
+      { tag:'Final · BCM',     person:SS_DAWN },
+    ],
+  },
+  {
+    id:'service', name:'Service', full:'Service & Installation', icon:Icon.wrench, accent:T.ok,
+    handles:'Installation, repairs, servicing and after-sales complaints.',
+    contacts:[
+      { name:'Subhrajyoti Prusty', role:'Service Contact', email:'prusty@godrej.com', phone:'8260969971' },
+    ],
+    ladder:[
+      { tag:'Service Head', person:{ name:'Bikash Debnath', role:'Service Head', email:'bikash@godrej.com', phone:'7873078745' } },
+    ],
+    note:'Service escalates to the Service Head only — this chain does not roll up to the BCM.',
+  },
+];
+
+// Standing CC list — always cc these two on any escalation e-mail.
+const SS_CC = [
+  { name:'Bibekananda Nayak', role:'Escalation CC', email:'bibek@godrej.com',   phone:'7873078849' },
+  { name:'Pradosh Dash',      role:'Escalation CC', email:'pradoshd@godrej.com', phone:'9977700631' },
+];
+
+function SSContactCard({ person, showToast, accent, compact }) {
+  const parts = String(person.name || '?').trim().split(/\s+/);
+  const initials = ((parts[0]||'?')[0] + (parts.length>1 ? parts[parts.length-1][0] : '')).toUpperCase();
+  const tone = accent || T.green;
+  return (
+    <div style={{background:'#fff', border:`1px solid ${T.line}`, borderRadius:9, padding:'11px 12px'}}>
+      <div style={{display:'flex', alignItems:'center', gap:10}}>
+        <div style={{width:38, height:38, flexShrink:0, borderRadius:9, background:tone, color:'#fff', display:'flex', alignItems:'center', justifyContent:'center', fontFamily:T.mono, fontSize:14, fontWeight:700}}>{initials}</div>
+        <div style={{minWidth:0, flex:1}}>
+          <div style={{fontSize:14, fontWeight:700, color:T.ink, letterSpacing:-0.2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{person.name}</div>
+          <div style={{fontSize:11, color:T.ink4, marginTop:1}}>{person.role}</div>
+        </div>
+      </div>
+      <div style={{marginTop:9, display:'flex', flexDirection:'column', gap:6}}>
+        {person.phone ? (
+          <div style={{display:'flex', alignItems:'center', gap:6}}>
+            <span style={{width:16, flexShrink:0, display:'flex', justifyContent:'center'}}>{Icon.phone(T.ink4,13)}</span>
+            <span style={{flex:1, minWidth:0, fontFamily:T.mono, fontSize:12.5, color:T.ink2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{person.phone}</span>
+            <a href={'tel:'+person.phone} style={{textDecoration:'none'}} aria-label={'Call '+person.name}>
+              <button style={ssBtnStyle(T.green, true)}>{Icon.phone('#fff',12)}<span>Call</span></button>
+            </a>
+            <button onClick={()=>ssCopy(person.phone,'Number',showToast)} style={ssBtnStyle(T.ink3)}>{Icon.copy(T.ink3,12)}<span>Copy</span></button>
+          </div>
+        ) : (
+          <div style={{display:'flex', alignItems:'center', gap:6, fontSize:11.5, color:T.ink4, fontStyle:'italic'}}>
+            <span style={{width:16, flexShrink:0, display:'flex', justifyContent:'center'}}>{Icon.phone(T.ink4,13)}</span> Number not on file — reach via the escalation contact
+          </div>
+        )}
+        {person.email ? (
+          <div style={{display:'flex', alignItems:'center', gap:6}}>
+            <span style={{width:16, flexShrink:0, display:'flex', justifyContent:'center'}}>{Icon.mail(T.ink4,13)}</span>
+            <span style={{flex:1, minWidth:0, fontFamily:T.mono, fontSize:11.5, color:T.ink2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{person.email}</span>
+            <button onClick={()=>ssCopy(person.email,'Email',showToast)} style={ssBtnStyle(T.ink3)}>{Icon.copy(T.ink3,12)}<span>Copy</span></button>
+          </div>
+        ) : (
+          <div style={{display:'flex', alignItems:'center', gap:6, fontSize:11.5, color:T.ink4, fontStyle:'italic'}}>
+            <span style={{width:16, flexShrink:0, display:'flex', justifyContent:'center'}}>{Icon.mail(T.ink4,13)}</span> No email on file
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SSDeptCard({ dept, showToast }) {
+  const emails = dept.contacts.map(c=>c.email).filter(Boolean);
+  return (
+    <div style={{padding:'0 18px 16px'}}>
+      <div style={{background:'#fff', border:`1px solid ${T.line}`, borderRadius:12, overflow:'hidden'}}>
+        {/* Department header */}
+        <div style={{padding:'13px 14px', borderBottom:`1px solid ${T.line}`, background:T.paper}}>
+          <div style={{display:'flex', alignItems:'center', gap:10}}>
+            <div style={{width:34, height:34, flexShrink:0, borderRadius:8, background:dept.accent, color:'#fff', display:'flex', alignItems:'center', justifyContent:'center'}}>{dept.icon('#fff',18)}</div>
+            <div style={{flex:1, minWidth:0}}>
+              <div style={{fontSize:16, fontWeight:800, letterSpacing:-0.3, color:T.ink}}>{dept.name}</div>
+              <div style={{fontSize:11, color:T.ink4, fontWeight:600}}>{dept.full}</div>
+            </div>
+          </div>
+          <div style={{fontSize:12, color:T.ink3, lineHeight:1.55, marginTop:9}}>{dept.handles}</div>
+        </div>
+
+        <div style={{padding:'13px 14px'}}>
+          {/* Step 1 — contact first */}
+          <div style={{display:'flex', alignItems:'center', gap:7, marginBottom:9}}>
+            <span style={{width:20, height:20, borderRadius:10, background:dept.accent, color:'#fff', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, fontWeight:800, fontFamily:T.mono}}>1</span>
+            <span style={{fontSize:11, fontWeight:800, letterSpacing:0.8, color:T.ink2, textTransform:'uppercase'}}>Contact first</span>
+          </div>
+          <div style={{display:'flex', flexDirection:'column', gap:8}}>
+            {dept.contacts.map((c,i)=>(<SSContactCard key={i} person={c} showToast={showToast} accent={dept.accent}/>))}
+          </div>
+
+          {/* Step 2 — escalation ladder */}
+          <div style={{display:'flex', alignItems:'center', gap:7, margin:'16px 0 9px'}}>
+            <span style={{width:20, height:20, borderRadius:10, background:T.ink2, color:'#fff', display:'flex', alignItems:'center', justifyContent:'center'}}>{Icon.escalate('#fff',12)}</span>
+            <span style={{fontSize:11, fontWeight:800, letterSpacing:0.8, color:T.ink2, textTransform:'uppercase'}}>If no response — escalate in order</span>
+          </div>
+          <div style={{position:'relative'}}>
+            {dept.ladder.map((step,i)=>(
+              <div key={i} style={{marginBottom: i<dept.ladder.length-1?8:0}}>
+                <div style={{display:'flex', alignItems:'center', gap:6, marginBottom:5}}>
+                  <span style={{fontSize:10, fontWeight:800, fontFamily:T.mono, color:'#fff', background:T.ink3, borderRadius:4, padding:'2px 6px'}}>STEP {i+1}</span>
+                  <span style={{fontSize:11, fontWeight:700, color:T.ink3}}>{step.tag}</span>
+                </div>
+                <SSContactCard person={step.person} showToast={showToast} accent={T.ink3}/>
+              </div>
+            ))}
+          </div>
+
+          {dept.note && (
+            <div style={{marginTop:11, padding:'9px 11px', background:T.warnSoft, border:`1px solid ${T.warnLine}`, borderRadius:7, fontSize:11.5, color:T.warn, lineHeight:1.5, fontWeight:600}}>
+              {dept.note}
+            </div>
+          )}
+
+          {emails.length>0 && (
+            <button onClick={()=>ssCopy(emails.join('; '), dept.name+' team emails', showToast)} style={{...ssBtnStyle(dept.accent), height:34, marginTop:12, width:'100%', justifyContent:'center'}}>
+              {Icon.copy(dept.accent,13)}<span>Copy all {dept.name} team e-mails</span>
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SalesSupportScreen({ctx}) {
+  const { nav, showToast } = ctx;
+  const ccEmails = SS_CC.map(c=>c.email).filter(Boolean).join('; ');
+  return (
+    <div className="screen">
+      <div style={{flexShrink:0, background:'#fff', borderBottom:`1px solid ${T.line}`}}>
+        <div style={{display:'flex', alignItems:'center', gap:8, padding:'12px 14px 12px'}}>
+          <button onClick={()=>nav('settings')} title="Back" style={{width:32, height:32, flexShrink:0, borderRadius:6, background:'#fff', border:`1px solid ${T.line}`, display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer'}}>{Icon.back()}</button>
+          <div style={{flex:1, minWidth:0}}>
+            <div style={{fontSize:11, color:T.ink4, fontFamily:T.mono, letterSpacing:1}}>GODREJ INTERIO · SUPPORT</div>
+            <div style={{fontSize:20, fontWeight:800, letterSpacing:-0.5}}>Sales Support System</div>
+          </div>
+        </div>
+      </div>
+      <div className="scroll" style={{background:T.paper}}>
+
+        {/* How it works */}
+        <div style={{padding:'14px 18px 12px'}}>
+          <div style={{background:'#fff', border:`1px solid ${T.line}`, borderRadius:12, padding:'14px'}}>
+            <div style={{fontSize:13, fontWeight:800, color:T.ink, marginBottom:6}}>Who to contact — and how to escalate</div>
+            <div style={{fontSize:12.5, color:T.ink3, lineHeight:1.65}}>
+              Support is split across four departments. For any query, <b>contact the front-line person first</b>. If you don’t get a response in reasonable time, move <b>up the escalation ladder</b> shown in that department, one step at a time.
+            </div>
+            <div style={{marginTop:10, padding:'9px 11px', background:T.greenSoft, border:`1px solid ${T.greenLine}`, borderRadius:7, fontSize:11.5, color:T.green, lineHeight:1.55, fontWeight:600}}>
+              When you escalate over e-mail, always CC <b>Bibekananda Nayak</b> and <b>Pradosh Dash</b> (listed at the bottom of this page).
+            </div>
+            <div style={{marginTop:10, display:'flex', gap:8, flexWrap:'wrap'}}>
+              {SS_DEPTS.map(d=>(
+                <span key={d.id} style={{display:'inline-flex', alignItems:'center', gap:5, fontSize:11, fontWeight:700, color:T.ink2, background:T.paper, border:`1px solid ${T.line}`, borderRadius:20, padding:'4px 10px'}}>
+                  {d.icon(d.accent,13)}{d.name}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Departments */}
+        {SS_DEPTS.map(d=>(<SSDeptCard key={d.id} dept={d} showToast={showToast}/>))}
+
+        {/* Standing CC list for escalations */}
+        <div style={{padding:'0 18px 16px'}}>
+          <div style={{background:'#fff', border:`2px solid ${T.greenLine}`, borderRadius:12, overflow:'hidden'}}>
+            <div style={{padding:'13px 14px', borderBottom:`1px solid ${T.line}`, background:T.greenSoft}}>
+              <div style={{fontSize:14, fontWeight:800, color:T.green, letterSpacing:-0.2}}>Always CC on escalations</div>
+              <div style={{fontSize:11.5, color:T.ink3, marginTop:3, lineHeight:1.5}}>Add these two on any escalation e-mail, for every department above.</div>
+            </div>
+            <div style={{padding:'13px 14px', display:'flex', flexDirection:'column', gap:8}}>
+              {SS_CC.map((c,i)=>(<SSContactCard key={i} person={c} showToast={showToast} accent={T.green}/>))}
+              {ccEmails && (
+                <button onClick={()=>ssCopy(ccEmails,'CC e-mails',showToast)} style={{...ssBtnStyle(T.green), height:34, justifyContent:'center'}}>
+                  {Icon.copy(T.green,13)}<span>Copy both CC e-mails</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div style={{padding:'0 18px', textAlign:'center', fontSize:10, color:T.ink4, fontFamily:T.mono, lineHeight:1.6}}>
+          Source: OPS sheet · “SALES SUPPORT SYSTEM”<br/>Contact a manager if any detail looks out of date.
+        </div>
+        <div style={{height:24}}/>
+      </div>
+      <BottomNav screen="settings" nav={nav}/>
+    </div>
+  );
+}
+
 function NotificationsScreen({ctx}) {
   const {user, notifications, mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, loadOrders, markNotifsSeen, nav, setOrder, showToast} = ctx;
   const isAdmin = normRole(user?.role) === 'admin';
@@ -5297,6 +5572,19 @@ function SettingsScreen({ctx}) {
         <div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2}}>Sync & data</div>
       </div>
       <div className="scroll">
+
+        {/* ── Sales Support System — Godrej Interio contacts & escalation ── */}
+        <div style={{padding:'14px 18px 4px'}}>
+          <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>SUPPORT & ESCALATION</div>
+          <div onClick={()=>nav('salessupport')} role="button" style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:10,padding:'14px',display:'flex',alignItems:'center',gap:12,cursor:'pointer'}}>
+            <div style={{width:40,height:40,flexShrink:0,borderRadius:9,background:T.green,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center'}}>{Icon.headset('#fff',20)}</div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:15,fontWeight:700,letterSpacing:-0.3}}>Sales Support System</div>
+              <div style={{fontSize:11.5,color:T.ink3,marginTop:2,lineHeight:1.45}}>Who to contact &amp; how to escalate — CST · Logistics · Spare · Service</div>
+            </div>
+            <div style={{transform:'rotate(180deg)',flexShrink:0,opacity:0.5}}>{Icon.back(T.ink3,18)}</div>
+          </div>
+        </div>
 
         {/* Backend URL, Google review link and connection test are managed in
             the background — no setup UI is shown to users. */}
