@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '70';
+  var V = '71';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -87,7 +87,7 @@
      load and whenever the app is brought to the foreground. -->
 <script>
 (function(){
-  var RUNV = 'd19bcd6';   // keep in sync with V above and version.json
+  var RUNV = 'e5c9a10';   // keep in sync with V above and version.json
   function checkUpdate(){
     try {
       fetch('version.json?ts=' + Date.now(), { cache: 'no-store' })
@@ -173,8 +173,9 @@ const T = {
   line:'#d9d5cc', line2:'#c7c2b7', card:'#ffffff',
   green:'#F04040', greenDeep:'#c0302f', greenSoft:'#fff0f0', greenLine:'#f4bbbb',
   ok:'#1f7a4d', okSoft:'#deefe3',
-  warn:'#a6610b', warnSoft:'#f7e9cf',
-  bad:'#9b2917', badSoft:'#f2d9d2',
+  warn:'#a6610b', warnSoft:'#f7e9cf', warnLine:'#e6cc95',
+  bad:'#9b2917', badSoft:'#f2d9d2', badLine:'#e0b7ae',
+  purple:'#6d28d9', purpleSoft:'#efeafc', purpleLine:'#d3c4f0',
   sans:"'Inter',system-ui,sans-serif",
   mono:"'JetBrains Mono',ui-monospace,'SF Mono',monospace",
 };
@@ -619,7 +620,7 @@ function FSLogo({ size=28, dark=false }) {
 }
 
 function Pill({children,tone='neutral',size='md',mono=false}) {
-  const map = {neutral:{bg:T.paper2,fg:T.ink2,bd:T.line},ok:{bg:T.okSoft,fg:T.ok,bd:'#b7dbc1'},warn:{bg:T.warnSoft,fg:T.warn,bd:'#e6cc95'},bad:{bg:T.badSoft,fg:T.bad,bd:'#e0b7ae'},green:{bg:T.greenSoft,fg:T.green,bd:T.greenLine},ink:{bg:T.ink,fg:'#fff',bd:T.ink}};
+  const map = {neutral:{bg:T.paper2,fg:T.ink2,bd:T.line},ok:{bg:T.okSoft,fg:T.ok,bd:'#b7dbc1'},warn:{bg:T.warnSoft,fg:T.warn,bd:'#e6cc95'},bad:{bg:T.badSoft,fg:T.bad,bd:'#e0b7ae'},green:{bg:T.greenSoft,fg:T.green,bd:T.greenLine},purple:{bg:T.purpleSoft,fg:T.purple,bd:T.purpleLine},ink:{bg:T.ink,fg:'#fff',bd:T.ink}};
   const c = map[tone]||map.neutral;
   const s = size==='sm'?{fs:10,px:6,py:2,h:16}:{fs:11,px:8,py:3,h:20};
   return <span style={{display:'inline-flex',alignItems:'center',gap:4,height:s.h,padding:`0 ${s.px}px`,borderRadius:4,background:c.bg,color:c.fg,border:`1px solid ${c.bd}`,fontFamily:mono?T.mono:T.sans,fontSize:s.fs,fontWeight:600,letterSpacing:mono?0:0.2,textTransform:mono?'none':'uppercase',whiteSpace:'nowrap'}}>{children}</span>;
@@ -1640,6 +1641,70 @@ function prettyDate(iso) {
 function isDeliveryDone(o) {
   const s = (o.deliveryStatus || '').toLowerCase();
   return o.status === 'completed' || /installation done|^delivered/.test(s);
+}
+
+// ─── DELIVERY WATCH (approaching / overdue deliveries) ──────
+// The scheduled delivery date for an order — the app's planned-delivery date if
+// set, otherwise the date coming from the Godrej MIS feed.
+function orderDeliveryISO(o, mis) {
+  const m = misForOrder(mis, o);
+  return (o.plannedDly && o.plannedDly.length >= 8 ? o.plannedDly : '') || (m && m.deliveryDate) || '';
+}
+// Delivery statuses that no longer need chasing when the delivery date nears or
+// passes: once an order is Scheduled for Delivery, Delivered, or Installation
+// Done (or otherwise Completed) the watch leaves it alone. Anchored with ^ so
+// "Rescheduled for Delivery" (which still needs action) is NOT treated as
+// "Scheduled for Delivery".
+function deliveryActionSettled(o) {
+  const s = (o.deliveryStatus || '').toLowerCase();
+  return o.status === 'completed' || /^scheduled for delivery/.test(s) || /^delivered/.test(s) || /installation done/.test(s);
+}
+// Whether an order belongs on the Delivery Watch, and in which bucket. Returns
+// null when it doesn't. An order is watched when it still needs action (not
+// settled per above) AND its delivery date is due tomorrow, due today, or has
+// already passed. dd = whole days from today (negative = overdue).
+function deliveryWatchInfo(o, mis) {
+  if (deliveryActionSettled(o)) return null;
+  const iso = orderDeliveryISO(o, mis);
+  const dd = daysFromToday(iso);
+  if (dd == null) return null;
+  if (dd < 0)  return { iso, dd, bucket:'overdue',     days:Math.abs(dd) };
+  if (dd <= 1) return { iso, dd, bucket:'approaching', days:dd };   // today or tomorrow
+  return null;
+}
+// Urgency colour for an order by its delivery progress:
+//   • Green  — Installation Done / Completed (fully finished)
+//   • Orange — Scheduled for Delivery, or Delivered but not yet installed
+//   • Red    — overdue: the delivery date has passed and it isn't delivered yet
+//   • grey   — everything else still pending, no date pressure
+function deliveryUrgency(o, mis) {
+  const s = (o.deliveryStatus || '').toLowerCase();
+  if (o.status === 'completed' || /installation done/.test(s))
+    return { key:'done', color:T.ok, soft:T.okSoft, line:'#b7dbc1', label:'Completed' };
+  const dd = daysFromToday(orderDeliveryISO(o, mis));
+  // Overdue only applies while the goods have NOT been delivered.
+  if (dd != null && dd < 0 && !/^delivered/.test(s))
+    return { key:'overdue', color:T.bad, soft:T.badSoft, line:T.badLine, label:'Overdue ' + Math.abs(dd) + 'd' };
+  if (/^delivered/.test(s))
+    return { key:'delivered', color:T.warn, soft:T.warnSoft, line:T.warnLine, label:'Delivered' };
+  if (/^scheduled for delivery/.test(s))
+    return { key:'scheduled', color:T.warn, soft:T.warnSoft, line:T.warnLine, label:'Scheduled' };
+  if (dd != null && dd <= 1)
+    return { key:'approaching', color:T.warn, soft:T.warnSoft, line:T.warnLine, label: dd <= 0 ? 'Due today' : 'Due tomorrow' };
+  return { key:'pending', color:T.ink4, soft:T.paper2, line:T.line, label:'Pending' };
+}
+// Service-request urgency: Purple while open, Green once resolved.
+function serviceUrgency(o) {
+  if (!o || !o.serviceFlag) return null;
+  if (/resolved/i.test(o.serviceStatus || ''))
+    return { key:'resolved', color:T.ok, soft:T.okSoft, line:'#b7dbc1', label:'Service resolved' };
+  return { key:'open', color:T.purple, soft:T.purpleSoft, line:T.purpleLine, label:'Service open' };
+}
+// An order may only be marked Delivered / Installation Done once it is fully paid:
+// order amount must equal the earnest advance + every money-receipt amount.
+// orderReceived() already folds in the per-line GST rounding tolerance.
+function canMarkDelivered(o) {
+  return orderReceived(o).balance <= 0;
 }
 // Look up an order's MIS record by its WON (a single order may carry several WONs).
 function misForOrder(mis, o) {
@@ -3282,6 +3347,13 @@ function OrderFormScreen({ctx}) {
   // record which items are delivered (the rest stay Pending for Delivery).
   // "Rescheduled for Delivery" opens a date picker to set the new delivery date.
   function handleDeliveryChange(val){
+    // Block Delivered / Installation Done until the order is fully paid
+    // (order amount == earnest + money-receipt amounts).
+    if((/^delivered/i.test(val) || /installation done/i.test(val)) && !canMarkDelivered(o)){
+      const bal = Math.round(orderReceived(o).balance);
+      ctx.showToast('Can’t mark "'+val+'" — ₹'+bal.toLocaleString('en-IN')+' still due. Collect full payment first.','bad');
+      return;
+    }
     if(/partial/i.test(val)){ setPartialPicker(true); return; }
     if(/rescheduled/i.test(val)){ setReschedulePicker(true); return; }
     setOrder(prev=>({...prev,deliveryStatus:val}));
@@ -4428,6 +4500,7 @@ function HistoryScreen({ctx}) {
   const [serviceOrder,setServiceOrder] = useState(null);   // order whose service request is being raised/edited
   const [statusView,setStatusView] = useState(null);       // null=ledger · 'menu'=category grid · <catId>=that category's orders
   const [dateView,setDateView] = useState(false);          // false=ledger · true=by-date drill-down
+  const [watchView,setWatchView] = useState(false);        // false=ledger · true=Delivery Watch (approaching/overdue)
   const [dateFrom,setDateFrom] = useState('');             // ISO yyyy-mm-dd range start for the by-date view
   const [dateTo,setDateTo]     = useState('');             // ISO yyyy-mm-dd range end for the by-date view
   useEffect(()=>{ loadOrders(); loadMis({silent:true}); },[]);
@@ -4456,8 +4529,28 @@ function HistoryScreen({ctx}) {
   const matchesSales = o => !salesFilter || (o.salesExec||'').trim().toLowerCase()===salesFilter.toLowerCase();
   const shown = orders.filter(active.filter).filter(matchesQuery).filter(matchesSales);
 
+  // ── Delivery Watch data ────────────────────────────────────────────────────
+  // Orders whose delivery is due tomorrow, due today, or already overdue AND that
+  // still need action (not Scheduled / Delivered / Installation Done). Sorted
+  // most-overdue first. Salesperson + search filters from the ledger still apply.
+  const watchAll = orders
+    .map(o => ({ o, w: deliveryWatchInfo(o, mis) }))
+    .filter(x => x.w)
+    .sort((a,b) => a.w.dd - b.w.dd);            // most negative (most overdue) first
+  const watchShown = watchAll.filter(x => matchesQuery(x.o)).filter(x => matchesSales(x.o));
+  const watchCount       = watchAll.length;
+  const overdueCount     = watchAll.filter(x => x.w.bucket === 'overdue').length;
+  const approachingCount = watchAll.filter(x => x.w.bucket === 'approaching').length;
+
   async function changeDelivery(o, val){
     if(!val || val===(o.deliveryStatus||'Pending')) return;
+    // An order can't be Delivered / Installation Done until it is fully paid
+    // (order amount == earnest + money-receipt amounts).
+    if((/^delivered/i.test(val) || /installation done/i.test(val)) && !canMarkDelivered(o)){
+      const bal = Math.round(orderReceived(o).balance);
+      ctx.showToast('Can’t mark "'+val+'" — ₹'+bal.toLocaleString('en-IN')+' still due. Collect full payment first.','bad');
+      return;
+    }
     // Partial Delivery needs the item picker to record which items were delivered.
     if(/partial/i.test(val)){ setPartialOrder(o); return; }
     // Rescheduled for Delivery needs a new date.
@@ -4487,8 +4580,13 @@ function HistoryScreen({ctx}) {
   // list. Shows the delivery date and the outstanding balance (or "Fully Paid").
   const orderCard = o => {
     const bal = Math.round(orderReceived(o).balance);
+    // Colour the card's left edge by delivery urgency (green/orange/red) so the
+    // list reads at a glance; a purple edge wins while a service request is open.
+    const urg = deliveryUrgency(o, mis);
+    const svc = serviceUrgency(o);
+    const edge = (svc && svc.key==='open') ? svc.color : urg.color;
     return (
-          <div key={o.no} style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`,padding:'12px 18px',display:'grid',gridTemplateColumns:'1fr auto',gap:10,cursor:'pointer'}} onClick={()=>openOrder(o)}>
+          <div key={o.no} style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`,borderLeft:`4px solid ${edge}`,padding:'12px 18px 12px 14px',display:'grid',gridTemplateColumns:'1fr auto',gap:10,cursor:'pointer'}} onClick={()=>openOrder(o)}>
             <div style={{minWidth:0}}>
               <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3,flexWrap:'wrap'}}>
                 <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
@@ -4507,11 +4605,12 @@ function HistoryScreen({ctx}) {
                 const partialPending = /partial/i.test(o.deliveryStatus||'') ? Math.max(0,(o.items||[]).length-(o.deliveryStatus?(o.deliveredItems||[]).length:0)) : 0;
                 return (
                   <div style={{display:'flex',gap:5,marginTop:4,flexWrap:'wrap'}}>
-                    {o.serviceFlag && <Pill tone={/resolved/i.test(o.serviceStatus||'')?'ok':'bad'} size="sm">⚠ SERVICE {/resolved/i.test(o.serviceStatus||'')?'RESOLVED':'OPEN'}</Pill>}
+                    {(urg.key==='done'||urg.key==='delivered'||urg.key==='scheduled') && <Pill tone={urg.key==='done'?'ok':'warn'} size="sm">{urg.label}</Pill>}
+                    {o.serviceFlag && <Pill tone={/resolved/i.test(o.serviceStatus||'')?'ok':'purple'} size="sm">⚠ SERVICE {/resolved/i.test(o.serviceStatus||'')?'RESOLVED':'OPEN'}</Pill>}
                     {m && m.committed && !isCompleted(o) && <Pill tone="green" size="sm">MIS ✓ committed {m.totalQty}/{m.totalQty}</Pill>}
                     {m && !m.committed && m.anyCommitted && !isCompleted(o) && <Pill tone="neutral" size="sm">MIS {m.committedQty}/{m.totalQty} committing</Pill>}
                     {partialPending>0 && <Pill tone="warn" size="sm">{partialPending} pending for delivery</Pill>}
-                    {(o.plannedDly||(m&&m.deliveryDate)) && !isCompleted(o) && (()=>{ const dl=(o.plannedDly&&o.plannedDly.length>=8?o.plannedDly:'')||(m&&m.deliveryDate)||''; const dd=daysFromToday(dl); if(dd==null) return null; if(dd<0) return <Pill tone="bad" size="sm">overdue {Math.abs(dd)}d</Pill>; if(dd<=DELIVERY_SOON_DAYS) return <Pill tone="warn" size="sm">{dd===0?'due today':'in '+dd+'d'}</Pill>; return null; })()}
+                    {(o.plannedDly||(m&&m.deliveryDate)) && !isDeliveryDone(o) && (()=>{ const dl=(o.plannedDly&&o.plannedDly.length>=8?o.plannedDly:'')||(m&&m.deliveryDate)||''; const dd=daysFromToday(dl); if(dd==null) return null; if(dd<0) return <Pill tone="bad" size="sm">overdue {Math.abs(dd)}d</Pill>; if(dd<=DELIVERY_SOON_DAYS) return <Pill tone="warn" size="sm">{dd===0?'due today':'in '+dd+'d'}</Pill>; return null; })()}
                   </div>
                 );
               })()}
@@ -4589,6 +4688,72 @@ function HistoryScreen({ctx}) {
               <div style={{width:52,height:52,borderRadius:14,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12}}>{Icon.doc(T.ink4,24)}</div>
               <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No orders in {cat.label}</div>
               <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>Orders with this status will appear here.</div>
+            </div>
+          )}
+          <div style={{height:24}}/>
+        </div>
+        {partialOrder && <PartialDeliveryModal order={partialOrder} onCancel={()=>setPartialOrder(null)} onConfirm={confirmPartial}/>}
+        {rescheduleOrder && <RescheduleModal order={rescheduleOrder} onCancel={()=>setRescheduleOrder(null)} onConfirm={confirmReschedule}/>}
+        {serviceOrder && <ServiceRequestModal order={serviceOrder} ctx={ctx} onClose={()=>setServiceOrder(null)}/>}
+        <BottomNav screen="history" nav={nav}/>
+      </div>
+    );
+  }
+
+  // ── Delivery Watch drill-down ──────────────────────────────────────────────
+  // Action board for deliveries due tomorrow, due today or overdue that still
+  // need work. Colour-coded by urgency, split into Overdue / Due-soon groups,
+  // with count tiles up top. Salesperson + search filters from the ledger apply.
+  if (watchView) {
+    const wOver = watchShown.filter(x => x.w.bucket === 'overdue');
+    const wApp  = watchShown.filter(x => x.w.bucket === 'approaching');
+    const svcOpenShown = orders.filter(matchesQuery).filter(matchesSales)
+      .filter(o => o.serviceFlag && !/resolved/i.test(o.serviceStatus||'')).length;
+    // Watched orders by their current (action-needed) delivery status.
+    const wByStatus = {};
+    watchShown.forEach(x => { const s = x.o.deliveryStatus || 'Pending'; wByStatus[s] = (wByStatus[s]||0) + 1; });
+    const tile = (label, n, color, soft, line) => (
+      <div style={{flex:'1 1 96px',background:soft,border:`1px solid ${line}`,borderLeft:`4px solid ${color}`,borderRadius:10,padding:'10px 12px'}}>
+        <div style={{fontSize:26,fontWeight:800,color,lineHeight:1}}>{n}</div>
+        <div style={{fontSize:11,color:T.ink3,fontWeight:600,marginTop:3}}>{label}</div>
+      </div>
+    );
+    return (
+      <div className="screen">
+        <div style={{flexShrink:0}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 6px'}}>
+            <button onClick={()=>setWatchView(false)} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>ORDERS · DELIVERY WATCH</div>
+              <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Delivery Watch</div>
+            </div>
+            <Btn size="sm" icon={Icon.refresh(T.ink2,14)} onClick={()=>{loadOrders();loadMis({});}} disabled={misLoading}>Refresh</Btn>
+          </div>
+          <div style={{fontSize:12,color:T.ink4,padding:'0 18px 8px'}}>Deliveries due tomorrow, due today or overdue — and still needing action (not yet Scheduled, Delivered or Installed).</div>
+          {/* Urgency count summary */}
+          <div style={{display:'flex',gap:8,padding:'0 18px 8px',flexWrap:'wrap'}}>
+            {tile('Overdue', wOver.length, T.bad, T.badSoft, T.badLine)}
+            {tile('Due today / tomorrow', wApp.length, T.warn, T.warnSoft, T.warnLine)}
+            {tile('Service open', svcOpenShown, T.purple, T.purpleSoft, T.purpleLine)}
+          </div>
+          {/* Per-status action counts — how many watched orders sit in each status */}
+          {watchShown.length>0 && (
+            <div style={{padding:'0 18px 10px',display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
+              <span style={{fontSize:11,color:T.ink4,fontWeight:700}}>ACTION</span>
+              {Object.keys(wByStatus).map(s => <Pill key={s} tone="neutral" size="sm">{s} · {wByStatus[s]}</Pill>)}
+            </div>
+          )}
+        </div>
+        <div className="scroll">
+          {wOver.length>0 && <div style={{padding:'10px 18px 4px',fontSize:11,fontWeight:700,color:T.bad,letterSpacing:1}}>⚠ OVERDUE · {wOver.length}</div>}
+          {wOver.map(x => orderCard(x.o))}
+          {wApp.length>0 && <div style={{padding:'14px 18px 4px',fontSize:11,fontWeight:700,color:T.warn,letterSpacing:1}}>⏰ DUE TODAY / TOMORROW · {wApp.length}</div>}
+          {wApp.map(x => orderCard(x.o))}
+          {watchShown.length===0 && (
+            <div style={{padding:'48px 24px',textAlign:'center'}}>
+              <div style={{width:52,height:52,borderRadius:14,background:T.okSoft,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12,fontSize:26,color:T.ok}}>✓</div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>All caught up</div>
+              <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>{(query||salesFilter)?'No watched deliveries match the current search / salesperson filter.':'No deliveries are overdue or due in the next day.'}</div>
             </div>
           )}
           <div style={{height:24}}/>
@@ -4703,6 +4868,18 @@ function HistoryScreen({ctx}) {
               <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>Orders by Date</div><div style={{fontSize:11,opacity:.7}}>Today, Yesterday & date range · tap to open</div></div>
             </div>
             <span style={{fontSize:18,opacity:.8}}>›</span>
+          </div>
+        </div>
+        {/* Delivery Watch entry — approaching + overdue deliveries needing action */}
+        <div style={{padding:'2px 18px 8px'}}>
+          <div onClick={()=>setWatchView(true)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'14px 16px',background:overdueCount>0?T.bad:(watchCount>0?T.warn:T.ink),color:'#fff',borderRadius:10,cursor:'pointer'}}>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              <div style={{width:34,height:34,borderRadius:8,background:'rgba(255,255,255,.16)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>🚚</div>
+              <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>Delivery Watch</div><div style={{fontSize:11,opacity:.85}}>{watchCount>0?`${overdueCount} overdue · ${approachingCount} due today/tomorrow`:'No deliveries need action'}</div></div>
+            </div>
+            {watchCount>0
+              ? <span style={{minWidth:26,height:26,padding:'0 8px',borderRadius:99,background:'#fff',color:overdueCount>0?T.bad:T.warn,fontSize:14,fontWeight:800,display:'inline-flex',alignItems:'center',justifyContent:'center'}}>{watchCount}</span>
+              : <span style={{fontSize:18,opacity:.8}}>›</span>}
           </div>
         </div>
         {/* Search by Order ID or SO No (WON) */}
