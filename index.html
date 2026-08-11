@@ -842,13 +842,13 @@ function warehouseTagOf(stock) {
   return labels.join(', ');
 }
 
-// Delivery-warehouse choices offered on the order form. BOTH warehouses are
-// ALWAYS selectable (34S = ZBF34S, KB = ZBF11T) so the salesperson can decide
-// where to deliver from regardless of where the item is currently stocked — the
-// picker is never hidden. 34S is listed first (the preferred default when the
-// item is in stock there).
+// Delivery-warehouse choices offered on the order form. ALL warehouses are
+// ALWAYS selectable (34S = ZBF34S, KB = ZBF11T, 4S) so the salesperson can
+// decide where to deliver from regardless of where the item is currently
+// stocked — the picker is never hidden. 34S is listed first (the preferred
+// default when the item is in stock there).
 function warehouseOptionsOf(stock) {
-  return ['34S', 'KB'];
+  return ['34S', 'KB', '4S'];
 }
 
 // Default delivery warehouse for a freshly added item: the warehouse that
@@ -4010,7 +4010,7 @@ function OrderFormScreen({ctx}) {
                   {/* Delivery warehouse for the SALES-copy tag. Both warehouses are
                       always offered so the salesperson can pick the delivery source
                       even when the item isn't stocked in one of them. */}
-                  {(()=>{const opts=['34S','KB'];const cur=it.whTag||'34S';return(
+                  {(()=>{const opts=['34S','KB','4S'];const cur=it.whTag||'34S';return(
                     <div style={{display:'flex',gap:8,marginTop:8,alignItems:'center',flexWrap:'wrap'}}>
                       <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>WAREHOUSE</span>
                       <select value={cur} onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,whTag:v}:x)}));}}
