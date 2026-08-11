@@ -2453,6 +2453,10 @@ function ReportsScreen({ctx}) {
   const todays    = (orders||[]).filter(o => o && o.status !== 'draft' && _toISO(o.date) === _todayISO);
   const todayCount = todays.length;
   const todayAmt   = todays.reduce((s,o)=>s+_exGst(o.amt),0);
+  // Today's Sale, split the same way as the range totals: Franchise (KB / 34S /
+  // untagged) vs 4Sinteriors (items tagged "4S").
+  let todayFranchiseAmt = 0, todayFoursAmt = 0;
+  todays.forEach(o => { const sp = _channelSplit(o); todayFranchiseAmt += sp.franchise; todayFoursAmt += sp.foursint; });
   function applyPreset(id){
     const now = new Date(), y = now.getFullYear(), m = now.getMonth();
     setPreset(id);
@@ -2590,6 +2594,17 @@ function ReportsScreen({ctx}) {
             <div style={{textAlign:'right'}}>
               <div style={{fontSize:24,fontWeight:800,letterSpacing:-0.8,lineHeight:1}}>{_fmtAmt(todayAmt)}</div>
               <div style={{fontSize:11,opacity:.9,marginTop:2}}>{todayCount} order{todayCount===1?'':'s'} today</div>
+            </div>
+          </div>
+          {/* Today's Sale, split by channel (Franchise vs 4Sinteriors) */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:8}}>
+            <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'9px 12px'}}>
+              <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TODAY · FRANCHISE</div>
+              <div style={{fontSize:17,fontWeight:800,letterSpacing:-0.6,color:T.ink,lineHeight:1.1,marginTop:3}}>{_fmtAmt(todayFranchiseAmt)}</div>
+            </div>
+            <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'9px 12px'}}>
+              <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TODAY · 4SINTERIORS</div>
+              <div style={{fontSize:17,fontWeight:800,letterSpacing:-0.6,color:T.ink,lineHeight:1.1,marginTop:3}}>{_fmtAmt(todayFoursAmt)}</div>
             </div>
           </div>
         </div>
