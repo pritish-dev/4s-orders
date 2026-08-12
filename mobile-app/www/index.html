@@ -4869,6 +4869,12 @@ function HistoryScreen({ctx}) {
     const payOf = o => { const {balance}=orderReceived(o); return balance>0?'Bal '+money(balance):'Fully Paid'; };
     // Orders for one salesperson in one category.
     const bucket = (name,c) => orders.filter(c.filter).filter(o=>((o.salesExec||'').trim()||'—')===name);
+    // Total pending order value for a salesperson — the taxable (GST-excluded) value
+    // of every Pending + Pending Won order, summed. The 18% GST is baked into each
+    // MRP, so orderTotals().taxable carves it back out; this is the bare order value
+    // the owner follows up on, never inflated by tax.
+    const PEND_VALUE_CATS = REPORT_CATS.filter(c=>c.id==='pending'||c.id==='pendwon');
+    const pendValueOf = name => PEND_VALUE_CATS.reduce((s,c)=>s + bucket(name,c).reduce((t,o)=>t + orderTotals(o).taxable, 0), 0);
     // Every salesperson with at least one order in a reported status.
     const reportPeople = [...new Set([].concat(...REPORT_CATS.map(c=>orders.filter(c.filter).map(o=>(o.salesExec||'').trim()||'—'))))].sort((a,b)=>a.localeCompare(b));
     const scope = reportSales ? [reportSales] : reportPeople;
@@ -4920,7 +4926,9 @@ function HistoryScreen({ctx}) {
       const blocks = scope.map(name=>{
         const tot = REPORT_CATS.reduce((s,c)=>s+bucket(name,c).length,0);
         if(!tot) return '';
-        return '*'+name.toUpperCase()+' · '+tot+' order'+(tot===1?'':'s')+'*\n```\n'+boxFor(name)+'\n```';
+        const pv = pendValueOf(name);
+        const pvLine = pv>0 ? '\n_Pending value (excl. GST): '+inr(pv)+'_' : '';
+        return '*'+name.toUpperCase()+' · '+tot+' order'+(tot===1?'':'s')+'*'+pvLine+'\n```\n'+boxFor(name)+'\n```';
       }).filter(Boolean);
       return head+'\n\n'+blocks.join('\n\n');
     };
@@ -4994,10 +5002,15 @@ function HistoryScreen({ctx}) {
             const tot = rows.reduce((s,x)=>s+x.os.length,0);
             return (
               <div key={name} style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:12,padding:'12px 14px',marginTop:10}}>
-                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:pendValueOf(name)>0?4:8}}>
                   <div style={{fontSize:15,fontWeight:800,color:T.ink}}>{name}</div>
                   <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,fontWeight:700}}>{tot} order{tot===1?'':'s'}</div>
                 </div>
+                {pendValueOf(name)>0 && (
+                  <div style={{fontSize:11,color:T.ink3,marginBottom:8}}>
+                    Pending order value <span style={{color:T.ink4}}>(excl. GST)</span>: <span style={{fontFamily:T.mono,fontWeight:800,color:T.ink}}>{money(pendValueOf(name))}</span>
+                  </div>
+                )}
                 {rows.map(({c,os})=>(
                   <div key={c.id} style={{marginBottom:8}}>
                     <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:4}}>
