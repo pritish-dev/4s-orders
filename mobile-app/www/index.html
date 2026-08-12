@@ -4942,21 +4942,37 @@ function HistoryScreen({ctx}) {
       return c;
     };
     const reportCaption = () => { let n=0; scope.forEach(name=>REPORT_CATS.forEach(c=>{ n+=bucket(name,c).length; })); return '*4S Interiors — Sales Team Follow-up*\n_As on '+prettyDate(new Date().toISOString().slice(0,10))+'_'+(reportSales?('\nSalesperson: '+reportSales):'')+'\n'+n+' open order'+(n===1?'':'s')+' — see the attached report.'; };
+    // Build the PNG *synchronously* (toDataURL, not the async toBlob) so navigator.
+    // share() / the download click still runs inside the button's user gesture —
+    // Safari/iOS silently refuse share() and some WebViews skip downloads once the
+    // gesture is lost on a later tick.
+    const dataURLToBlob = durl => { const parts=durl.split(','); const mime=((parts[0]||'').match(/:(.*?);/)||[])[1]||'image/png'; const bin=atob(parts[1]||''); const arr=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i); return new Blob([arr],{type:mime}); };
+    const saveDataUrl = (durl,fname) => { const a=document.createElement('a'); a.href=durl; a.download=fname; a.rel='noopener'; document.body.appendChild(a); a.click(); setTimeout(()=>a.remove(),0); };
+    const reportPng = () => buildReportCanvas().toDataURL('image/png');
     const shareReportImage = () => {
       if(nothing){ ctx.showToast&&ctx.showToast('No open orders to report','ok'); return; }
-      buildReportCanvas().toBlob(async blob=>{
-        if(!blob){ ctx.showToast&&ctx.showToast('Could not build the report image','bad'); return; }
-        const file=new File([blob],'Sales-Report.png',{type:'image/png'}); const caption=reportCaption();
-        try{ if(navigator.canShare&&navigator.canShare({files:[file]})){ await navigator.share({files:[file],text:caption}); return; } }
-        catch(e){ if(e&&e.name==='AbortError') return; }
-        const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='Sales-Report.png'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),1500);
-        window.open('https://wa.me/?text='+encodeURIComponent(caption),'_blank');
-        ctx.showToast&&ctx.showToast('Report image saved — attach it in the WhatsApp chat','ok');
-      },'image/png');
+      let durl; try{ durl=reportPng(); }catch(e){ ctx.showToast&&ctx.showToast('Could not build the report image','bad'); return; }
+      const fname='Sales-Report-'+new Date().toISOString().slice(0,10)+'.png';
+      const caption=reportCaption();
+      try{
+        const file=new File([dataURLToBlob(durl)],fname,{type:'image/png'});
+        if(navigator.canShare && navigator.canShare({files:[file]})){
+          navigator.share({files:[file],text:caption}).catch(err=>{
+            if(err&&err.name==='AbortError') return;               // user closed the sheet
+            saveDataUrl(durl,fname); ctx.showToast&&ctx.showToast('Sharing unavailable — image saved instead','ok');
+          });
+          return;
+        }
+      }catch(e){ /* fall through to the download + WhatsApp fallback */ }
+      // Fallback (desktop / no file-share): save the PNG and open WhatsApp to attach it.
+      saveDataUrl(durl,fname);
+      try{ window.open('https://wa.me/?text='+encodeURIComponent(caption),'_blank'); }catch(e){}
+      ctx.showToast&&ctx.showToast('Report image saved — attach it in the WhatsApp chat','ok');
     };
     const downloadReport = () => {
       if(nothing){ ctx.showToast&&ctx.showToast('No open orders to report','ok'); return; }
-      buildReportCanvas().toBlob(blob=>{ if(!blob) return; const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='Sales-Report-'+new Date().toISOString().slice(0,10)+'.png'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),1500); },'image/png');
+      try{ saveDataUrl(reportPng(),'Sales-Report-'+new Date().toISOString().slice(0,10)+'.png'); ctx.showToast&&ctx.showToast('Report image saved','ok'); }
+      catch(e){ ctx.showToast&&ctx.showToast('Could not build the report image','bad'); }
     };
     const chip = sel => ({padding:'6px 10px',borderRadius:999,border:`1px solid ${sel?T.ink:T.line}`,background:sel?T.ink:'#fff',color:sel?'#fff':T.ink2,fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap',flexShrink:0});
     return (
