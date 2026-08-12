@@ -4875,6 +4875,9 @@ function HistoryScreen({ctx}) {
     // the owner follows up on, never inflated by tax.
     const PEND_VALUE_CATS = REPORT_CATS.filter(c=>c.id==='pending'||c.id==='pendwon');
     const pendValueOf = name => PEND_VALUE_CATS.reduce((s,c)=>s + bucket(name,c).reduce((t,o)=>t + orderTotals(o).taxable, 0), 0);
+    // How many Pending + Pending Won orders make up that value — the count shown
+    // alongside it in the value summary, so it always matches the value's basis.
+    const pendCountOf = name => PEND_VALUE_CATS.reduce((s,c)=>s + bucket(name,c).length, 0);
     // Every salesperson with at least one order in a reported status.
     const reportPeople = [...new Set([].concat(...REPORT_CATS.map(c=>orders.filter(c.filter).map(o=>(o.salesExec||'').trim()||'—'))))].sort((a,b)=>a.localeCompare(b));
     const scope = reportSales ? [reportSales] : reportPeople;
@@ -4971,6 +4974,55 @@ function HistoryScreen({ctx}) {
       }catch(e){}
       legacyCopy(msg)?ok():bad();
     };
+    // ── Pending value summary (by salesperson) ────────────────────────────────
+    // A compact roll-up — for each salesperson in scope, their Pending + Pending
+    // Won order count and pending value (excl. GST), grouped by name, with a TOTAL
+    // across everyone. This is a standalone message the owner can send on its own,
+    // separate from the detailed per-order follow-up above. Same narrow fenced box
+    // so it lines up on a phone; name+(count) is left-aligned, the value right.
+    const pendPeople = scope.filter(name=>pendCountOf(name)>0);
+    const noPend = !pendPeople.length;
+    const sumRow = (label,n,v) => {
+      const right = inr(v);
+      const left  = clip(label+' ('+n+')', IW-right.length-1);
+      return '│ '+left+' '.repeat(Math.max(1,IW-left.length-right.length))+right+' │';
+    };
+    const buildPendSummaryText = () => {
+      const rows = pendPeople.map(name=>({name,n:pendCountOf(name),v:pendValueOf(name)}));
+      const totN = rows.reduce((s,r)=>s+r.n,0);
+      const totV = rows.reduce((s,r)=>s+r.v,0);
+      const head = '*4S Interiors — Pending Order Value*\n_As on '+prettyDate(new Date().toISOString().slice(0,10))+' · excl. GST · '+(reportSales||'All salespeople')+'_';
+      const L = [bTop];
+      rows.forEach(r=>L.push(sumRow(r.name,r.n,r.v)));
+      L.push(bSep);
+      L.push(sumRow('TOTAL',totN,totV));
+      L.push(bBot);
+      return head+'\n```\n'+L.join('\n')+'\n```';
+    };
+    const sharePendSummary = () => {
+      if(noPend){ ctx.showToast&&ctx.showToast('No pending order value to send','ok'); return; }
+      const msg = buildPendSummaryText();
+      try{
+        if(navigator.share){
+          navigator.share({text:msg}).catch(err=>{ if(!(err&&err.name==='AbortError')) openWhatsAppText(msg); });
+          return;
+        }
+      }catch(e){}
+      openWhatsAppText(msg);
+    };
+    const copyPendSummary = () => {
+      if(noPend){ ctx.showToast&&ctx.showToast('No pending order value to send','ok'); return; }
+      const msg = buildPendSummaryText();
+      const ok  = () => ctx.showToast&&ctx.showToast('Summary copied — paste into WhatsApp','ok');
+      const bad = () => ctx.showToast&&ctx.showToast('Could not copy the summary','bad');
+      try{
+        if(navigator.clipboard && navigator.clipboard.writeText){
+          navigator.clipboard.writeText(msg).then(ok, ()=>{ legacyCopy(msg)?ok():bad(); });
+          return;
+        }
+      }catch(e){}
+      legacyCopy(msg)?ok():bad();
+    };
     const chip = sel => ({padding:'6px 10px',borderRadius:999,border:`1px solid ${sel?T.ink:T.line}`,background:sel?T.ink:'#fff',color:sel?'#fff':T.ink2,fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap',flexShrink:0});
     return (
       <div className="screen">
@@ -4990,9 +5042,15 @@ function HistoryScreen({ctx}) {
               {reportPeople.map(n=>(<div key={n} onClick={()=>setReportSales(n===reportSales?'':n)} style={chip(reportSales===n)}>{n}</div>))}
             </div>
           )}
+          {/* Full per-order follow-up report */}
+          <div style={{display:'flex',gap:8,padding:'0 14px 6px'}}>
+            <button onClick={shareReportText} style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'11px 14px',borderRadius:10,border:'none',background:'#25d366',color:'#fff',fontSize:14,fontWeight:700,cursor:'pointer'}}>{Icon.whatsapp('#fff',16)} Send full report</button>
+            <button onClick={copyReportText} style={{padding:'11px 14px',borderRadius:10,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:14,fontWeight:700,cursor:'pointer'}}>Copy</button>
+          </div>
+          {/* Pending value summary — value + order count per salesperson, with a total */}
           <div style={{display:'flex',gap:8,padding:'0 14px 10px'}}>
-            <button onClick={shareReportText} style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'11px 14px',borderRadius:10,border:'none',background:'#25d366',color:'#fff',fontSize:14,fontWeight:700,cursor:'pointer'}}>{Icon.whatsapp('#fff',16)} Send on WhatsApp</button>
-            <button onClick={copyReportText} style={{padding:'11px 14px',borderRadius:10,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:14,fontWeight:700,cursor:'pointer'}}>Copy text</button>
+            <button onClick={sharePendSummary} disabled={noPend} style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'11px 14px',borderRadius:10,border:`1px solid ${noPend?T.line:'#25d366'}`,background:'#fff',color:noPend?T.ink4:'#128c3e',fontSize:14,fontWeight:700,cursor:noPend?'default':'pointer'}}>{Icon.whatsapp(noPend?T.ink4:'#128c3e',16)} Send value summary</button>
+            <button onClick={copyPendSummary} disabled={noPend} style={{padding:'11px 14px',borderRadius:10,border:`1px solid ${T.line}`,background:'#fff',color:noPend?T.ink4:T.ink2,fontSize:14,fontWeight:700,cursor:noPend?'default':'pointer'}}>Copy</button>
           </div>
         </div>
         <div className="scroll" style={{padding:'4px 14px 24px'}}>
