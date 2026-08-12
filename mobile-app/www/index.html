@@ -4577,11 +4577,15 @@ function HistoryScreen({ctx}) {
   // "scheduled", so anchor both with ^ to keep the two buckets separate.
   const st = o => (o.deliveryStatus||'').toLowerCase();
   const isCompleted = o => o.status==='completed' || /installation done/i.test(o.deliveryStatus||'');
+  // An order still awaiting its WON / SO number (a "Pending Won"). Such an order
+  // is bucketed under Pending Won ONLY — it is excluded from the plain Pending
+  // bucket below so a single order is never counted in both.
+  const isPendWon = o => !o.won && o.status!=='draft';
   // The order-status categories (shared by the Order Status drill-down grid and the
   // ledger tab strip). Each has an accent colour for its count box.
   const CATS = [
-    {id:'pending',    label:'Pending',      tone:T.warn,  filter:o=>!isCompleted(o) && (!st(o) || /^pending/.test(st(o)))},
-    {id:'pendwon',    label:'Pending Won',  tone:T.warn,  filter:o=>!o.won&&o.status!=='draft'},
+    {id:'pending',    label:'Pending',      tone:T.warn,  filter:o=>!isCompleted(o) && !isPendWon(o) && (!st(o) || /^pending/.test(st(o)))},
+    {id:'pendwon',    label:'Pending Won',  tone:T.warn,  filter:o=>isPendWon(o)},
     {id:'scheduled',  label:'Scheduled',    tone:T.ink,   filter:o=>/^scheduled/.test(st(o))},
     {id:'rescheduled',label:'Rescheduled',  tone:T.green, filter:o=>/^rescheduled/.test(st(o))},
     {id:'delivered',  label:'Delivered',    tone:T.ok,    filter:o=>/^delivered/.test(st(o))},
