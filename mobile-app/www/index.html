@@ -4873,43 +4873,32 @@ function HistoryScreen({ctx}) {
     const reportPeople = [...new Set([].concat(...REPORT_CATS.map(c=>orders.filter(c.filter).map(o=>(o.salesExec||'').trim()||'—'))))].sort((a,b)=>a.localeCompare(b));
     const scope = reportSales ? [reportSales] : reportPeople;
     const nothing = scope.every(name=>REPORT_CATS.every(c=>!bucket(name,c).length));
-    // ── WhatsApp report text — aligned, bordered tables ───────────────────────
-    // WhatsApp only keeps columns aligned inside a monospace (```) block, so each
-    // status is rendered as a fixed-width ASCII table with borders + a header row.
-    const trunc    = (s,n)=>{ s=String(s==null?'':s); return s.length>n?s.slice(0,n):s; };
-    const misShort = o => { const m=misForOrder(mis,o); if(!m) return '—'; if(m.committed) return 'Com'; if(m.anyCommitted) return 'Prt'; return 'Pnd'; };
-    const dlShort  = o => { const iso=(o.plannedDly&&o.plannedDly.length>=8?o.plannedDly:'')||(misForOrder(mis,o)?.deliveryDate)||''; return iso?prettyDate(iso).replace(/\s*\d{4}$/,''):'TBD'; };
-    const balShort = o => { const {balance}=orderReceived(o); return balance>0?Math.round(balance).toLocaleString('en-IN'):'Paid'; };
-    // Columns are sized to their content (capped) and cells truncated so the
-    // table stays readable on a phone.
-    const makeTable = (headers, rows) => {
-      const caps = [9,11,3,7,8];
-      const cells = rows.map(r=>r.map((c,i)=>trunc(c,caps[i])));
-      const w = headers.map((h,i)=>Math.max(h.length, 1, ...cells.map(r=>r[i].length)));
-      const pad = (s,n)=> s+' '.repeat(Math.max(0,n-s.length));
-      const border = '+'+w.map(n=>'-'.repeat(n+2)).join('+')+'+';
-      const row = arr => '|'+arr.map((c,i)=>' '+pad(c,w[i])+' ').join('|')+'|';
-      const out = [border, row(headers), border];
-      cells.forEach(r=>out.push(row(r)));
-      out.push(border);
-      return out.join('\n');
-    };
+    // ── WhatsApp report text — clean, professional layout ─────────────────────
+    // WhatsApp can't render real tables (an ASCII grid just wraps and breaks on a
+    // phone), so the report uses WhatsApp's own formatting instead: a titled
+    // header, a divider + bold NAME per salesperson, an italic section per status,
+    // and a tidy two-line entry per order (name + order no, then money · delivery
+    // · MIS). This stays readable on any screen width without column alignment.
+    const DIV = '━━━━━━━━━━━━━━━━━━━━';
+    const misPro = o => { const m=misForOrder(mis,o); if(!m) return 'Not in MIS'; if(m.committed) return 'Committed'; if(m.anyCommitted) return 'Committing '+m.committedQty+'/'+m.totalQty; return 'Pending'; };
+    const paySeg = o => { const {balance}=orderReceived(o); return balance>0?'💰 ₹'+Math.round(balance).toLocaleString('en-IN')+' due':'✅ Paid'; };
     const buildReportText = () => {
-      const hdr = ['No','Customer','MIS','Dely','Bal'];
-      let out = '*4S Interiors — Sales Team Follow-up*\n_As on '+prettyDate(new Date().toISOString().slice(0,10))+'_'
-              + '\n_Amounts in ₹ · MIS: Com=committed, Prt=partial, Pnd=pending_';
+      let out = '*4S INTERIORS*\n*Sales Team — Follow-up Report*\n_As on '+prettyDate(new Date().toISOString().slice(0,10))+'_';
       scope.forEach(name=>{
         const rows = REPORT_CATS.map(c=>({c,os:bucket(name,c)})).filter(x=>x.os.length);
         if(!rows.length) return;
         const tot = rows.reduce((s,x)=>s+x.os.length,0);
-        out += '\n\n*👤 '+name+' — '+tot+' order'+(tot===1?'':'s')+'*';
+        out += '\n\n'+DIV+'\n👤 *'+name.toUpperCase()+'*  ·  '+tot+' order'+(tot===1?'':'s');
         rows.forEach(({c,os})=>{
-          out += '\n\n*'+c.label+' ('+os.length+')*\n```\n'
-               + makeTable(hdr, os.map(o=>[o.no||'—', o.customer||'—', misShort(o), dlShort(o), balShort(o)]))
-               + '\n```';
+          out += '\n\n▸ *'+c.label+'*  ('+os.length+')';
+          os.forEach((o,i)=>{
+            out += '\n\n'+(i+1)+'. *'+(o.customer||'—')+'*'+(o.no?'  ·  `'+o.no+'`':'')
+                 + '\n'+paySeg(o)+'  ·  🚚 '+dlOf(o)+'  ·  📋 '+misPro(o);
+          });
         });
       });
-      if(nothing) out += '\n\nNo open orders to follow up right now. 🎉';
+      if(nothing) out += '\n\n'+DIV+'\n✅ No open orders to follow up right now.';
+      out += '\n\n'+DIV+'\n_4S Interiors · Patia, Bhubaneswar_';
       return out;
     };
     const sendReport = () => { window.open('https://wa.me/?text='+encodeURIComponent(buildReportText()),'_blank'); };
