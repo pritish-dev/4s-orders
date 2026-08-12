@@ -4841,99 +4841,91 @@ function HistoryScreen({ctx}) {
     // Pending Won orders omit it (both on screen and in the report image).
     const showMis = c => c.id==='pending' || c.id==='scheduled';
     const misPro = o => { const m=misForOrder(mis,o); if(!m) return 'Not in MIS'; if(m.committed) return 'Committed'; if(m.anyCommitted) return 'Committing '+m.committedQty+'/'+m.totalQty; return 'Pending'; };
-    // ── Report PDF (Excel-style table) ────────────────────────────────────────
-    // WhatsApp text can't do fixed columns, word-wrap or a coloured header, so the
-    // report is generated as a PDF with a real bordered table — fixed column
-    // widths, cell values word-wrapped onto the next line, and a BOLD header row on
-    // a yellow background — then shared with navigator.share({files}) exactly like
-    // the order-PDF WhatsApp share (the one path that reliably attaches a file in
-    // the installed app). Delivered / Pending Won tables drop the MIS column.
-    // jsPDF Helvetica is Latin-1 only, so amounts use 'Rs.' (not the ₹ glyph).
-    const hexToRgb = h => { h=String(h||'#000000').replace('#',''); if(h.length===3) h=h.split('').map(x=>x+x).join(''); const n=parseInt(h,16)||0; return [(n>>16)&255,(n>>8)&255,n&255]; };
-    const buildReportDoc = () => {
-      const { jsPDF } = window.jspdf;
-      const doc = new jsPDF({ unit:'mm', format:'a4' });
-      const pw=210, ph=297, ml=10, top=12, bottom=12, cw=pw-2*ml;
-      const lh=4.2, padY=1.7, padX=1.8;
-      const inr = n => 'Rs.'+Math.round(n||0).toLocaleString('en-IN');
-      const colsFor = id => (id==='pending'||id==='scheduled')
-        ? [['no','Order No',26],['cust','Customer',56],['mis','MIS Status',36],['dl','Delivery',32],['pay','Payment',40]]
-        : [['no','Order No',28],['cust','Customer',74],['dl','Delivery',40],['pay','Payment',48]];
-      const valOf=(o,k)=>{ if(k==='no')return o.no||'-'; if(k==='cust')return o.customer||'-'; if(k==='mis')return misPro(o); if(k==='dl')return dlOf(o); const {balance}=orderReceived(o); return balance>0?inr(balance)+' due':'Fully Paid'; };
-      let y=top;
-      const tableHeader = cols => {
-        const total=cols.reduce((s,c)=>s+c[2],0), hH=lh+2*padY;
-        doc.setFillColor(255,225,77); doc.rect(ml,y,total,hH,'F');
-        doc.setDrawColor(201,166,0); doc.setLineWidth(0.2);
-        doc.setFont('helvetica','bold'); doc.setFontSize(8.5); doc.setTextColor(0,0,0);
-        let x=ml; cols.forEach(c=>{ doc.rect(x,y,c[2],hH,'S'); doc.text(String(c[1]), x+padX, y+padY+3); x+=c[2]; });
-        y+=hH;
-      };
-      // Title + subtitle
-      doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.setTextColor(17,17,17);
-      doc.text('4S Interiors - Sales Team Report', ml, y+5); y+=8.5;
-      doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.setTextColor(110,110,110);
-      doc.text('As on '+prettyDate(new Date().toISOString().slice(0,10))+'      '+(reportSales||'All salespeople'), ml, y+3); y+=7;
-      scope.forEach(name=>{
-        const rows=REPORT_CATS.map(c=>({c,os:bucket(name,c)})).filter(x=>x.os.length);
-        if(!rows.length) return;
-        const tot=rows.reduce((s,x)=>s+x.os.length,0);
-        y+=3;
-        if(y+16 > ph-bottom){ doc.addPage(); y=top; }
-        const barH=7;                                       // black salesperson bar
-        doc.setFillColor(17,17,17); doc.rect(ml,y,cw,barH,'F');
-        doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(255,255,255);
-        doc.text(name.toUpperCase()+'      '+tot+' order'+(tot===1?'':'s'), ml+2.5, y+4.8);
-        y+=barH+3;
-        rows.forEach(({c,os})=>{
-          const cols=colsFor(c.id);
-          if(y+12 > ph-bottom){ doc.addPage(); y=top; }
-          const rgb=hexToRgb(c.tone);
-          doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(rgb[0],rgb[1],rgb[2]);
-          doc.text(c.label+'  ('+os.length+')', ml, y+3.4); y+=5.5;
-          tableHeader(cols);
-          os.forEach((o,ri)=>{
-            doc.setFont('helvetica','normal'); doc.setFontSize(8.5);
-            const total=cols.reduce((s,cc)=>s+cc[2],0);
-            const cells=cols.map(cc=>({w:cc[2],lines:doc.splitTextToSize(String(valOf(o,cc[0])), cc[2]-2*padX)}));
-            const rowH=Math.max(1,...cells.map(z=>z.lines.length))*lh+2*padY;
-            if(y+rowH > ph-bottom){ doc.addPage(); y=top; tableHeader(cols); doc.setFont('helvetica','normal'); doc.setFontSize(8.5); }
-            if(ri%2){ doc.setFillColor(245,246,248); doc.rect(ml,y,total,rowH,'F'); }
-            doc.setDrawColor(213,215,219); doc.setLineWidth(0.15); doc.setTextColor(34,34,34);
-            let x=ml; cells.forEach(z=>{ doc.rect(x,y,z.w,rowH,'S'); z.lines.forEach((ln,li)=>doc.text(String(ln), x+padX, y+padY+3+li*lh)); x+=z.w; });
-            y+=rowH;
-          });
-          y+=3;
+    // ── Report as an aligned, bordered monospace table (WhatsApp text) ────────
+    // The salesperson didn't want a PDF or image — just clean text they can drop
+    // straight into the sales-team WhatsApp group. WhatsApp renders anything
+    // wrapped in a ``` fence in a fixed-width font, so box-drawing borders and
+    // space-padded rows line up into a real bordered table. Boxes are kept narrow
+    // (inner width 27 → 31 chars wide) so they don't wrap on a phone. The bold
+    // title and per-salesperson headers sit OUTSIDE the fence because *bold* is
+    // not interpreted inside a ``` block. Plain text is Unicode, so amounts use
+    // the real ₹ glyph (unlike the old jsPDF path, which was Latin-1 only).
+    const IW = 27;                                  // inner width of each box row
+    const clip = (s,n) => { s=String(s==null?'':s); return s.length>n ? s.slice(0,n-1)+'…' : s; };
+    const bTop = '┌'+'─'.repeat(IW+2)+'┐';
+    const bSep = '├'+'─'.repeat(IW+2)+'┤';
+    const bBot = '└'+'─'.repeat(IW+2)+'┘';
+    const bRow = s => { s=clip(s,IW); return '│ '+s+' '.repeat(IW-s.length)+' │'; };
+    const inr  = n => '₹'+Math.round(n||0).toLocaleString('en-IN');
+    const payText = o => { const {balance}=orderReceived(o); return balance>0 ? inr(balance)+' due' : 'Fully paid'; };
+    // One bordered box for a salesperson, sectioned by category (Pending / Pending
+    // Won / Scheduled / Delivered). MIS status is only shown where it's meaningful
+    // (Pending / Scheduled), matching the on-screen report.
+    const boxFor = name => {
+      const rows = REPORT_CATS.map(c=>({c,os:bucket(name,c)})).filter(x=>x.os.length);
+      const L = [bTop];
+      rows.forEach(({c,os},ci)=>{
+        L.push(bRow(c.label.toUpperCase()+' ('+os.length+')'));
+        os.forEach((o,oi)=>{
+          L.push(bRow('#'+(o.no||'—')+'  '+(o.customer||'—')));
+          L.push(bRow(dlOf(o)+' · '+payText(o)));
+          if(showMis(c)) L.push(bRow('MIS: '+misPro(o)));
+          if(oi < os.length-1) L.push(bRow(''));
         });
-        y+=2;
+        if(ci < rows.length-1) L.push(bSep);
       });
-      return doc;
+      L.push(bBot);
+      return L.join('\n');
     };
-    const reportCaption = () => { let n=0; scope.forEach(name=>REPORT_CATS.forEach(c=>{ n+=bucket(name,c).length; })); return '*4S Interiors — Sales Team Follow-up*\n_As on '+prettyDate(new Date().toISOString().slice(0,10))+'_'+(reportSales?('\nSalesperson: '+reportSales):'')+'\n'+n+' open order'+(n===1?'':'s')+' — see the attached report.'; };
-    // Share the report PDF through the device share sheet (WhatsApp, etc.) — the
-    // same navigator.share({files}) path the order-PDF share uses, which is the one
-    // that reliably attaches a file in the installed app. share() is called
-    // synchronously inside the click so the user gesture is preserved.
-    const shareReportPDF = () => {
-      if(nothing){ ctx.showToast&&ctx.showToast('No open orders to report','ok'); return; }
-      let doc; try{ doc=buildReportDoc(); }catch(e){ ctx.showToast&&ctx.showToast('Could not build the report','bad'); return; }
-      const fname='Sales-Report-'+new Date().toISOString().slice(0,10)+'.pdf';
-      const caption=reportCaption();
+    // The full WhatsApp message: bold title + one titled, fenced box per salesperson.
+    const buildReportText = () => {
+      let n=0; scope.forEach(nm=>REPORT_CATS.forEach(c=>{ n+=bucket(nm,c).length; }));
+      const head = '*4S Interiors — Sales Follow-up*\n_As on '+prettyDate(new Date().toISOString().slice(0,10))+' · '+(reportSales||'All salespeople')+'_\n'+n+' open order'+(n===1?'':'s');
+      const blocks = scope.map(name=>{
+        const tot = REPORT_CATS.reduce((s,c)=>s+bucket(name,c).length,0);
+        if(!tot) return '';
+        return '*'+name.toUpperCase()+' · '+tot+' order'+(tot===1?'':'s')+'*\n```\n'+boxFor(name)+'\n```';
+      }).filter(Boolean);
+      return head+'\n\n'+blocks.join('\n\n');
+    };
+    // Copy to clipboard as a manual fallback (paste into any chat). Async Clipboard
+    // API where available, execCommand('copy') via a temp textarea otherwise.
+    const legacyCopy = txt => {
       try{
-        const file=new File([doc.output('blob')], fname, {type:'application/pdf'});
-        if(navigator.canShare && navigator.canShare({files:[file]})){
-          navigator.share({files:[file], text:caption}).catch(err=>{ if(!(err&&err.name==='AbortError')){ try{ doc.save(fname); }catch(_){}} });
+        const ta=document.createElement('textarea'); ta.value=txt;
+        ta.style.position='fixed'; ta.style.opacity='0'; ta.style.top='0'; document.body.appendChild(ta);
+        ta.focus(); ta.select();
+        const done=document.execCommand('copy'); document.body.removeChild(ta); return done;
+      }catch(e){ return false; }
+    };
+    // Open the share sheet with the report as PLAIN TEXT — text-only Web Share
+    // works in the installed WebView where file share and blob downloads do not,
+    // so this reliably reaches WhatsApp (the group is chosen inside WhatsApp).
+    // Falls back to a wa.me deep link if the share sheet isn't available.
+    const openWhatsAppText = msg => { try{ window.open('https://wa.me/?text='+encodeURIComponent(msg),'_blank'); }catch(e){} };
+    const shareReportText = () => {
+      if(nothing){ ctx.showToast&&ctx.showToast('No open orders to report','ok'); return; }
+      const msg = buildReportText();
+      try{
+        if(navigator.share){
+          navigator.share({text:msg}).catch(err=>{ if(!(err&&err.name==='AbortError')) openWhatsAppText(msg); });
           return;
         }
-      }catch(e){ /* fall through to save + WhatsApp */ }
-      try{ doc.save(fname); }catch(e){}
-      try{ window.open('https://wa.me/?text='+encodeURIComponent(caption),'_blank'); }catch(e){}
-      ctx.showToast&&ctx.showToast('Report saved — attach it in the WhatsApp chat','ok');
+      }catch(e){}
+      openWhatsAppText(msg);
     };
-    const downloadReport = () => {
+    const copyReportText = () => {
       if(nothing){ ctx.showToast&&ctx.showToast('No open orders to report','ok'); return; }
-      try{ buildReportDoc().save('Sales-Report-'+new Date().toISOString().slice(0,10)+'.pdf'); ctx.showToast&&ctx.showToast('Report saved','ok'); }
-      catch(e){ ctx.showToast&&ctx.showToast('Could not build the report','bad'); }
+      const msg = buildReportText();
+      const ok  = () => ctx.showToast&&ctx.showToast('Report copied — paste into WhatsApp','ok');
+      const bad = () => ctx.showToast&&ctx.showToast('Could not copy the report','bad');
+      try{
+        if(navigator.clipboard && navigator.clipboard.writeText){
+          navigator.clipboard.writeText(msg).then(ok, ()=>{ legacyCopy(msg)?ok():bad(); });
+          return;
+        }
+      }catch(e){}
+      legacyCopy(msg)?ok():bad();
     };
     const chip = sel => ({padding:'6px 10px',borderRadius:999,border:`1px solid ${sel?T.ink:T.line}`,background:sel?T.ink:'#fff',color:sel?'#fff':T.ink2,fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap',flexShrink:0});
     return (
@@ -4946,7 +4938,7 @@ function HistoryScreen({ctx}) {
               <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Sales Team Report</div>
             </div>
           </div>
-          <div style={{fontSize:12,color:T.ink4,padding:'0 18px 8px'}}>Open orders per salesperson across Pending, Pending Won, Scheduled &amp; Delivered — sent as a clean, tabular PDF you can share to the sales-team WhatsApp group.</div>
+          <div style={{fontSize:12,color:T.ink4,padding:'0 18px 8px'}}>Open orders per salesperson across Pending, Pending Won, Scheduled &amp; Delivered — sent as a clean, bordered text table you can drop straight into the sales-team WhatsApp group.</div>
           {/* Whom to include — the whole team, or a single salesperson */}
           {reportPeople.length>0 && (
             <div style={{display:'flex',gap:6,padding:'0 14px 8px',overflowX:'auto',WebkitOverflowScrolling:'touch'}}>
@@ -4955,8 +4947,8 @@ function HistoryScreen({ctx}) {
             </div>
           )}
           <div style={{display:'flex',gap:8,padding:'0 14px 10px'}}>
-            <button onClick={shareReportPDF} style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'11px 14px',borderRadius:10,border:'none',background:'#25d366',color:'#fff',fontSize:14,fontWeight:700,cursor:'pointer'}}>{Icon.whatsapp('#fff',16)} Send on WhatsApp</button>
-            <button onClick={downloadReport} style={{padding:'11px 14px',borderRadius:10,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:14,fontWeight:700,cursor:'pointer'}}>Save PDF</button>
+            <button onClick={shareReportText} style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'11px 14px',borderRadius:10,border:'none',background:'#25d366',color:'#fff',fontSize:14,fontWeight:700,cursor:'pointer'}}>{Icon.whatsapp('#fff',16)} Send on WhatsApp</button>
+            <button onClick={copyReportText} style={{padding:'11px 14px',borderRadius:10,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:14,fontWeight:700,cursor:'pointer'}}>Copy text</button>
           </div>
         </div>
         <div className="scroll" style={{padding:'4px 14px 24px'}}>
