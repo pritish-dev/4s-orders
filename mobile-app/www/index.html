@@ -4873,36 +4873,91 @@ function HistoryScreen({ctx}) {
     const reportPeople = [...new Set([].concat(...REPORT_CATS.map(c=>orders.filter(c.filter).map(o=>(o.salesExec||'').trim()||'—'))))].sort((a,b)=>a.localeCompare(b));
     const scope = reportSales ? [reportSales] : reportPeople;
     const nothing = scope.every(name=>REPORT_CATS.every(c=>!bucket(name,c).length));
-    // ── WhatsApp report text — clean, professional layout ─────────────────────
-    // WhatsApp can't render real tables (an ASCII grid just wraps and breaks on a
-    // phone), so the report uses WhatsApp's own formatting instead: a titled
-    // header, a divider + bold NAME per salesperson, an italic section per status,
-    // and a tidy two-line entry per order (name + order no, then money · delivery
-    // · MIS). This stays readable on any screen width without column alignment.
-    const DIV = '━━━━━━━━━━━━━━━━━━━━';
+    // MIS status is only meaningful for Pending / Scheduled orders; Delivered and
+    // Pending Won orders omit it (both on screen and in the report image).
+    const showMis = c => c.id==='pending' || c.id==='scheduled';
     const misPro = o => { const m=misForOrder(mis,o); if(!m) return 'Not in MIS'; if(m.committed) return 'Committed'; if(m.anyCommitted) return 'Committing '+m.committedQty+'/'+m.totalQty; return 'Pending'; };
-    const paySeg = o => { const {balance}=orderReceived(o); return balance>0?'💰 ₹'+Math.round(balance).toLocaleString('en-IN')+' due':'✅ Paid'; };
-    const buildReportText = () => {
-      let out = '*4S INTERIORS*\n*Sales Team — Follow-up Report*\n_As on '+prettyDate(new Date().toISOString().slice(0,10))+'_';
-      scope.forEach(name=>{
-        const rows = REPORT_CATS.map(c=>({c,os:bucket(name,c)})).filter(x=>x.os.length);
-        if(!rows.length) return;
-        const tot = rows.reduce((s,x)=>s+x.os.length,0);
-        out += '\n\n'+DIV+'\n👤 *'+name.toUpperCase()+'*  ·  '+tot+' order'+(tot===1?'':'s');
-        rows.forEach(({c,os})=>{
-          out += '\n\n▸ *'+c.label+'*  ('+os.length+')';
-          os.forEach((o,i)=>{
-            out += '\n\n'+(i+1)+'. *'+(o.customer||'—')+'*'+(o.no?'  ·  `'+o.no+'`':'')
-                 + '\n'+paySeg(o)+'  ·  🚚 '+dlOf(o)+'  ·  📋 '+misPro(o);
+    // ── Report image (Excel-style table) ──────────────────────────────────────
+    // WhatsApp text can't do fixed columns, word-wrap or a coloured header, so the
+    // report is drawn onto a canvas as a real bordered table — fixed column widths,
+    // cell values word-wrapped onto the next line, and a BOLD header row on a
+    // yellow background — then shared as a PNG image (pick the sales-team group in
+    // the share sheet). Delivered / Pending Won tables drop the MIS column.
+    const buildReportCanvas = () => {
+      const FONT='sans-serif', CW=820, M=24, SCALE=2, CONTENT=CW-2*M, lh=17, pad=7;
+      const wrap=(g,text,maxW)=>{
+        text=String(text==null?'':text); const words=text.split(/\s+/).filter(Boolean); const lines=[]; let line='';
+        const hardBreak=w=>{ let cur=''; for(const ch of w){ if(cur && g.measureText(cur+ch).width>maxW){ lines.push(cur); cur=ch; } else cur+=ch; } return cur; };
+        words.forEach(w=>{ const test=line?line+' '+w:w; if(g.measureText(test).width<=maxW){ line=test; } else { if(line){ lines.push(line); line=''; } if(g.measureText(w).width>maxW){ line=hardBreak(w); } else line=w; } });
+        if(line) lines.push(line);
+        return lines.length?lines:[''];
+      };
+      const colsFor=id=>(id==='pending'||id==='scheduled')
+        ? [['no','Order No',108],['cust','Customer',214],['mis','MIS Status',150],['dl','Delivery',126],['pay','Payment',174]]
+        : [['no','Order No',120],['cust','Customer',286],['dl','Delivery',150],['pay','Payment',216]];
+      const valOf=(o,k)=>{ if(k==='no')return o.no||'—'; if(k==='cust')return o.customer||'—'; if(k==='mis')return misPro(o); if(k==='dl')return dlOf(o); const {balance}=orderReceived(o); return balance>0?'₹'+Math.round(balance).toLocaleString('en-IN')+' due':'Fully Paid'; };
+      const layout=(g,draw)=>{
+        let y=M; g.textBaseline='alphabetic';
+        g.font='700 24px '+FONT; if(draw){ g.fillStyle='#111'; g.fillText('4S Interiors — Sales Team Report', M, y+22); } y+=32;
+        g.font='400 13px '+FONT; if(draw){ g.fillStyle='#666'; g.fillText('As on '+prettyDate(new Date().toISOString().slice(0,10))+'      '+(reportSales||'All salespeople'), M, y+13); } y+=24;
+        scope.forEach(name=>{
+          const rows=REPORT_CATS.map(c=>({c,os:bucket(name,c)})).filter(x=>x.os.length);
+          if(!rows.length) return;
+          const tot=rows.reduce((s,x)=>s+x.os.length,0);
+          y+=12;
+          const barH=28;
+          if(draw){ g.fillStyle='#111'; g.fillRect(M,y,CONTENT,barH); g.fillStyle='#fff'; g.font='700 15px '+FONT; g.fillText(name.toUpperCase()+'      '+tot+' order'+(tot===1?'':'s'), M+10, y+19); }
+          y+=barH+10;
+          rows.forEach(({c,os})=>{
+            g.font='700 13px '+FONT; if(draw){ g.fillStyle=c.tone; g.fillText(c.label+'  ('+os.length+')', M, y+11); } y+=20;
+            const cols=colsFor(c.id); const total=cols.reduce((s,cc)=>s+cc[2],0);
+            const headH=lh+pad*2;
+            if(draw){
+              g.fillStyle='#FFE14D'; g.fillRect(M,y,total,headH);
+              g.font='700 12.5px '+FONT; g.fillStyle='#000';
+              let cx=M; cols.forEach(cc=>{ g.fillText(cc[1], cx+pad, y+pad+12); g.strokeStyle='#c9a600'; g.lineWidth=1; g.strokeRect(cx+0.5,y+0.5,cc[2],headH); cx+=cc[2]; });
+            }
+            y+=headH;
+            os.forEach((o,ri)=>{
+              g.font='400 12.5px '+FONT;
+              const cells=cols.map(cc=>({w:cc[2],lines:wrap(g,valOf(o,cc[0]),cc[2]-2*pad)}));
+              const rowH=Math.max(1,...cells.map(z=>z.lines.length))*lh+pad*2;
+              if(draw){
+                g.fillStyle= ri%2?'#f5f6f8':'#ffffff'; g.fillRect(M,y,total,rowH);
+                let cx=M; cells.forEach(z=>{ g.fillStyle='#222'; z.lines.forEach((ln,li)=>g.fillText(ln,cx+pad,y+pad+li*lh+12)); g.strokeStyle='#d5d7db'; g.lineWidth=1; g.strokeRect(cx+0.5,y+0.5,z.w,rowH); cx+=z.w; });
+              }
+              y+=rowH;
+            });
+            y+=14;
           });
+          y+=6;
         });
-      });
-      if(nothing) out += '\n\n'+DIV+'\n✅ No open orders to follow up right now.';
-      out += '\n\n'+DIV+'\n_4S Interiors · Patia, Bhubaneswar_';
-      return out;
+        y+=M;
+        return y;
+      };
+      const c=document.createElement('canvas'); let g=c.getContext('2d');
+      const H=Math.ceil(layout(g,false));
+      c.width=CW*SCALE; c.height=H*SCALE; g=c.getContext('2d'); g.scale(SCALE,SCALE);
+      g.fillStyle='#ffffff'; g.fillRect(0,0,CW,H); layout(g,true);
+      return c;
     };
-    const sendReport = () => { window.open('https://wa.me/?text='+encodeURIComponent(buildReportText()),'_blank'); };
-    const copyReport = async () => { try{ await navigator.clipboard.writeText(buildReportText()); ctx.showToast&&ctx.showToast('Report copied','ok'); }catch(e){ ctx.showToast&&ctx.showToast('Could not copy — use Send instead','bad'); } };
+    const reportCaption = () => { let n=0; scope.forEach(name=>REPORT_CATS.forEach(c=>{ n+=bucket(name,c).length; })); return '*4S Interiors — Sales Team Follow-up*\n_As on '+prettyDate(new Date().toISOString().slice(0,10))+'_'+(reportSales?('\nSalesperson: '+reportSales):'')+'\n'+n+' open order'+(n===1?'':'s')+' — see the attached report.'; };
+    const shareReportImage = () => {
+      if(nothing){ ctx.showToast&&ctx.showToast('No open orders to report','ok'); return; }
+      buildReportCanvas().toBlob(async blob=>{
+        if(!blob){ ctx.showToast&&ctx.showToast('Could not build the report image','bad'); return; }
+        const file=new File([blob],'Sales-Report.png',{type:'image/png'}); const caption=reportCaption();
+        try{ if(navigator.canShare&&navigator.canShare({files:[file]})){ await navigator.share({files:[file],text:caption}); return; } }
+        catch(e){ if(e&&e.name==='AbortError') return; }
+        const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='Sales-Report.png'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),1500);
+        window.open('https://wa.me/?text='+encodeURIComponent(caption),'_blank');
+        ctx.showToast&&ctx.showToast('Report image saved — attach it in the WhatsApp chat','ok');
+      },'image/png');
+    };
+    const downloadReport = () => {
+      if(nothing){ ctx.showToast&&ctx.showToast('No open orders to report','ok'); return; }
+      buildReportCanvas().toBlob(blob=>{ if(!blob) return; const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='Sales-Report-'+new Date().toISOString().slice(0,10)+'.png'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),1500); },'image/png');
+    };
     const chip = sel => ({padding:'6px 10px',borderRadius:999,border:`1px solid ${sel?T.ink:T.line}`,background:sel?T.ink:'#fff',color:sel?'#fff':T.ink2,fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap',flexShrink:0});
     return (
       <div className="screen">
@@ -4914,7 +4969,7 @@ function HistoryScreen({ctx}) {
               <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Sales Team Report</div>
             </div>
           </div>
-          <div style={{fontSize:12,color:T.ink4,padding:'0 18px 8px'}}>Open orders per salesperson across Pending, Pending Won, Scheduled &amp; Delivered. Send it to the sales-team WhatsApp group to follow up.</div>
+          <div style={{fontSize:12,color:T.ink4,padding:'0 18px 8px'}}>Open orders per salesperson across Pending, Pending Won, Scheduled &amp; Delivered — sent as a clean, tabular image you can share to the sales-team WhatsApp group.</div>
           {/* Whom to include — the whole team, or a single salesperson */}
           {reportPeople.length>0 && (
             <div style={{display:'flex',gap:6,padding:'0 14px 8px',overflowX:'auto',WebkitOverflowScrolling:'touch'}}>
@@ -4923,8 +4978,8 @@ function HistoryScreen({ctx}) {
             </div>
           )}
           <div style={{display:'flex',gap:8,padding:'0 14px 10px'}}>
-            <button onClick={sendReport} style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'11px 14px',borderRadius:10,border:'none',background:'#25d366',color:'#fff',fontSize:14,fontWeight:700,cursor:'pointer'}}>{Icon.whatsapp('#fff',16)} Send on WhatsApp</button>
-            <button onClick={copyReport} style={{padding:'11px 14px',borderRadius:10,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:14,fontWeight:700,cursor:'pointer'}}>Copy</button>
+            <button onClick={shareReportImage} style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'11px 14px',borderRadius:10,border:'none',background:'#25d366',color:'#fff',fontSize:14,fontWeight:700,cursor:'pointer'}}>{Icon.whatsapp('#fff',16)} Send on WhatsApp</button>
+            <button onClick={downloadReport} style={{padding:'11px 14px',borderRadius:10,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:14,fontWeight:700,cursor:'pointer'}}>Save PNG</button>
           </div>
         </div>
         <div className="scroll" style={{padding:'4px 14px 24px'}}>
@@ -4948,7 +5003,7 @@ function HistoryScreen({ctx}) {
                     {os.map(o=>(
                       <div key={o.no} onClick={()=>openOrder(o)} style={{padding:'6px 8px',borderLeft:`3px solid ${c.tone}`,background:T.paper2,borderRadius:6,marginBottom:4,cursor:'pointer'}}>
                         <div style={{fontSize:12,fontWeight:700,color:T.ink}}><span style={{fontFamily:T.mono}}>#{o.no||'—'}</span> · {o.customer||'—'}</div>
-                        <div style={{fontSize:11,color:T.ink3,marginTop:2}}>MIS: {misOf(o)} · Dly: {dlOf(o)} · {payOf(o)}</div>
+                        <div style={{fontSize:11,color:T.ink3,marginTop:2}}>{showMis(c)?`MIS: ${misOf(o)} · `:''}Dly: {dlOf(o)} · {payOf(o)}</div>
                       </div>
                     ))}
                   </div>
