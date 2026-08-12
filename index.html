@@ -4529,6 +4529,9 @@ function HistoryScreen({ctx}) {
   const [rescheduleOrder,setRescheduleOrder] = useState(null); // order awaiting the reschedule date picker
   const [serviceOrder,setServiceOrder] = useState(null);   // order whose service request is being raised/edited
   const [statusView,setStatusView] = useState(null);       // null=ledger · 'menu'=category grid · <catId>=that category's orders
+  const [statusSales,setStatusSales] = useState('');       // salesperson filter inside a status category ('' = all)
+  const [reportView,setReportView] = useState(false);      // false=ledger · true=sales-team follow-up report
+  const [reportSales,setReportSales] = useState('');       // salesperson filter on the report ('' = whole team)
   const [dateView,setDateView] = useState(false);          // false=ledger · true=by-date drill-down
   const [watchView,setWatchView] = useState(false);        // false=ledger · true=Delivery Watch (approaching/overdue)
   const [dateFrom,setDateFrom] = useState('');             // ISO yyyy-mm-dd range start for the by-date view
@@ -4684,7 +4687,7 @@ function HistoryScreen({ctx}) {
             {CATS.map(c=>{
               const n = orders.filter(c.filter).length;
               return (
-                <div key={c.id} onClick={()=>setStatusView(c.id)} style={{background:'#fff',border:`1px solid ${T.line}`,borderLeft:`4px solid ${c.tone}`,borderRadius:10,padding:'14px 16px',cursor:'pointer',display:'flex',flexDirection:'column',gap:4}}>
+                <div key={c.id} onClick={()=>{setStatusSales('');setStatusView(c.id);}} style={{background:'#fff',border:`1px solid ${T.line}`,borderLeft:`4px solid ${c.tone}`,borderRadius:10,padding:'14px 16px',cursor:'pointer',display:'flex',flexDirection:'column',gap:4}}>
                   <div style={{fontSize:30,fontWeight:800,letterSpacing:-1,color:c.tone,lineHeight:1}}>{n}</div>
                   <div style={{fontSize:13,fontWeight:700,color:T.ink}}>{c.label}</div>
                   <div style={{fontSize:10,color:T.ink4}}>{n===1?'1 order':n+' orders'}</div>
@@ -4700,23 +4703,40 @@ function HistoryScreen({ctx}) {
   if (statusView && statusView !== 'menu') {
     const cat = CATS.find(c=>c.id===statusView) || CATS[0];
     const catOrders = orders.filter(cat.filter);
+    // Per-salesperson breakdown within this status. Tapping a name narrows the
+    // list to just that person's orders in the status, so the team can be
+    // followed up individually.
+    const statusSalesCounts = {};
+    catOrders.forEach(o=>{ const n=(o.salesExec||'').trim()||'—'; statusSalesCounts[n]=(statusSalesCounts[n]||0)+1; });
+    const statusSalesNames = Object.keys(statusSalesCounts).sort((a,b)=>a.localeCompare(b));
+    const catShown = statusSales ? catOrders.filter(o=>(((o.salesExec||'').trim())||'—')===statusSales) : catOrders;
+    const salesChip = sel => ({padding:'6px 10px',borderRadius:999,border:`1px solid ${sel?cat.tone:T.line}`,background:sel?cat.tone:'#fff',color:sel?'#fff':T.ink2,fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap',flexShrink:0});
     return (
       <div className="screen">
         <div style={{flexShrink:0}}>
           <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 10px'}}>
-            <button onClick={()=>setStatusView('menu')} title="Back to statuses" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+            <button onClick={()=>{setStatusSales('');setStatusView('menu');}} title="Back to statuses" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
             <div style={{flex:1}}>
               <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>ORDER STATUS</div>
-              <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>{cat.label} · {catOrders.length}</div>
+              <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>{cat.label} · {statusSales?catShown.length+' / '+catOrders.length:catOrders.length}</div>
             </div>
           </div>
+          {/* Salesperson filter — order count per person in this status; tap to drill in */}
+          {statusSalesNames.length>0 && (
+            <div style={{display:'flex',gap:6,padding:'0 14px 10px',overflowX:'auto',WebkitOverflowScrolling:'touch'}}>
+              <div onClick={()=>setStatusSales('')} style={salesChip(!statusSales)}>All · {catOrders.length}</div>
+              {statusSalesNames.map(n=>(
+                <div key={n} onClick={()=>setStatusSales(n===statusSales?'':n)} style={salesChip(statusSales===n)}>{n} · {statusSalesCounts[n]}</div>
+              ))}
+            </div>
+          )}
         </div>
         <div className="scroll">
-          {catOrders.map(orderCard)}
-          {catOrders.length===0 && (
+          {catShown.map(orderCard)}
+          {catShown.length===0 && (
             <div style={{padding:'48px 24px',textAlign:'center'}}>
               <div style={{width:52,height:52,borderRadius:14,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12}}>{Icon.doc(T.ink4,24)}</div>
-              <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No orders in {cat.label}</div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No orders in {cat.label}{statusSales?' for '+statusSales:''}</div>
               <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>Orders with this status will appear here.</div>
             </div>
           )}
@@ -4790,6 +4810,107 @@ function HistoryScreen({ctx}) {
         </div>
         {partialOrder && <PartialDeliveryModal order={partialOrder} onCancel={()=>setPartialOrder(null)} onConfirm={confirmPartial}/>}
         {rescheduleOrder && <RescheduleModal order={rescheduleOrder} onCancel={()=>setRescheduleOrder(null)} onConfirm={confirmReschedule}/>}
+        {serviceOrder && <ServiceRequestModal order={serviceOrder} ctx={ctx} onClose={()=>setServiceOrder(null)}/>}
+        <BottomNav screen="history" nav={nav}/>
+      </div>
+    );
+  }
+
+  // ── Sales Team Report drill-down ───────────────────────────────────────────
+  // A follow-up report: per salesperson, how many orders sit in Pending, Pending
+  // Won, Scheduled and Delivered, with per-order details (order no, customer, MIS
+  // committed status, delivery date, payment). Can be sent to the sales-team
+  // WhatsApp group as a plain-text message (the group is chosen inside WhatsApp).
+  if (reportView) {
+    const REPORT_CATS = ['pending','pendwon','scheduled','delivered'].map(id=>CATS.find(c=>c.id===id));
+    const money = n => '₹'+Math.round(n||0).toLocaleString('en-IN');
+    const dlOf  = o => { const iso=(o.plannedDly&&o.plannedDly.length>=8?o.plannedDly:'')||(misForOrder(mis,o)?.deliveryDate)||''; return iso?prettyDate(iso):'TBD'; };
+    const misOf = o => { const m=misForOrder(mis,o); if(!m) return 'not in MIS'; if(m.committed) return 'committed'; if(m.anyCommitted) return 'committing '+m.committedQty+'/'+m.totalQty; return 'pending'; };
+    const payOf = o => { const {balance}=orderReceived(o); return balance>0?'Bal '+money(balance):'Fully Paid'; };
+    // Orders for one salesperson in one category.
+    const bucket = (name,c) => orders.filter(c.filter).filter(o=>((o.salesExec||'').trim()||'—')===name);
+    // Every salesperson with at least one order in a reported status.
+    const reportPeople = [...new Set([].concat(...REPORT_CATS.map(c=>orders.filter(c.filter).map(o=>(o.salesExec||'').trim()||'—'))))].sort((a,b)=>a.localeCompare(b));
+    const scope = reportSales ? [reportSales] : reportPeople;
+    const nothing = scope.every(name=>REPORT_CATS.every(c=>!bucket(name,c).length));
+    const buildReportText = () => {
+      let out = '*4S Interiors — Sales Team Follow-up*\n_As on '+prettyDate(new Date().toISOString().slice(0,10))+'_';
+      scope.forEach(name=>{
+        const rows = REPORT_CATS.map(c=>({c,os:bucket(name,c)})).filter(x=>x.os.length);
+        if(!rows.length) return;
+        const tot = rows.reduce((s,x)=>s+x.os.length,0);
+        out += '\n\n👤 *'+name+'*  ('+tot+')';
+        rows.forEach(({c,os})=>{
+          out += '\n▸ '+c.label+' — '+os.length;
+          os.forEach(o=>{ out += '\n   • #'+(o.no||'—')+' · '+(o.customer||'—')+' · MIS: '+misOf(o)+' · Dly: '+dlOf(o)+' · '+payOf(o); });
+        });
+      });
+      if(nothing) out += '\n\nNo open orders to follow up right now. 🎉';
+      return out;
+    };
+    const sendReport = () => { window.open('https://wa.me/?text='+encodeURIComponent(buildReportText()),'_blank'); };
+    const copyReport = async () => { try{ await navigator.clipboard.writeText(buildReportText()); ctx.showToast&&ctx.showToast('Report copied','ok'); }catch(e){ ctx.showToast&&ctx.showToast('Could not copy — use Send instead','bad'); } };
+    const chip = sel => ({padding:'6px 10px',borderRadius:999,border:`1px solid ${sel?T.ink:T.line}`,background:sel?T.ink:'#fff',color:sel?'#fff':T.ink2,fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap',flexShrink:0});
+    return (
+      <div className="screen">
+        <div style={{flexShrink:0}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 8px'}}>
+            <button onClick={()=>{setReportSales('');setReportView(false);}} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>ORDERS · SALES TEAM REPORT</div>
+              <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Sales Team Report</div>
+            </div>
+          </div>
+          <div style={{fontSize:12,color:T.ink4,padding:'0 18px 8px'}}>Open orders per salesperson across Pending, Pending Won, Scheduled &amp; Delivered. Send it to the sales-team WhatsApp group to follow up.</div>
+          {/* Whom to include — the whole team, or a single salesperson */}
+          {reportPeople.length>0 && (
+            <div style={{display:'flex',gap:6,padding:'0 14px 8px',overflowX:'auto',WebkitOverflowScrolling:'touch'}}>
+              <div onClick={()=>setReportSales('')} style={chip(!reportSales)}>All</div>
+              {reportPeople.map(n=>(<div key={n} onClick={()=>setReportSales(n===reportSales?'':n)} style={chip(reportSales===n)}>{n}</div>))}
+            </div>
+          )}
+          <div style={{display:'flex',gap:8,padding:'0 14px 10px'}}>
+            <button onClick={sendReport} style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'11px 14px',borderRadius:10,border:'none',background:'#25d366',color:'#fff',fontSize:14,fontWeight:700,cursor:'pointer'}}>{Icon.whatsapp('#fff',16)} Send on WhatsApp</button>
+            <button onClick={copyReport} style={{padding:'11px 14px',borderRadius:10,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:14,fontWeight:700,cursor:'pointer'}}>Copy</button>
+          </div>
+        </div>
+        <div className="scroll" style={{padding:'4px 14px 24px'}}>
+          {scope.map(name=>{
+            const rows = REPORT_CATS.map(c=>({c,os:bucket(name,c)})).filter(x=>x.os.length);
+            if(!rows.length) return null;
+            const tot = rows.reduce((s,x)=>s+x.os.length,0);
+            return (
+              <div key={name} style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:12,padding:'12px 14px',marginTop:10}}>
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+                  <div style={{fontSize:15,fontWeight:800,color:T.ink}}>{name}</div>
+                  <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,fontWeight:700}}>{tot} order{tot===1?'':'s'}</div>
+                </div>
+                {rows.map(({c,os})=>(
+                  <div key={c.id} style={{marginBottom:8}}>
+                    <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:4}}>
+                      <span style={{width:8,height:8,borderRadius:2,background:c.tone}}/>
+                      <span style={{fontSize:12,fontWeight:700,color:T.ink2}}>{c.label}</span>
+                      <span style={{fontSize:11,color:T.ink4}}>· {os.length}</span>
+                    </div>
+                    {os.map(o=>(
+                      <div key={o.no} onClick={()=>openOrder(o)} style={{padding:'6px 8px',borderLeft:`3px solid ${c.tone}`,background:T.paper2,borderRadius:6,marginBottom:4,cursor:'pointer'}}>
+                        <div style={{fontSize:12,fontWeight:700,color:T.ink}}><span style={{fontFamily:T.mono}}>#{o.no||'—'}</span> · {o.customer||'—'}</div>
+                        <div style={{fontSize:11,color:T.ink3,marginTop:2}}>MIS: {misOf(o)} · Dly: {dlOf(o)} · {payOf(o)}</div>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+          {nothing && (
+            <div style={{padding:'48px 24px',textAlign:'center'}}>
+              <div style={{width:52,height:52,borderRadius:14,background:T.okSoft,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12,fontSize:26,color:T.ok}}>✓</div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>Nothing to follow up</div>
+              <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>No open orders in Pending, Pending Won, Scheduled or Delivered{reportSales?' for '+reportSales:''}.</div>
+            </div>
+          )}
+        </div>
         {serviceOrder && <ServiceRequestModal order={serviceOrder} ctx={ctx} onClose={()=>setServiceOrder(null)}/>}
         <BottomNav screen="history" nav={nav}/>
       </div>
@@ -4896,6 +5017,16 @@ function HistoryScreen({ctx}) {
             <div style={{display:'flex',alignItems:'center',gap:10}}>
               <div style={{width:34,height:34,borderRadius:8,background:'rgba(255,255,255,.14)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>🗓️</div>
               <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>Orders by Date</div><div style={{fontSize:11,opacity:.7}}>Today, Yesterday & date range · tap to open</div></div>
+            </div>
+            <span style={{fontSize:18,opacity:.8}}>›</span>
+          </div>
+        </div>
+        {/* Sales Team Report entry — per-salesperson follow-up, shareable on WhatsApp */}
+        <div style={{padding:'2px 18px 8px'}}>
+          <div onClick={()=>{setReportSales('');setReportView(true);}} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'14px 16px',background:T.ink,color:'#fff',borderRadius:10,cursor:'pointer'}}>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              <div style={{width:34,height:34,borderRadius:8,background:'rgba(255,255,255,.14)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>📊</div>
+              <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>Sales Team Report</div><div style={{fontSize:11,opacity:.7}}>Follow-up by salesperson · send on WhatsApp</div></div>
             </div>
             <span style={{fontSize:18,opacity:.8}}>›</span>
           </div>
