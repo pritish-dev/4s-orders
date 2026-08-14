@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v50';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v51';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -1484,6 +1484,11 @@ var CRM_H = {
   ORDER_NO: ['ORDER NO', 'ORDER NO.'],
   PHONE:    ['CONTACT NUMBER', 'PHONE', 'CONTACT NO'],
   INT_NO:   ['INTERNAL ODER NO', 'INTERNAL ORDER NO'],
+  // Client-generated idempotency key. Sent by the app with every save (and every
+  // retry / re-send). Matching on it makes a repeated save update the SAME order
+  // instead of booking a duplicate — the guard against double-clicks and lost-response
+  // network retries creating multiple orders for one booking.
+  CLIENT_ID: ['CLIENT ORDER ID', 'CLIENT ID', 'IDEMPOTENCY KEY'],
   // WON and Godrej SO No are the same thing — the WON lands in the GODREJ SO NO column.
   WON:      ['WON', 'WON NO', 'WON NO.', 'WON NUMBER', 'GODREJ SO NO', 'GODREJ SO NO.', 'GODREJ SO NUMBER'],
   DATE:     ['ORDER DATE'],
@@ -1500,6 +1505,8 @@ var CRM_H = {
 var CRM_APP_COLUMNS = [
   ['SL NO.', 'SL NO'],
   ['INTERNAL ODER NO', 'INTERNAL ORDER NO'],
+  // Idempotency key from the app (see CRM_H.CLIENT_ID) — dedupes retried/double saves.
+  ['CLIENT ORDER ID', 'CLIENT ID', 'IDEMPOTENCY KEY'],
   ['ORDER DATE'],
   ['ORDER NO', 'ORDER NO.'],
   ['GODREJ SO NO', 'GODREJ SO NO.', 'GODREJ SO NUMBER', 'WON', 'WON NO', 'WON NUMBER'],
@@ -1647,13 +1654,29 @@ function _parseCrmDate(s) {
 // order (or adding items) replaces its existing rows instead of duplicating.
 function handleSaveOrder(o) {
   if (!o) throw new Error('No order data provided.');
-  var res = _writeOrderToCRM(o);
-  if (!res.ok) throw new Error(res.error || 'Could not write the order to the CRM sheet.');
-  // Audit: CREATE for a brand-new booking, EDIT when it already had an order no.
-  var who = o.byName || o.by || o.salesExec || '';
-  var act = (o.no || o.internalNo) ? 'EDIT_ORDER' : 'CREATE_ORDER';
-  _appendLog(who, res.orderNo, act, (o.customer || '') + (o.totalWithTax ? ' · ₹' + (Number(o.totalWithTax) || 0) : ''));
-  return { ok: true, orderNo: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo, crmRows: res.rows };
+  // Serialise the whole read-match-write so two saves for the SAME order can never
+  // interleave and each create their own block. This is the concurrency backstop for
+  // the idempotency key: a request the client aborted (but the server is still
+  // processing) plus its retry can arrive at nearly the same instant — the lock makes
+  // the second one wait, then it finds the CLIENT ORDER ID the first one wrote and
+  // updates that order in place instead of booking a duplicate. (Apps Script script
+  // locks are reentrant within one execution, so the nested serial-counter lock inside
+  // is unaffected.) Best-effort: if the lock can't be taken we still proceed, because
+  // the clientId match already prevents duplicates in every non-concurrent case.
+  var lock = LockService.getScriptLock();
+  var haveLock = false;
+  try { haveLock = lock.tryLock(30000); } catch (e) {}
+  try {
+    var res = _writeOrderToCRM(o);
+    if (!res.ok) throw new Error(res.error || 'Could not write the order to the CRM sheet.');
+    // Audit: CREATE for a brand-new booking, EDIT when it already had an order no.
+    var who = o.byName || o.by || o.salesExec || '';
+    var act = (o.no || o.internalNo) ? 'EDIT_ORDER' : 'CREATE_ORDER';
+    _appendLog(who, res.orderNo, act, (o.customer || '') + (o.totalWithTax ? ' · ₹' + (Number(o.totalWithTax) || 0) : ''));
+    return { ok: true, orderNo: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo, crmRows: res.rows };
+  } finally {
+    if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
+  }
 }
 
 // ─── APP-ORDER SERIAL COUNTER ─────────────────────────────────────────────────
@@ -1754,6 +1777,7 @@ function _writeOrderToCRM(o) {
   var cOrderNo = colOf(CRM_H.ORDER_NO);
   var cPhone   = colOf(CRM_H.PHONE);
   var cIntNo   = colOf(CRM_H.INT_NO);
+  var cClient  = colOf(CRM_H.CLIENT_ID);
   var cWon     = colOf(CRM_H.WON);
   var cDate    = colOf(CRM_H.DATE);
   var cRcpt    = colOf(['ORDER FORM RECEIPT NO', 'ORDER FORM RECEIPT NO.', 'ORDER FORM RECEIPT']);
@@ -1765,19 +1789,26 @@ function _writeOrderToCRM(o) {
 
   var incomingOrder  = String(o.no || '').trim();
   var incomingInt    = Number(o.internalNo) || 0;
+  var incomingClient = String(o.clientId || '').trim();
 
   // Find this order's existing rows so a re-save REPLACES them instead of adding
   // duplicates. Match by the stable INTERNAL order number first, then by ORDER
-  // NO — never by phone, so editing the customer's phone still updates the same
-  // order rather than creating a new entry.
+  // NO, then by the app's CLIENT ORDER ID (idempotency key) — never by phone, so
+  // editing the customer's phone still updates the same order rather than creating a
+  // new entry. The CLIENT ORDER ID match is what makes a brand-new order (which has
+  // neither an internal no nor an order no yet) idempotent: a double-click or a lost-
+  // response network retry re-sends the same clientId, so the second write lands on
+  // the rows the first one already created instead of booking a duplicate order.
   var matchRows = [], existingWon = '', existingDate = '', existingStage = '';
-  if ((incomingInt || incomingOrder) && (cIntNo >= 0 || cOrderNo >= 0)) {
+  if ((incomingInt || incomingOrder || incomingClient) && (cIntNo >= 0 || cOrderNo >= 0 || cClient >= 0)) {
     for (var i = 0; i < data.length; i++) {
-      var rowInt   = cIntNo   >= 0 ? Number(data[i][cIntNo]) || 0 : 0;
-      var rowOrder = cOrderNo >= 0 ? String(data[i][cOrderNo] || '').trim() : '';
-      var intMatch   = incomingInt   && rowInt   === incomingInt;
-      var orderMatch = incomingOrder && rowOrder === incomingOrder;
-      if (!intMatch && !orderMatch) continue;
+      var rowInt    = cIntNo   >= 0 ? Number(data[i][cIntNo]) || 0 : 0;
+      var rowOrder  = cOrderNo >= 0 ? String(data[i][cOrderNo] || '').trim() : '';
+      var rowClient = cClient  >= 0 ? String(data[i][cClient]  || '').trim() : '';
+      var intMatch    = incomingInt    && rowInt    === incomingInt;
+      var orderMatch  = incomingOrder  && rowOrder  === incomingOrder;
+      var clientMatch = incomingClient && rowClient && rowClient === incomingClient;
+      if (!intMatch && !orderMatch && !clientMatch) continue;
       matchRows.push(i);
       if (cWon   >= 0 && !existingWon)   existingWon   = String(data[i][cWon]   || '').trim();
       if (cDate  >= 0 && !existingDate)  existingDate  = String(data[i][cDate]  || '').trim();
@@ -1920,6 +1951,9 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
 
     put(['SL NO.', 'SL NO'], slBaseRow + i);
     put(CRM_H.INT_NO, internalNo);
+    // Idempotency key — stored so a repeated save (double-click / network retry)
+    // matches this order's rows instead of creating a duplicate. See handleSaveOrder.
+    put(CRM_H.CLIENT_ID, o.clientId || '');
     put(CRM_H.DATE, orderDateStr);
     put(CRM_H.ORDER_NO, orderNo);
     // WON == Godrej SO No. Per-item WON (it.won) wins so a single order can carry

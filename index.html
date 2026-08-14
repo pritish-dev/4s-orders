@@ -1499,7 +1499,24 @@ function generatePDF(order, copyType) {
 // ═══════════════════════════════════════════════════════════
 const { useState, useEffect, useRef, useCallback } = React;
 
+// A stable, unique idempotency key minted once per order draft. It is sent with
+// every save (and every retry) so an accidental double-tap on "Save", an internal
+// apiPost retry, or an offline-queue re-send can NEVER create a second order — the
+// server recognises the repeated clientId and updates the same order in place
+// instead of booking a duplicate.
+function uid() {
+  try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch(e){}
+  return 'oid-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+// Orders currently mid-save, keyed by clientId — a second Save for the same order
+// while the first request is still in flight is ignored (so a rapid double-click
+// never even fires the redundant request).
+const _savingIds = new Set();
+
 const BLANK_ORDER = () => ({
+  // Idempotency key — see uid() above. Kept for the life of this draft so retries
+  // and double-submits all resolve to a single order on the server.
+  clientId: uid(),
   no:'', customer:'', phone:'', alt:'', email:'',
   gstNumber:'',
   billing:'', delivery:'', pincode:'', floor:'', landmark:'', liftAvailable:'',
@@ -2135,6 +2152,15 @@ function App() {
   }
 
   async function doSaveOrder(draft) {
+    // Guarantee a stable idempotency key. New drafts already carry one (BLANK_ORDER),
+    // this backfills any older draft/queued order so the server-side dedup still works.
+    const clientId = draft.clientId || uid();
+    draft = { ...draft, clientId };
+    // Re-entrancy guard: if a Save for this exact order is already in flight, ignore
+    // the duplicate click. The server clientId dedup is the ultimate backstop; this
+    // just avoids firing the redundant request at all.
+    if (_savingIds.has(clientId)) return null;
+    _savingIds.add(clientId);
     setLoading(true);
     try {
       const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total, by: user?.code, byName: user?.name } });
@@ -2152,10 +2178,12 @@ function App() {
     } catch(e) {
       showToast('No internet — order saved on this phone, will sync automatically','warn');
       const q = JSON.parse(localStorage.getItem('4s_queue')||'[]');
+      // Persist the clientId with the queued order so the offline re-send (flushQueue)
+      // resolves to the same order server-side instead of creating a duplicate.
       q.push({...draft, _queuedAt: Date.now()});
       localStorage.setItem('4s_queue', JSON.stringify(q));
       return draft;
-    } finally { setLoading(false); }
+    } finally { setLoading(false); _savingIds.delete(clientId); }
   }
 
   // Re-send any orders that were saved while offline
@@ -4273,8 +4301,8 @@ function OrderFormScreen({ctx}) {
       )}
       <div style={{display:'flex',gap:8,padding:'10px 14px',background:'#fff',borderTop:`1px solid ${T.line}`,flexShrink:0}}>
         <Btn onClick={()=>{ if((o.items&&o.items.length)&&!window.confirm('Discard changes to this order?'))return; try{localStorage.removeItem('4s_draft');}catch{} setOrder(BLANK_ORDER()); nav('home'); }}>Discard</Btn>
-        <Btn onClick={handleSaveDraft}>Save Draft</Btn>
-        <Btn primary full onClick={handleSave}>Save & PDF →</Btn>
+        <Btn disabled={ctx.loading} onClick={handleSaveDraft}>Save Draft</Btn>
+        <Btn primary full disabled={ctx.loading} onClick={handleSave}>Save & PDF →</Btn>
       </div>
       {partialPicker && <PartialDeliveryModal order={o} onCancel={()=>setPartialPicker(false)} onConfirm={confirmPartialDelivery}/>}
     </div>
