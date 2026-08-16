@@ -1443,13 +1443,16 @@ function generatePDF(order, copyType) {
       ? order.moneyReceipts : [{no:order.receiptNo||'',date:''}];
     const rcH=8;
     for(let r=0;r<3;r++){
-      const mr = receipts[r] || {no:'',date:''};
+      const mr = receipts[r] || {no:'',date:'',amt:''};
       brd(ml,y,cw/2,rcH); brd(ml+cw/2,y,cw/2,rcH);
       lbl(ml+2,y+5,'Money Receipt No & Dt :');
       const mrTxt = [mr.no,mr.date].filter(Boolean).join('  ·  ');
       if(mrTxt) val(ml+40,y+5, fit1(mrTxt,cw/2-42,7.5), 7.5);
       lbl(ml+cw/2+2,y+5,'Amount Received :');
-      if(r===0&&earnest) val(ml+cw/2+32,y+5, fit1(inr(earnest),cw/2-34,7.5), 7.5);
+      // Receipt 1's amount is the earnest advance; receipts 2 & 3 carry their own
+      // part-payment amount so each money receipt shows the money it collected.
+      const rcptAmt = r===0 ? earnest : (Number(mr.amt)||0);
+      if(rcptAmt) val(ml+cw/2+32,y+5, fit1(inr(rcptAmt),cw/2-34,7.5), 7.5);
       y += rcH;
     }
 
@@ -4397,6 +4400,53 @@ async function shareOrderPDF(o, copyType, showToast) {
   if (showToast) showToast('PDF saved — attach it in the WhatsApp chat','ok');
 }
 
+// Message for the sales-team WhatsApp group when a freshly booked order still
+// needs its Godrej SO (WON) number raised in Salesforce. Shared alongside the
+// order-form PDF so the team can place the order and reply with the SO No, which
+// is then added back on the order via "+ ADD SO".
+function salesTeamOrderMessage(o) {
+  const {total, earnest, balance} = orderTotals(o);
+  const qty = (o.items||[]).reduce((s,i)=>s+(Number(i.qty)||0),0);
+  return `*New order — please place in Salesforce* 🧾\n\n`+
+    `Order No: *${o.no||'—'}*\n`+
+    `Customer: ${o.customer||'—'}\n`+
+    `Sales Exec: ${o.salesExec||'—'}\n`+
+    `Items: ${qty} nos\n`+
+    `Total (incl. GST): ₹${total.toLocaleString('en-IN')}\n`+
+    `Advance Paid: ₹${earnest.toLocaleString('en-IN')}\n`+
+    `Balance: ₹${balance.toLocaleString('en-IN')}\n\n`+
+    `Kindly place this order in Salesforce and share the generated *SO No.* so it can be added to the order. Order form attached.\n\n`+
+    `4S Interiors, Patia, Bhubaneswar`;
+}
+
+// Share a Pending-WON order with the sales-team WhatsApp group: attaches the
+// order-form (sales copy) PDF and a message requesting the team place it in
+// Salesforce and reply with the generated SO No. Uses the device share sheet so
+// the WhatsApp group can be chosen; falls back to saving the PDF + opening
+// WhatsApp with the text (group picked inside WhatsApp) where file share isn't
+// supported. A dismissed share sheet is a no-op.
+async function shareOrderToSalesTeam(o, showToast) {
+  const safeNo = (o.no||'draft').replace('/','‑');
+  const fname  = 'Order-'+safeNo+'-Sales.pdf';
+  const text   = salesTeamOrderMessage(o);
+  let doc;
+  try { doc = generatePDF(o, 'sales'); }
+  catch(e) { if (showToast) showToast('Could not build the PDF','bad'); return; }
+  try {
+    const file = new File([doc.output('blob')], fname, {type:'application/pdf'});
+    if (navigator.canShare && navigator.canShare({files:[file]})) {
+      await navigator.share({files:[file], text});
+      return;
+    }
+  } catch(e) {
+    if (e && e.name === 'AbortError') return;   // user closed the share sheet
+    // any other error → fall through to the download + chat fallback
+  }
+  try { doc.save(fname); } catch(e) {}
+  try { window.open('https://wa.me/?text='+encodeURIComponent(text), '_blank'); } catch(e) {}
+  if (showToast) showToast('PDF saved — attach it in the sales-team WhatsApp group','ok');
+}
+
 // ─── PDF Preview ─────────────────────────────────────────────
 function PDFPreviewScreen({ctx}) {
   const {order,nav,back,showToast} = ctx;
@@ -4798,6 +4848,7 @@ function HistoryScreen({ctx}) {
                 <span title="Order PDF" onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)});nav('pdf');}} style={{width:32,height:28,borderRadius:5,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,14)}</span>
                 <span title={o.serviceFlag?'Service request':'Flag a service request'} onClick={e=>{e.stopPropagation();setServiceOrder(o);}} style={{width:32,height:28,borderRadius:5,background:o.serviceFlag?(/resolved/i.test(o.serviceStatus||'')?T.greenSoft:(T.badSoft||'#fdecec')):T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:14,fontWeight:700,color:o.serviceFlag?(/resolved/i.test(o.serviceStatus||'')?T.green:T.bad):T.ink3}}>⚠</span>
                 <span title="Share PDF on WhatsApp" onClick={e=>{e.stopPropagation();shareOrderPDF(o,'customer',ctx.showToast);}} style={{width:32,height:28,borderRadius:5,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',14)}</span>
+                {isPendWon(o)&&<span title="Send to sales team on WhatsApp — request they place the order in Salesforce and share the SO No" onClick={e=>{e.stopPropagation();shareOrderToSalesTeam(o,ctx.showToast);}} style={{display:'inline-flex',alignItems:'center',gap:4,height:28,padding:'0 8px',borderRadius:5,background:'#0b7dc422',color:'#0b6ba8',border:'1px solid #9fd0ea',fontSize:10,fontWeight:800,letterSpacing:0.3,cursor:'pointer'}}>{Icon.whatsapp('#0b6ba8',13)}SO</span>}
                 {isAdmin&&<span title="Delete order (admin)" onClick={e=>{e.stopPropagation();deleteOrder(o);}} style={{width:32,height:28,borderRadius:5,background:T.badSoft||'#fdecec',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.trash(T.bad,14)}</span>}
               </div>
             </div>
