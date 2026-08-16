@@ -1273,7 +1273,12 @@ function generatePDF(order, copyType) {
   // ── ONE ITEM ROW ──────────────────────────────────────────
   function drawItemRow(y, it, idx) {
     const h = rowHeight(it);
-    if(idx%2===1){ doc.setFillColor(252,252,252); doc.rect(ml,y,cw,h,'F'); }
+    // Sales copy: shade the whole row amber when the item ships from the 4S
+    // warehouse so 4Sinteriors lines stand out from franchise (34S/KB) lines —
+    // on screen and on the print-out. The amber fill overrides the zebra stripe.
+    const fourS = !isCustomer && _isFourS(it.whTag);
+    if(fourS){ doc.setFillColor(255,236,179); doc.rect(ml,y,cw,h,'F'); }
+    else if(idx%2===1){ doc.setFillColor(252,252,252); doc.rect(ml,y,cw,h,'F'); }
     brd(ml,y,cw,h);
     Object.values(tC).forEach(c=>vln(c.x+c.w,y,y+h));
     doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...INK);
@@ -1303,7 +1308,9 @@ function generatePDF(order, copyType) {
       // 34S = ZBF34S, from the stock snapshot taken when the item was added.
       let whTagTxt = '', whTagW = 0;
       if (!isCustomer) {
-        whTagTxt = '(' + (it.whTag || warehouseTagOf(it.stock)) + ')';
+        const whBase = it.whTag || warehouseTagOf(it.stock);
+        // For a 4S line, spell out its sub-category (GD1 / GD2 / SHOWROOM) in the tag.
+        whTagTxt = '(' + whBase + (_isFourS(it.whTag) && it.whSub ? ' · ' + it.whSub : '') + ')';
         whTagW = doc.getTextWidth(whTagTxt) + 2;
       }
       const nm = doc.splitTextToSize(it.name||'', tC.desc.w-2-whTagW);
@@ -1449,9 +1456,10 @@ function generatePDF(order, copyType) {
       const mrTxt = [mr.no,mr.date].filter(Boolean).join('  ·  ');
       if(mrTxt) val(ml+40,y+5, fit1(mrTxt,cw/2-42,7.5), 7.5);
       lbl(ml+cw/2+2,y+5,'Amount Received :');
-      // Receipt 1's amount is the earnest advance; receipts 2 & 3 carry their own
-      // part-payment amount so each money receipt shows the money it collected.
-      const rcptAmt = r===0 ? earnest : (Number(mr.amt)||0);
+      // Each money receipt shows the amount collected against it: receipt 1 is the
+      // booking advance (the `earnest` field), receipts 2 & 3 their own `amt`. The
+      // three add up to the total received printed in the "Earnest Amt." row above.
+      const rcptAmt = r===0 ? (Number(order.earnest)||0) : (Number(mr.amt)||0);
       if(rcptAmt) val(ml+cw/2+32,y+5, fit1(inr(rcptAmt),cw/2-34,7.5), 7.5);
       y += rcH;
     }
@@ -3863,12 +3871,12 @@ function OrderFormScreen({ctx}) {
               <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
                 <Field label={`Money Receipt No ${i+1}`} value={mr.no} onChange={v=>setMRestricted(i,'no',v)} mono/>
               </div>
-              <div style={{flex:1,borderRight:i>=1?`1px solid ${T.line}`:undefined}}>
+              <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
                 <Field label={`Date ${i+1}`} value={mr.date} onChange={v=>setMRestricted(i,'date',v)} mono type="date"/>
               </div>
-              {i>=1 && <div style={{flex:1}}>
-                <Field label={`Amount ${i+1}`} value={mr.amt} onChange={v=>setMRestricted(i,'amt',v)} mono type="number" hint={i===1?'Later payment':undefined}/>
-              </div>}
+              <div style={{flex:1}}>
+                <Field label={`Amount ${i+1}`} value={i===0?o.earnest:mr.amt} onChange={v=>i===0?setF('earnest',v):setMRestricted(i,'amt',v)} mono type="number" hint={i===0?'Advance at booking':'Later payment'}/>
+              </div>
             </div>
           );})}
           {(()=>{ const {received,balance}=orderReceived(o); return (
@@ -4118,7 +4126,7 @@ function OrderFormScreen({ctx}) {
             const gstUnit  = gstInclUnit(it);                   // per-unit MRP after discount
             const lineShown= gstInclLine(it);                   // line total (incl. GST)
             return (
-            <div key={it.code+i} style={{padding:'11px 14px',borderBottom:`1px solid ${T.line}`}}>
+            <div key={it.code+i} style={{padding:'11px 14px',borderBottom:`1px solid ${T.line}`,...(_isFourS(it.whTag)?{background:'#fff4d6',borderLeft:`4px solid ${T.warn}`}:{})}}>
               <div style={{display:'flex',gap:8,alignItems:'flex-start'}}>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:3,flexWrap:'wrap'}}>
@@ -4206,14 +4214,22 @@ function OrderFormScreen({ctx}) {
                   {/* Delivery warehouse for the SALES-copy tag. Both warehouses are
                       always offered so the salesperson can pick the delivery source
                       even when the item isn't stocked in one of them. */}
-                  {(()=>{const opts=['34S','KB','4S'];const cur=it.whTag||'34S';return(
+                  {(()=>{const opts=['34S','KB','4S'];const cur=it.whTag||'34S';const isFourS=_isFourS(cur);const subOpts=['GD1','GD2','SHOWROOM'];return(
                     <div style={{display:'flex',gap:8,marginTop:8,alignItems:'center',flexWrap:'wrap'}}>
                       <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>WAREHOUSE</span>
-                      <select value={cur} onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,whTag:v}:x)}));}}
+                      {/* Picking 4S defaults its sub-category to GD1; leaving 4S clears it. */}
+                      <select value={cur} onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,whTag:v,whSub:_isFourS(v)?(x.whSub||'GD1'):''}:x)}));}}
                         style={{border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 8px',fontFamily:T.sans,fontSize:12,fontWeight:700,color:T.ink,background:'#fff',cursor:'pointer'}}>
                         {opts.map(w=><option key={w} value={w}>{w==='KB'?'KB (ZBF11T)':w==='34S'?'34S (ZBF34S)':w}</option>)}
                       </select>
-                      <span style={{fontSize:9,color:T.ink4}}>pick delivery warehouse</span>
+                      {isFourS && <>
+                        <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>SUB</span>
+                        <select value={it.whSub||'GD1'} onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,whSub:v}:x)}));}}
+                          style={{border:`1.5px solid ${T.warn}`,borderRadius:4,padding:'3px 8px',fontFamily:T.sans,fontSize:12,fontWeight:700,color:T.ink,background:'#fff',cursor:'pointer'}}>
+                          {subOpts.map(s=><option key={s} value={s}>{s}</option>)}
+                        </select>
+                      </>}
+                      <span style={{fontSize:9,color:T.ink4}}>{isFourS?'4S sub-category':'pick delivery warehouse'}</span>
                     </div>
                   );})()}
                 </div>
@@ -4259,21 +4275,26 @@ function OrderFormScreen({ctx}) {
             <option>Pine Labs EMI</option>
           </select>
         </div>
-        <Field label="Earnest Amount" value={o.earnest} onChange={v=>setF('earnest',v)} mono type="number" required error={(Number(o.earnest)||0) > total ? `Amount paid ₹${(Number(o.earnest)||0).toLocaleString('en-IN')} exceeds the order total ₹${total.toLocaleString('en-IN')}` : undefined} hint={total>0?`Order total: ₹${total.toLocaleString('en-IN')}`:undefined}/>
-        {/* Money receipt no + date — updatable up to 3 times. Receipt 1's amount is
-            the Earnest above; receipts 2 & 3 carry their own amount so a later
-            part-payment reduces the outstanding balance in the Collectibles view. */}
-        {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:'',amt:''}; const setMR=(field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:'',amt:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; }); return (
+        {/* Money receipt no + date + amount — updatable up to 3 times. Each receipt
+            carries the amount collected against it: receipt 1 is the booking advance
+            (stored in `earnest`), receipts 2 & 3 their own part-payments. The three
+            amounts add up to the total advance and shrink the outstanding balance. */}
+        {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:'',amt:''}; const setMR=(field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:'',amt:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; });
+          // Receipt 1's amount is the booking advance kept in `earnest`; receipts 2 & 3
+          // store their own `amt`.
+          const amtVal = i===0 ? o.earnest : mr.amt;
+          const setAmt = i===0 ? (v=>setF('earnest',v)) : (v=>setMR('amt',v));
+          return (
           <div key={i} style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
             <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
               <Field label={`Money Receipt No ${i+1}`} value={mr.no} onChange={v=>setMR('no',v)} mono/>
             </div>
-            <div style={{flex:1,borderRight:i>=1?`1px solid ${T.line}`:undefined}}>
+            <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
               <Field label={`Date ${i+1}`} value={mr.date} onChange={v=>setMR('date',v)} mono type="date"/>
             </div>
-            {i>=1 && <div style={{flex:1}}>
-              <Field label={`Amount ${i+1}`} value={mr.amt} onChange={v=>setMR('amt',v)} mono type="number" hint={i===1?'Later payment':undefined}/>
-            </div>}
+            <div style={{flex:1}}>
+              <Field label={`Amount ${i+1}`} value={amtVal} onChange={setAmt} mono type="number" hint={i===0?'Advance at booking':'Later payment'} error={i===0 && (Number(o.earnest)||0) > total ? `Exceeds order total ₹${total.toLocaleString('en-IN')}` : undefined}/>
+            </div>
           </div>
         );})}
         {(()=>{ const {received,balance}=orderReceived(o); return (

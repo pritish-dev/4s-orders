@@ -1101,6 +1101,8 @@ function handleOrders(p) {
   var cIDisc = colOf(['ITEM DISCOUNT %','PER ITEM DISCOUNT %','ITEM DISC %']);
   var cISchm = colOf(['DISC ALLOWED']);
   var cIWh   = colOf(['WAREHOUSE','DELIVERY WAREHOUSE','ITEM WAREHOUSE']);
+  // 4S warehouse sub-category (GD1 / GD2 / SHOWROOM) — only set on 4S lines.
+  var cIWhSub= colOf(['WAREHOUSE SUB','WAREHOUSE SUBCATEGORY','WH SUB']);
   // After-sales service / issue tracking (order-level).
   var cSvcFlag  = colOf(['SERVICE FLAG','SERVICE REQUIRED','HAS SERVICE REQUEST']);
   var cSvcIssue = colOf(['SERVICE ISSUE','ISSUE DESCRIPTION','SERVICE ISSUE DESCRIPTION']);
@@ -1273,6 +1275,8 @@ function handleOrders(p) {
       // Chosen delivery warehouse (KB / 34S) captured at booking, printed on the
       // sales copy. Preserved across reopen so the PDF stays correct.
       whTag: sval(r, cIWh),
+      // 4S warehouse sub-category (GD1 / GD2 / SHOWROOM); blank for non-4S lines.
+      whSub: cIWhSub >= 0 ? sval(r, cIWhSub) : '',
     });
   }
 
@@ -1595,6 +1599,8 @@ var CRM_APP_COLUMNS = [
   // or '34S' (ZBF34S). Auto-set for single-warehouse items; picked by the
   // salesperson when the item is stocked in both warehouses.
   ['WAREHOUSE', 'DELIVERY WAREHOUSE', 'ITEM WAREHOUSE'],
+  // 4S warehouse sub-category (GD1 / GD2 / SHOWROOM) — only populated on 4S lines.
+  ['WAREHOUSE SUB', 'WAREHOUSE SUBCATEGORY', 'WH SUB'],
   // After-sales service / issue tracking (order-level, repeated on every row).
   // SERVICE FLAG = 'Yes' once a service request is raised against an order (e.g. a
   // product found damaged/defective at installation). The rest capture the issue,
@@ -2073,6 +2079,8 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['ORDER STATUS','ORDER STAGE','DRAFT/SUBMITTED'], o.orderStatus ? String(o.orderStatus).toUpperCase() : '');
     // Per-item chosen delivery warehouse (KB / 34S) — printed on the sales copy.
     put(['WAREHOUSE','DELIVERY WAREHOUSE','ITEM WAREHOUSE'], it.whTag || '');
+    // 4S warehouse sub-category (GD1 / GD2 / SHOWROOM) — blank for non-4S lines.
+    put(['WAREHOUSE SUB','WAREHOUSE SUBCATEGORY','WH SUB'], it.whSub || '');
     // After-sales service / issue tracking — order-level, written on every row so a
     // row scan (like delivery status) always finds it.
     put(['SERVICE FLAG','SERVICE REQUIRED','HAS SERVICE REQUEST'], o.serviceFlag ? 'Yes' : '');
