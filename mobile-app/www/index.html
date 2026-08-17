@@ -4399,10 +4399,24 @@ function orderWhatsAppMessage(o) {
 // WebView: jsPDF's doc.save() (a hidden <a download> blob) is silently dropped,
 // and the WebView's navigator.share can't attach files — so both "download" and
 // "share PDF" must go through this plugin when running in the app.
+//
+// IMPORTANT: a custom native plugin is obtained with Capacitor.registerPlugin();
+// window.Capacitor.Plugins.PdfSaver is NOT auto-populated, so relying on it left
+// the buttons silently falling back to the broken doc.save().
+let _pdfSaverPlugin;
 function nativePdfSaver() {
   try {
-    const P = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.PdfSaver;
-    return (P && typeof P.save === 'function') ? P : null;
+    const C = window.Capacitor;
+    if (!C) return null;
+    const isNative = C.isNativePlatform ? C.isNativePlatform() : !!C.isNative;
+    if (!isNative) return null;
+    if (_pdfSaverPlugin) return _pdfSaverPlugin;
+    if (typeof C.registerPlugin === 'function') {
+      _pdfSaverPlugin = C.registerPlugin('PdfSaver');
+    } else if (C.Plugins && C.Plugins.PdfSaver) {
+      _pdfSaverPlugin = C.Plugins.PdfSaver;
+    }
+    return _pdfSaverPlugin || null;
   } catch (e) { return null; }
 }
 
@@ -4412,18 +4426,26 @@ function pdfBase64(doc) {
   return uri.substring(uri.indexOf('base64,') + 7);
 }
 
+const _errMsg = (e) => (e && (e.message || e.errorMessage)) ? (e.message || e.errorMessage) : String(e);
+
 // Save a freshly generated PDF for the user. In the installed app this hands the
 // bytes to the native plugin, which writes the file to the phone's Downloads
 // folder and opens it. In a regular browser it's the normal doc.save() download,
 // so the website is unaffected.
 function deliverPDF(doc, fname, showToast) {
   const P = nativePdfSaver();
-  if (P) {
+  if (P && typeof P.save === 'function') {
     P.save({ data: pdfBase64(doc), filename: fname })
       .then(() => { if (showToast) showToast('Saved to Downloads', 'ok'); })
-      .catch(() => { if (showToast) showToast('Could not save the PDF', 'bad'); });
+      .catch((e) => { if (showToast) showToast('Save failed: ' + _errMsg(e), 'bad'); });
     return;
   }
+  // Reached here without the native plugin. If we appear to be inside the app,
+  // the bridge wasn't reachable — surface it instead of silently no-opping
+  // (a plain doc.save() download is dropped by the Android WebView).
+  const C = window.Capacitor;
+  const inApp = !!(C && (C.isNativePlatform ? C.isNativePlatform() : C.isNative));
+  if (inApp && showToast) showToast('PDF bridge not found — please update the app', 'bad');
   try { doc.save(fname); }
   catch (e) { if (showToast) showToast('Could not save the PDF', 'bad'); }
 }
@@ -4453,7 +4475,8 @@ async function shareOrderPDF(o, copyType, showToast) {
   // Installed app: attach the real PDF file through the native share sheet
   // (WhatsApp attaches the file, caption pre-filled). The WebView's
   // navigator.share can't attach files here, so this native path is required.
-  try { if (await nativeSharePDF(doc, fname, text)) return; } catch(e) { return; }
+  try { if (await nativeSharePDF(doc, fname, text)) return; }
+  catch(e) { if (showToast) showToast('Share failed: ' + _errMsg(e), 'bad'); return; }
   try {
     const file = new File([doc.output('blob')], fname, {type:'application/pdf'});
     if (navigator.canShare && navigator.canShare({files:[file]})) {
@@ -4503,7 +4526,8 @@ async function shareOrderToSalesTeam(o, showToast) {
   try { doc = generatePDF(o, 'sales'); }
   catch(e) { if (showToast) showToast('Could not build the PDF','bad'); return; }
   // Installed app: attach the real PDF via the native share sheet (see above).
-  try { if (await nativeSharePDF(doc, fname, text)) return; } catch(e) { return; }
+  try { if (await nativeSharePDF(doc, fname, text)) return; }
+  catch(e) { if (showToast) showToast('Share failed: ' + _errMsg(e), 'bad'); return; }
   try {
     const file = new File([doc.output('blob')], fname, {type:'application/pdf'});
     if (navigator.canShare && navigator.canShare({files:[file]})) {
