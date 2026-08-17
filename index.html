@@ -4357,6 +4357,50 @@ function orderWhatsAppMessage(o) {
   return `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${gstInclLine(i).toLocaleString('en-IN')}`).join('\n')}\n\n*Total (incl. GST):* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${earnest.toLocaleString('en-IN')}\n*Balance:* ₹${balance.toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
 }
 
+// Am I running inside the installed Android/iOS shell (Capacitor WebView)?
+function isNativeApp() {
+  try { return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()); }
+  catch (e) { return false; }
+}
+
+// Deliver a freshly generated PDF to the user, using whatever the current
+// environment actually supports. This exists because jsPDF's doc.save() — a
+// blob download on a hidden <a download> — is SILENTLY DROPPED by the Android
+// WebView, so the "Customer PDF"/"Sales PDF" buttons did nothing in the
+// installed APK. Order of preference:
+//   1) Native app with the AndroidPDF save bridge (rebuilt APK): hand the bytes
+//      to the shell, which writes the file to Downloads and opens it.
+//   2) Native app without that bridge (older build): fall back to the OS share
+//      sheet where the WebView supports sharing files.
+//   3) A regular browser (desktop or mobile web): normal doc.save() download —
+//      unchanged behaviour, so the website is unaffected.
+function deliverPDF(doc, fname, showToast) {
+  const native = isNativeApp();
+  // 1) Installed app with the native save bridge.
+  try {
+    if (native && window.AndroidPDF && typeof window.AndroidPDF.save === 'function') {
+      const uri = doc.output('datauristring');
+      const b64 = uri.substring(uri.indexOf('base64,') + 7);
+      window.AndroidPDF.save(b64, fname);
+      if (showToast) showToast('Saved to Downloads', 'ok');
+      return;
+    }
+  } catch (e) {}
+  // 2) Installed app without the bridge — try the share sheet.
+  try {
+    if (native) {
+      const file = new File([doc.output('blob')], fname, {type:'application/pdf'});
+      if (navigator.canShare && navigator.canShare({files:[file]})) {
+        navigator.share({files:[file]}).catch(()=>{});
+        return;
+      }
+    }
+  } catch (e) {}
+  // 3) Regular browser download (also the last-resort attempt in-app).
+  try { doc.save(fname); }
+  catch (e) { if (showToast) showToast('Could not save the PDF', 'bad'); }
+}
+
 // Share the order PDF through the device share sheet (WhatsApp, Gmail, Drive…)
 // with the confirmation message as the caption — the salesperson taps once and
 // the actual PDF is attached. Devices without file-share support (most desktops)
@@ -4454,10 +4498,16 @@ function PDFPreviewScreen({ctx}) {
 
   const safeNo = (o.no||'draft').replace('/','‑');
   function downloadCustomer() {
-    generatePDF(o, 'customer').save('Order-'+safeNo+'-Customer.pdf');
+    let doc;
+    try { doc = generatePDF(o, 'customer'); }
+    catch(e) { showToast && showToast('Could not build the PDF','bad'); return; }
+    deliverPDF(doc, 'Order-'+safeNo+'-Customer.pdf', showToast);
   }
   function downloadSales() {
-    generatePDF(o, 'sales').save('Order-'+safeNo+'-Sales.pdf');
+    let doc;
+    try { doc = generatePDF(o, 'sales'); }
+    catch(e) { showToast && showToast('Could not build the PDF','bad'); return; }
+    deliverPDF(doc, 'Order-'+safeNo+'-Sales.pdf', showToast);
   }
 
   // Attach the customer PDF and open the device share sheet (WhatsApp is one tap
