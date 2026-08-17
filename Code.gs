@@ -108,6 +108,7 @@ function doGet(e) {
       case 'nextReceipt':    result = handleNextReceipt();      break;
       case 'getAppSerial':   result = handleGetAppSerial();     break;
       case 'auditLog':       result = handleAuditLog(p);        break;
+      case 'leagueScores':   result = handleLeagueGet(p);       break;
       case 'lookupCustomer': result = handleLookupCustomer(p);  break;
       case 'debugPriceList': result = handleDebugPriceList();   break;
       default:               result = { ok: false, error: 'Unknown action: ' + (p.action || '(none)') };
@@ -131,6 +132,8 @@ function doPost(e) {
       case 'updateService':   result = handleUpdateService(body);     break;
       case 'deleteOrder':     result = handleDeleteOrder(body);       break;
       case 'setAppSerial':    result = handleSetAppSerial(body);      break;
+      case 'saveLeagueScore': result = handleLeagueSaveScore(body);   break;
+      case 'saveLeagueConfig':result = handleLeagueSaveConfig(body);  break;
       default:                result = { ok: false, error: 'Unknown action: ' + body.action };
     }
   } catch(err) {
@@ -2597,6 +2600,131 @@ function handleAuditLog(p) {
     }).reverse();   // newest first
     return { ok: true, entries: entries, scriptVersion: SCRIPT_VERSION };
   } catch(e) { return { ok: false, error: e.message }; }
+}
+
+// ─── 4S PREMIER LEAGUE ────────────────────────────────────────────────────────
+// A weekly sales-league scoreboard for two in-house teams (4S Strikers vs
+// 4S Titans). Managers/admins enter the "soft" daily criteria (reviews, happy
+// calling, tele-calling conversions, follow-up / timing / dress-code penalties)
+// per player per day; the hard numbers (orders booked and net-basic order value,
+// excluding 4S-channel items) are computed on the client from the order ledger.
+//
+// Storage: a "League_Scores" tab in the CRM spreadsheet, one row per
+// (date, player). Upserting a (date, player) overwrites that day's manual entry.
+// The monthly sales target (split in two equal halves, one per team) is kept in
+// Script Properties as LEAGUE_MONTHLY_TARGET.
+var LEAGUE_TAB_NAME = 'League_Scores';
+var LEAGUE_HEADERS = [
+  'Date', 'Player', 'Team',
+  'Reviews', 'HappyCalling', 'FollowupMissed', 'TimingPenalty', 'DressCode',
+  'TeleConv', 'TeleConvReview', 'Notes', 'UpdatedBy', 'UpdatedAt'
+];
+// Manual numeric fields the client sends / receives (order matters for the row).
+var LEAGUE_NUM_FIELDS = ['reviews','happyCalling','followupMissed','timingPenalty','dressCode','teleConv','teleConvReview'];
+
+function _leagueTab() {
+  var ss = SpreadsheetApp.openById(CRM_SHEET_ID);
+  var sh = ss.getSheetByName(LEAGUE_TAB_NAME);
+  if (!sh) {
+    sh = ss.insertSheet(LEAGUE_TAB_NAME);
+    sh.appendRow(LEAGUE_HEADERS);
+    try { sh.setFrozenRows(1); } catch (e) {}
+  }
+  return sh;
+}
+
+// "yyyy-mm-dd" normaliser — accepts a Date or an already-formatted string.
+function _leagueDate(v) {
+  if (v instanceof Date) {
+    var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+    return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+  }
+  return String(v || '').trim();
+}
+
+// Read all manual score rows + the monthly target. Open to any logged-in user
+// (the scoreboard is visible to everyone; only editing is admin-gated).
+function handleLeagueGet(p) {
+  try {
+    var sh = _leagueTab();
+    var last = sh.getLastRow();
+    var rows = [];
+    if (last >= 2) {
+      var vals = sh.getRange(2, 1, last - 1, LEAGUE_HEADERS.length).getValues();
+      vals.forEach(function (r) {
+        if (!r[1]) return;                       // no player → skip
+        var o = { date: _leagueDate(r[0]), player: String(r[1] || ''), team: String(r[2] || '') };
+        LEAGUE_NUM_FIELDS.forEach(function (f, i) { o[f] = Number(r[3 + i]) || 0; });
+        o.notes     = String(r[10] || '');
+        o.updatedBy = String(r[11] || '');
+        o.updatedAt = _leagueDate(r[12]) ? String(r[12]) : '';
+        rows.push(o);
+      });
+    }
+    var target = Number(PropertiesService.getScriptProperties().getProperty('LEAGUE_MONTHLY_TARGET')) || 0;
+    var som    = PropertiesService.getScriptProperties().getProperty('LEAGUE_SALESMAN_OF_MONTH') || '';
+    return { ok: true, scores: rows, monthlyTarget: target, salesmanOfMonth: som, scriptVersion: SCRIPT_VERSION };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+// Upsert one player's manual scores for one date. Admin/manager only.
+function handleLeagueSaveScore(body) {
+  var by = String((body && body.by) || '').trim();
+  var role = _lookupRole(by);
+  if (role !== 'admin' && role !== 'manager') {
+    return { ok: false, error: 'Only a manager or admin can update league scores.' };
+  }
+  var date   = _leagueDate((body && body.date) || '');
+  var player = String((body && body.player) || '').trim();
+  var team   = String((body && body.team) || '').trim();
+  if (!date || !player) return { ok: false, error: 'date and player are required.' };
+
+  try {
+    var sh = _leagueTab();
+    var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+    var stamp = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss');
+    var row = [date, player, team];
+    LEAGUE_NUM_FIELDS.forEach(function (f) { row.push(Math.round(Number(body && body[f]) || 0)); });
+    row.push(String((body && body.notes) || ''), by, stamp);
+
+    // Find an existing (date, player) row to overwrite.
+    var last = sh.getLastRow();
+    var foundRow = -1;
+    if (last >= 2) {
+      var keys = sh.getRange(2, 1, last - 1, 2).getValues();
+      for (var i = 0; i < keys.length; i++) {
+        if (_leagueDate(keys[i][0]) === date &&
+            String(keys[i][1] || '').trim().toLowerCase() === player.toLowerCase()) {
+          foundRow = i + 2; break;
+        }
+      }
+    }
+    if (foundRow > 0) sh.getRange(foundRow, 1, 1, LEAGUE_HEADERS.length).setValues([row]);
+    else              sh.appendRow(row);
+
+    _appendLog(by, '', 'LEAGUE_SCORE', player + ' @ ' + date);
+    return { ok: true, scriptVersion: SCRIPT_VERSION };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+// Set league-wide config (monthly target, salesman of the month). Admin/manager only.
+function handleLeagueSaveConfig(body) {
+  var by = String((body && body.by) || '').trim();
+  var role = _lookupRole(by);
+  if (role !== 'admin' && role !== 'manager') {
+    return { ok: false, error: 'Only a manager or admin can change league settings.' };
+  }
+  try {
+    var props = PropertiesService.getScriptProperties();
+    if (body && body.monthlyTarget !== undefined && body.monthlyTarget !== null && body.monthlyTarget !== '') {
+      props.setProperty('LEAGUE_MONTHLY_TARGET', String(Math.max(0, Math.round(Number(body.monthlyTarget) || 0))));
+    }
+    if (body && body.salesmanOfMonth !== undefined) {
+      props.setProperty('LEAGUE_SALESMAN_OF_MONTH', String(body.salesmanOfMonth || ''));
+    }
+    _appendLog(by, '', 'LEAGUE_CONFIG', 'target=' + (body && body.monthlyTarget) + ' som=' + (body && body.salesmanOfMonth));
+    return { ok: true, scriptVersion: SCRIPT_VERSION };
+  } catch (e) { return { ok: false, error: e.message }; }
 }
 
 // ─── DEBUG — fast: reads only header row + row count per listed tab ────────────

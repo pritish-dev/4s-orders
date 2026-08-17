@@ -1923,6 +1923,9 @@ function App() {
   const [misUpdateUrl,  setMisUpdateUrl] = useState(MIS_UPDATE_URL_DEFAULT);
   const [misLoading,    setMisLoading]   = useState(false);
   const [misDiag,       setMisDiag]      = useState(null);   // backend diagnostics (tab used, rows, etc.)
+  // 4S Premier League — manual daily scores + config (monthly target, salesman of the month).
+  const [league,        setLeague]       = useState(() => { try { return JSON.parse(localStorage.getItem('4s_league')||'{"scores":[],"monthlyTarget":0,"salesmanOfMonth":""}'); } catch { return {scores:[],monthlyTarget:0,salesmanOfMonth:''}; } });
+  const [leagueLoading, setLeagueLoading]= useState(false);
 
   const showToast = (msg,type='ok') => setToast({msg,type});
   // "New order placed" celebration overlay — set by doSaveOrder on a first-time
@@ -2009,6 +2012,7 @@ function App() {
     // refresh them silently in the background so the ledger is current on open.
     loadOrders({ silent: true });
     loadMis({ silent: true });
+    loadLeague({ silent: true });
   }, [user]);
 
   // Re-sync shared data every time the app is reopened / brought to the
@@ -2169,6 +2173,41 @@ function App() {
     } catch (e) { if (!silent) showToast(e.message, 'bad'); }
     finally { setMisLoading(false); }
     return null;
+  }
+
+  // ── 4S Premier League ──────────────────────────────────────────
+  // Pull the manual daily scores + config. Everyone can read the board; only a
+  // manager/admin can write. Cached locally so the scoreboard shows instantly.
+  async function loadLeague(opts) {
+    const silent = opts && opts.silent;
+    if (!silent) setLeagueLoading(true);
+    try {
+      const res = await apiGet('leagueScores', {}, 30000, 2);
+      if (res && res.ok) {
+        const data = { scores: res.scores || [], monthlyTarget: Number(res.monthlyTarget)||0, salesmanOfMonth: res.salesmanOfMonth || '' };
+        setLeague(data);
+        localStorage.setItem('4s_league', JSON.stringify(data));
+        return data;
+      } else if (!silent) showToast((res && res.error) || 'Failed to load league scores','bad');
+    } catch(e) { if (!silent) showToast('Could not reach the server','warn'); }
+    finally { if (!silent) setLeagueLoading(false); }
+    return null;
+  }
+  // Upsert one player's manual scores for one date (admin/manager only).
+  async function doSaveLeagueScore(entry) {
+    try {
+      const res = await apiPost({ action:'saveLeagueScore', by:user?.username||user?.name||'', ...entry });
+      if (res && res.ok) { await loadLeague({silent:true}); showToast('Score saved ✓'); return true; }
+      showToast((res && res.error) || 'Save failed','bad'); return false;
+    } catch(e) { showToast(e.message,'bad'); return false; }
+  }
+  // Update league config — monthly target and/or salesman of the month (admin/manager only).
+  async function doSaveLeagueConfig(cfg) {
+    try {
+      const res = await apiPost({ action:'saveLeagueConfig', by:user?.username||user?.name||'', ...cfg });
+      if (res && res.ok) { await loadLeague({silent:true}); showToast('Settings saved ✓'); return true; }
+      showToast((res && res.error) || 'Save failed','bad'); return false;
+    } catch(e) { showToast(e.message,'bad'); return false; }
   }
 
   // Ask the backend for the exact next app Receipt No (authoritative — it reads the
@@ -2415,7 +2454,8 @@ function App() {
   }, [notifications]);
 
   const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, showCelebration, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doUpdateService, doLookupCustomer, doDeleteOrder, doSignOut, syncStock, syncPriceList, loadOrders, getNextReceipt,
-    mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen };
+    mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen,
+    league, leagueLoading, loadLeague, doSaveLeagueScore, doSaveLeagueConfig };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -2433,6 +2473,7 @@ function App() {
     salessupport:<SalesSupportScreen ctx={ctx}/>,
     reports: <ReportsScreen ctx={ctx}/>,
     collect: <CollectiblesScreen ctx={ctx}/>,
+    league:  <LeagueScreen ctx={ctx}/>,
   };
 
   return (
@@ -2573,6 +2614,410 @@ function _channelSplit(o){
   const foursint = Math.round(total * fourSLine / sumLine);
   return { franchise: total - foursint, foursint };
 }
+
+// ═══════════════════════════════════════════════════════════
+// 4S PREMIER LEAGUE — live team scoreboard
+// ═══════════════════════════════════════════════════════════
+// Two in-house teams (Strikers vs Titans). The "hard" numbers — orders booked
+// (excl. B2B) and net-basic order value (excl. the 4S sales channel) — are read
+// live from the order ledger and attributed to a player by matching salesExec.
+// The "soft" daily criteria (reviews, happy calling, tele-calling conversions,
+// follow-up / timing / dress-code penalties) are entered by a manager/admin and
+// stored per (date, player) in the backend. The winner is decided weekly (the
+// league week runs Mon → Sun; Sunday is decision day).
+const LEAGUE_TEAMS = [
+  { id:'strikers', name:'4S Strikers', emoji:'🏏', accent:'#1560d0', deep:'#0b2a6b',
+    grad:'linear-gradient(160deg,#1c6fe0 0%,#0b2a6b 100%)', tagline:'Strike to Win · Play as One',
+    players:[ {name:'PRITISH',captain:true,match:'pritish'}, {name:'ARCHITA',match:'archita'}, {name:'BISWAJIT',match:'biswajit'} ] },
+  { id:'titans', name:'4S Titans', emoji:'🛡️', accent:'#d21f2b', deep:'#7a1420',
+    grad:'linear-gradient(160deg,#e23140 0%,#7a1420 100%)', tagline:'United We Play, Together We Win',
+    players:[ {name:'SWATI',captain:true,match:'swati'}, {name:'ADITYA',match:'aditya'}, {name:'SAROJ',match:'saroj'} ] },
+];
+// Point weights straight off the league rulebook.
+const LEAGUE_PTS = { salesConv:1, review:1, happyCalling:1, teleConv:4, teleConvReview:6, followupMissed:-1, timingPenalty:-1, dressCode:-1 };
+const LEAGUE_MANUAL_FIELDS = [
+  { key:'reviews',        label:'Reviews',            pts:'+1',  tone:'good' },
+  { key:'happyCalling',   label:'Happy calling',      pts:'+1',  tone:'good' },
+  { key:'teleConv',       label:'Tele conv.',         pts:'+4',  tone:'good' },
+  { key:'teleConvReview', label:'Tele conv.+review',  pts:'+6',  tone:'good' },
+  { key:'followupMissed', label:'Missed follow-ups',  pts:'−1',  tone:'bad' },
+  { key:'timingPenalty',  label:'Timing',             pts:'−1',  tone:'bad' },
+  { key:'dressCode',      label:'Dress code',         pts:'−1',  tone:'bad' },
+];
+const _pad2 = n => String(n).padStart(2,'0');
+function _isoOf(d){ return d.getFullYear()+'-'+_pad2(d.getMonth()+1)+'-'+_pad2(d.getDate()); }
+function _todayISO(){ return _isoOf(new Date()); }
+// The league week: Monday → Sunday, `offset` weeks from the current one (0 = this week).
+function leagueWeek(offset){
+  const now = new Date(); now.setHours(0,0,0,0);
+  const sinceMon = (now.getDay()+6)%7;             // 0=Sun..6=Sat → days since Monday
+  const start = new Date(now); start.setDate(now.getDate()-sinceMon+offset*7);
+  const end   = new Date(start); end.setDate(start.getDate()+6);
+  const fmt = d => d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'});
+  return { start, end, startISO:_isoOf(start), endISO:_isoOf(end), label:fmt(start)+' – '+fmt(end), month:start.getMonth(), year:start.getFullYear() };
+}
+function _daysInMonth(y,m){ return new Date(y,m+1,0).getDate(); }
+// Live orders → per-player order count (excl. B2B) and net-basic value (excl. 4S).
+function leagueAuto(orders, matchKey, startISO, endISO){
+  let orderCount=0, basic=0;
+  (orders||[]).forEach(o=>{
+    if(!o || o.status==='draft') return;
+    const iso=_toISO(o.date); if(!iso) return;
+    if(startISO && iso<startISO) return;
+    if(endISO   && iso>endISO)   return;
+    if(!String(o.salesExec||'').toLowerCase().includes(matchKey)) return;
+    if(String(o.orderType||'').toUpperCase()!=='B2B') orderCount++;   // orders booked (excl. B2B)
+    basic += _channelSplit(o).franchise;                             // net basic (excl. 4S channel)
+  });
+  return { orderCount, basic };
+}
+// Manual scores for one player, summed across the period.
+function leagueManualSum(scores, playerName, startISO, endISO){
+  const acc={reviews:0,happyCalling:0,followupMissed:0,timingPenalty:0,dressCode:0,teleConv:0,teleConvReview:0};
+  (scores||[]).forEach(s=>{
+    if(String(s.player||'').trim().toLowerCase()!==playerName.toLowerCase()) return;
+    const d=String(s.date||'').slice(0,10);
+    if(startISO && d<startISO) return;
+    if(endISO   && d>endISO)   return;
+    Object.keys(acc).forEach(k=>acc[k]+=Number(s[k])||0);
+  });
+  return acc;
+}
+// Full computed standings for a week.
+function computeLeague(orders, league, wk){
+  const monthlyTarget = Number(league&&league.monthlyTarget)||0;
+  const scores = (league&&league.scores)||[];
+  // Each team's target for THIS week = (monthly target ÷ 2) pro-rated to 7 days.
+  const dim = _daysInMonth(wk.year, wk.month);
+  const weeklyTeamTarget = monthlyTarget>0 ? Math.round((monthlyTarget/2)*7/dim) : 0;
+  const teams = LEAGUE_TEAMS.map(team=>{
+    const players = team.players.map(pl=>{
+      const auto = leagueAuto(orders, pl.match, wk.startISO, wk.endISO);
+      const man  = leagueManualSum(scores, pl.name, wk.startISO, wk.endISO);
+      const pts = auto.orderCount*LEAGUE_PTS.salesConv
+        + man.reviews*LEAGUE_PTS.review
+        + man.happyCalling*LEAGUE_PTS.happyCalling
+        + man.teleConv*LEAGUE_PTS.teleConv
+        + man.teleConvReview*LEAGUE_PTS.teleConvReview
+        + man.followupMissed*LEAGUE_PTS.followupMissed
+        + man.timingPenalty*LEAGUE_PTS.timingPenalty
+        + man.dressCode*LEAGUE_PTS.dressCode;
+      return { ...pl, auto, man, pts };
+    });
+    const teamBasic  = players.reduce((s,p)=>s+p.auto.basic,0);
+    const teamOrders = players.reduce((s,p)=>s+p.auto.orderCount,0);
+    const salesPct   = weeklyTeamTarget>0 ? Math.round(teamBasic/weeklyTeamTarget*100) : 0;
+    const playerPts  = players.reduce((s,p)=>s+p.pts,0);
+    const total      = playerPts + salesPct;                 // sales-value % is a team-level score
+    return { ...team, players, teamBasic, teamOrders, salesPct, playerPts, weeklyTeamTarget, total };
+  });
+  // Awards (individual, this week).
+  const everyPlayer = [];
+  teams.forEach(t=>t.players.forEach(p=>everyPlayer.push({ ...p, team:t })));
+  const orangeCap = everyPlayer.slice().sort((a,b)=>b.auto.basic-a.auto.basic)[0];
+  const purpleCap = everyPlayer.slice().sort((a,b)=>b.auto.orderCount-a.auto.orderCount)[0];
+  const leader = teams[0].total===teams[1].total ? null : (teams[0].total>teams[1].total?teams[0]:teams[1]);
+  return { teams, weeklyTeamTarget, orangeCap:(orangeCap&&orangeCap.auto.basic>0)?orangeCap:null, purpleCap:(purpleCap&&purpleCap.auto.orderCount>0)?purpleCap:null, leader };
+}
+
+// A player avatar — initials on the team accent (no photos stored → lean file).
+function LeagueAvatar({name, team, size=34, captain}) {
+  const initials = String(name||'?').trim().slice(0,2).toUpperCase();
+  return (
+    <div style={{position:'relative',flexShrink:0,width:size,height:size,borderRadius:99,background:team.grad,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800,fontSize:size*0.36,fontFamily:T.mono,boxShadow:'0 1px 3px rgba(0,0,0,.25)',border:'2px solid rgba(255,255,255,.85)'}}>
+      {initials}
+      {captain&&<span title="Captain" style={{position:'absolute',bottom:-3,right:-3,width:size*0.42,height:size*0.42,borderRadius:99,background:'#f5c518',color:'#3a2a00',fontSize:size*0.24,fontWeight:900,display:'flex',alignItems:'center',justifyContent:'center',border:'1.5px solid #fff'}}>C</span>}
+    </div>
+  );
+}
+
+// One team's cricket-style scorecard.
+function LeagueTeamCard({team, isLeader, decided}) {
+  return (
+    <div style={{borderRadius:14,overflow:'hidden',border:`1px solid ${T.line}`,background:'#fff',boxShadow:'0 2px 10px rgba(0,0,0,.05)'}}>
+      {/* Header band with crest + total */}
+      <div style={{background:team.grad,color:'#fff',padding:'12px 14px',position:'relative'}}>
+        {isLeader&&<div style={{position:'absolute',top:8,right:10,fontSize:9,fontWeight:900,letterSpacing:.8,background:'rgba(255,255,255,.2)',padding:'3px 8px',borderRadius:99}}>{decided?'🏆 WINNER':'▲ LEADING'}</div>}
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <div style={{width:44,height:44,borderRadius:12,background:'rgba(255,255,255,.15)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:24,border:'1.5px solid rgba(255,255,255,.35)'}}>{team.emoji}</div>
+          <div style={{minWidth:0}}>
+            <div style={{fontSize:16,fontWeight:900,letterSpacing:-0.3,lineHeight:1.1}}>{team.name}</div>
+            <div style={{fontSize:10,opacity:.8,marginTop:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{team.tagline}</div>
+          </div>
+        </div>
+        {/* Cricket-style total: big score + secondary "overs" line */}
+        <div style={{display:'flex',alignItems:'flex-end',gap:10,marginTop:10}}>
+          <div style={{fontSize:44,fontWeight:900,lineHeight:.9,letterSpacing:-2,fontFamily:T.mono}}>{team.total}</div>
+          <div style={{paddingBottom:5}}>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:1,opacity:.85}}>POINTS</div>
+            <div style={{fontSize:11,opacity:.8,marginTop:1}}>{team.teamOrders} ord · {_fmtAmt(team.teamBasic)} basic</div>
+          </div>
+        </div>
+        {/* Target progress */}
+        <div style={{marginTop:9}}>
+          <div style={{display:'flex',justifyContent:'space-between',fontSize:10,opacity:.85,marginBottom:3}}>
+            <span>Sales vs weekly target</span><span style={{fontWeight:800}}>{team.weeklyTeamTarget>0?team.salesPct+'%':'set target'}</span>
+          </div>
+          <div style={{height:6,borderRadius:99,background:'rgba(255,255,255,.22)',overflow:'hidden'}}>
+            <div style={{height:'100%',width:Math.min(100,team.salesPct)+'%',background:'#fff',borderRadius:99}}/>
+          </div>
+        </div>
+      </div>
+      {/* Batting-card style player rows */}
+      <div>
+        <div style={{display:'grid',gridTemplateColumns:'1.5fr repeat(3,1fr) auto',gap:4,padding:'7px 12px',fontSize:9,fontWeight:800,letterSpacing:.4,color:T.ink4,borderBottom:`1px solid ${T.line}`,textTransform:'uppercase'}}>
+          <span>Batter</span><span style={{textAlign:'center'}}>Ord</span><span style={{textAlign:'center'}}>Rev</span><span style={{textAlign:'center'}}>Tele</span><span style={{textAlign:'right'}}>Pts</span>
+        </div>
+        {team.players.map((p,i)=>(
+          <div key={p.name} style={{display:'grid',gridTemplateColumns:'1.5fr repeat(3,1fr) auto',gap:4,padding:'9px 12px',alignItems:'center',borderBottom:i<team.players.length-1?`1px solid ${T.line}`:'none'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,minWidth:0}}>
+              <LeagueAvatar name={p.name} team={team} size={30} captain={p.captain}/>
+              <div style={{minWidth:0}}>
+                <div style={{fontSize:12,fontWeight:800,color:T.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{p.name}</div>
+                <div style={{fontSize:9.5,color:T.ink4,fontFamily:T.mono}}>{_fmtAmt(p.auto.basic)}{p.captain?' · capt':''}</div>
+              </div>
+            </div>
+            <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.auto.orderCount}</span>
+            <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.man.reviews}</span>
+            <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.man.teleConv+p.man.teleConvReview}</span>
+            <span style={{textAlign:'right',fontFamily:T.mono,fontSize:14,fontWeight:900,color:team.accent}}>{p.pts}</span>
+          </div>
+        ))}
+        {/* Sales-value % contribution line */}
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 12px',background:T.paper2||'#f7f7f8',fontSize:11}}>
+          <span style={{color:T.ink3,fontWeight:600}}>+ Sales value % (team)</span>
+          <span style={{fontFamily:T.mono,fontWeight:900,color:team.accent}}>+{team.salesPct}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LeagueScreen({ctx}) {
+  const {user,orders,league,nav,loadLeague,leagueLoading,doSaveLeagueScore,doSaveLeagueConfig} = ctx;
+  const canEdit = hasManagerAccess(user);         // manager or admin
+  const [weekOff,setWeekOff] = useState(0);
+  const [showRules,setShowRules] = useState(false);
+  const [showAdmin,setShowAdmin] = useState(false);
+  useEffect(()=>{ loadLeague(); loadOrdersSafe(); },[]);
+  function loadOrdersSafe(){ try{ ctx.loadOrders&&ctx.loadOrders({silent:true}); }catch(e){} }
+
+  const wk = leagueWeek(weekOff);
+  const decided = wk.endISO < _todayISO();        // week is over → result locked
+  const std = computeLeague(orders, league, wk);
+  const [a,b] = std.teams;
+
+  // ── Admin editor state ──
+  const [editDate,setEditDate] = useState(_todayISO());
+  const [monthlyTarget,setMonthlyTarget] = useState(String((league&&league.monthlyTarget)||''));
+  const [som,setSom] = useState((league&&league.salesmanOfMonth)||'');
+  useEffect(()=>{ setMonthlyTarget(String((league&&league.monthlyTarget)||'')); setSom((league&&league.salesmanOfMonth)||''); },[league&&league.monthlyTarget,league&&league.salesmanOfMonth]);
+  // Existing manual entry for a given (date, player), so the inputs pre-fill.
+  function entryFor(date,player){
+    return ((league&&league.scores)||[]).find(s=>String(s.date||'').slice(0,10)===date && String(s.player||'').trim().toLowerCase()===player.toLowerCase()) || {};
+  }
+  const [draftRows,setDraftRows] = useState({});   // keyed by player → field values while editing
+  useEffect(()=>{
+    // Re-seed the draft inputs whenever the edit date (or loaded scores) change.
+    const seed={};
+    LEAGUE_TEAMS.forEach(t=>t.players.forEach(p=>{
+      const e=entryFor(editDate,p.name); const row={};
+      LEAGUE_MANUAL_FIELDS.forEach(f=>row[f.key]=String(Number(e[f.key])||0));
+      seed[p.name]=row;
+    }));
+    setDraftRows(seed);
+  },[editDate,league&&league.scores]);
+  const [savingPlayer,setSavingPlayer]=useState('');
+  async function savePlayerRow(team,pl){
+    setSavingPlayer(pl.name);
+    const row=draftRows[pl.name]||{};
+    const payload={ date:editDate, player:pl.name, team:team.name, notes:'' };
+    LEAGUE_MANUAL_FIELDS.forEach(f=>payload[f.key]=Number(row[f.key])||0);
+    await doSaveLeagueScore(payload);
+    setSavingPlayer('');
+  }
+  function setDraft(player,key,val){ setDraftRows(p=>({...p,[player]:{...(p[player]||{}),[key]:val}})); }
+
+  const inputStyle={width:'100%',height:32,border:`1px solid ${T.line}`,borderRadius:6,textAlign:'center',fontFamily:T.mono,fontSize:13,fontWeight:700,color:T.ink};
+
+  return (
+    <div className="screen">
+      {/* Header */}
+      <div style={{flexShrink:0,background:'linear-gradient(100deg,#0b2a6b 0%,#12173a 50%,#7a1420 100%)',color:'#fff',padding:'12px 16px 14px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.12)',border:'1px solid rgba(255,255,255,.2)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.home('#fff',18)}</button>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,opacity:.8}}>🏏 ONE LEAGUE · TWO TEAMS · ONE CHAMPION</div>
+            <div style={{fontSize:20,fontWeight:900,letterSpacing:-0.5}}>4S Premier League</div>
+          </div>
+          <button onClick={()=>loadLeague()} title="Refresh" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.12)',border:'1px solid rgba(255,255,255,.2)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.refresh('#fff',15)}</button>
+        </div>
+        {/* Week navigator */}
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:12,background:'rgba(0,0,0,.22)',borderRadius:8,padding:'6px 8px'}}>
+          <button onClick={()=>setWeekOff(w=>w-1)} style={{width:28,height:28,borderRadius:6,background:'rgba(255,255,255,.14)',border:'none',color:'#fff',fontSize:15,cursor:'pointer'}}>‹</button>
+          <div style={{textAlign:'center'}}>
+            <div style={{fontSize:13,fontWeight:800}}>{wk.label}</div>
+            <div style={{fontSize:9.5,opacity:.75,letterSpacing:.5}}>{weekOff===0?'THIS WEEK · winner decided Sunday':(decided?'COMPLETED WEEK':'UPCOMING WEEK')}</div>
+          </div>
+          <button onClick={()=>setWeekOff(w=>w+1)} disabled={weekOff>=0} style={{width:28,height:28,borderRadius:6,background:weekOff>=0?'rgba(255,255,255,.05)':'rgba(255,255,255,.14)',border:'none',color:'#fff',fontSize:15,cursor:weekOff>=0?'default':'pointer',opacity:weekOff>=0?.4:1}}>›</button>
+        </div>
+      </div>
+
+      <div className="scroll" style={{background:T.paper}}>
+        {/* Result banner */}
+        <div style={{padding:'12px 16px 4px'}}>
+          {std.leader ? (
+            <div style={{borderRadius:12,padding:'12px 14px',background:std.leader.grad,color:'#fff',display:'flex',alignItems:'center',gap:12}}>
+              <div style={{fontSize:30}}>{decided?'🏆':'🔥'}</div>
+              <div style={{flex:1}}>
+                <div style={{fontSize:10,fontWeight:800,letterSpacing:1,opacity:.85}}>{decided?'CHAMPIONS OF THE WEEK':'CURRENTLY LEADING'}</div>
+                <div style={{fontSize:18,fontWeight:900,letterSpacing:-0.4}}>{std.leader.name}</div>
+              </div>
+              <div style={{textAlign:'right'}}>
+                <div style={{fontSize:22,fontWeight:900,fontFamily:T.mono,lineHeight:1}}>{a.total}<span style={{opacity:.6,fontSize:15}}> · </span>{b.total}</div>
+                <div style={{fontSize:9,opacity:.8,letterSpacing:.5}}>STRIKERS · TITANS</div>
+              </div>
+            </div>
+          ) : (
+            <div style={{borderRadius:12,padding:'12px 14px',background:T.ink,color:'#fff',textAlign:'center'}}>
+              <div style={{fontSize:13,fontWeight:800}}>🤝 Scores level — {a.total} apiece</div>
+              <div style={{fontSize:10,opacity:.8,marginTop:1}}>It's all to play for</div>
+            </div>
+          )}
+        </div>
+
+        {/* Two team scorecards */}
+        <div style={{padding:'8px 16px',display:'flex',flexDirection:'column',gap:12}}>
+          <LeagueTeamCard team={a} isLeader={std.leader===a} decided={decided}/>
+          <div style={{textAlign:'center',fontSize:13,fontWeight:900,color:T.ink4,letterSpacing:2}}>— VS —</div>
+          <LeagueTeamCard team={b} isLeader={std.leader===b} decided={decided}/>
+        </div>
+
+        {/* Awards */}
+        <div style={{padding:'4px 16px 8px'}}>
+          <div style={{fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:1.2,margin:'6px 2px'}}>WEEKLY HONOURS</div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+            <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:10,padding:'10px 12px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:6}}><span style={{fontSize:16}}>🧢</span><span style={{fontSize:11,fontWeight:800,color:'#e07b1a'}}>Orange Cap</span></div>
+              <div style={{fontSize:9.5,color:T.ink4,marginTop:1}}>Highest sales this week</div>
+              <div style={{fontSize:14,fontWeight:900,color:T.ink,marginTop:4}}>{std.orangeCap?std.orangeCap.name:'—'}</div>
+              {std.orangeCap&&<div style={{fontSize:10,fontFamily:T.mono,color:T.ink3}}>{_fmtAmt(std.orangeCap.auto.basic)} basic</div>}
+            </div>
+            <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:10,padding:'10px 12px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:6}}><span style={{fontSize:16}}>🧢</span><span style={{fontSize:11,fontWeight:800,color:'#8a3ffc'}}>Purple Cap</span></div>
+              <div style={{fontSize:9.5,color:T.ink4,marginTop:1}}>Most orders (excl. B2B)</div>
+              <div style={{fontSize:14,fontWeight:900,color:T.ink,marginTop:4}}>{std.purpleCap?std.purpleCap.name:'—'}</div>
+              {std.purpleCap&&<div style={{fontSize:10,fontFamily:T.mono,color:T.ink3}}>{std.purpleCap.auto.orderCount} orders</div>}
+            </div>
+          </div>
+          <div style={{marginTop:10,background:'linear-gradient(100deg,#3a2a00,#7a5a00)',color:'#fff',borderRadius:10,padding:'12px 14px',display:'flex',alignItems:'center',gap:12}}>
+            <span style={{fontSize:24}}>🏆</span>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,fontWeight:800,letterSpacing:.5,opacity:.9}}>SALESMAN OF THE MONTH</div>
+              <div style={{fontSize:9.5,opacity:.75}}>Player of the series · chosen by management</div>
+            </div>
+            <div style={{fontSize:15,fontWeight:900}}>{(league&&league.salesmanOfMonth)||'TBD'}</div>
+          </div>
+        </div>
+
+        {/* Rules (collapsible) */}
+        <div style={{padding:'4px 16px 8px'}}>
+          <button onClick={()=>setShowRules(v=>!v)} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 14px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:10,cursor:'pointer'}}>
+            <span style={{fontSize:13,fontWeight:800,color:T.ink}}>📋 Point system & rules</span>
+            <span style={{fontSize:12,color:T.ink4}}>{showRules?'Hide ▲':'Show ▼'}</span>
+          </button>
+          {showRules&&(
+            <div style={{background:'#fff',border:`1px solid ${T.line}`,borderTop:'none',borderRadius:'0 0 10px 10px',marginTop:-2,padding:'10px 14px 14px'}}>
+              {[
+                ['2 teams','play for the monthly target, split into two equal halves'],
+                ['Each sales conversion','+1 point (auto from orders, excl. B2B)'],
+                ['Each review','+1 point'],
+                ['Total sales value (basic) %','team score = % of target achieved (100% → 100 pts)'],
+                ['Negative points','−1 each for missed follow-ups, timings, dress code / presentation'],
+                ['Happy calling','+1 point per customer'],
+                ['Tele-calling / leads follow-up + conversion','+4 bonus points'],
+                ['Tele-calling + conversion + review','+6 bonus points'],
+              ].map((r,i)=>(
+                <div key={i} style={{display:'flex',gap:8,padding:'6px 0',borderBottom:i<7?`1px solid ${T.line}`:'none'}}>
+                  <span style={{flexShrink:0,width:20,height:20,borderRadius:99,background:T.ink,color:'#fff',fontSize:10,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center'}}>{i+1}</span>
+                  <div><span style={{fontSize:12,fontWeight:700,color:T.ink}}>{r[0]}</span> <span style={{fontSize:12,color:T.ink3}}>— {r[1]}</span></div>
+                </div>
+              ))}
+              <div style={{marginTop:8,fontSize:11,color:T.ink4,fontStyle:'italic'}}>The team with the maximum points wins. Winner is decided weekly (every Sunday).</div>
+            </div>
+          )}
+        </div>
+
+        {/* Admin — daily score entry */}
+        {canEdit&&(
+          <div style={{padding:'4px 16px 8px'}}>
+            <button onClick={()=>setShowAdmin(v=>!v)} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 14px',background:T.ink,color:'#fff',border:'none',borderRadius:10,cursor:'pointer'}}>
+              <span style={{fontSize:13,fontWeight:800}}>⚙️ Update scores (admin)</span>
+              <span style={{fontSize:12,opacity:.8}}>{showAdmin?'Hide ▲':'Open ▼'}</span>
+            </button>
+            {showAdmin&&(
+              <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:'0 0 10px 10px',marginTop:-2,padding:'12px 14px 16px'}}>
+                {/* Config */}
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:14}}>
+                  <div>
+                    <label style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.5}}>MONTHLY TARGET (₹, basic)</label>
+                    <div style={{display:'flex',gap:6,marginTop:4}}>
+                      <input type="number" value={monthlyTarget} onChange={e=>setMonthlyTarget(e.target.value)} placeholder="e.g. 4000000" style={{...inputStyle,textAlign:'left',padding:'0 8px'}}/>
+                      <button onClick={()=>doSaveLeagueConfig({monthlyTarget:Number(monthlyTarget)||0})} style={{flexShrink:0,height:32,padding:'0 12px',borderRadius:6,background:T.green,color:'#fff',border:'none',fontSize:12,fontWeight:700,cursor:'pointer'}}>Save</button>
+                    </div>
+                  </div>
+                  <div>
+                    <label style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.5}}>SALESMAN OF THE MONTH</label>
+                    <div style={{display:'flex',gap:6,marginTop:4}}>
+                      <select value={som} onChange={e=>setSom(e.target.value)} style={{...inputStyle,textAlign:'left',padding:'0 6px'}}>
+                        <option value="">— none —</option>
+                        {LEAGUE_TEAMS.flatMap(t=>t.players).map(p=><option key={p.name} value={p.name}>{p.name}</option>)}
+                      </select>
+                      <button onClick={()=>doSaveLeagueConfig({salesmanOfMonth:som})} style={{flexShrink:0,height:32,padding:'0 12px',borderRadius:6,background:T.green,color:'#fff',border:'none',fontSize:12,fontWeight:700,cursor:'pointer'}}>Save</button>
+                    </div>
+                  </div>
+                </div>
+                <div style={{fontSize:11,color:T.ink4,background:T.paper2||'#f7f7f8',borderRadius:6,padding:'7px 10px',marginBottom:12}}>Orders &amp; sales value are pulled automatically. Enter the daily manual criteria below — pick the date, fill each player, and Save. The scoreboard updates instantly.</div>
+                {/* Date */}
+                <label style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.5}}>SCORE DATE</label>
+                <input type="date" value={editDate} max={_todayISO()} onChange={e=>setEditDate(e.target.value)} style={{...inputStyle,textAlign:'left',padding:'0 8px',marginTop:4,marginBottom:12}}/>
+                {/* Per-player editors */}
+                {LEAGUE_TEAMS.map(team=>(
+                  <div key={team.id} style={{marginBottom:12}}>
+                    <div style={{fontSize:11,fontWeight:900,color:team.accent,letterSpacing:.5,margin:'2px 0 6px'}}>{team.emoji} {team.name}</div>
+                    {team.players.map(pl=>(
+                      <div key={pl.name} style={{border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 10px 12px',marginBottom:8}}>
+                        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+                          <LeagueAvatar name={pl.name} team={team} size={26} captain={pl.captain}/>
+                          <div style={{fontSize:13,fontWeight:800,color:T.ink,flex:1}}>{pl.name}</div>
+                          <button onClick={()=>savePlayerRow(team,pl)} disabled={savingPlayer===pl.name} style={{height:28,padding:'0 12px',borderRadius:6,background:team.accent,color:'#fff',border:'none',fontSize:11,fontWeight:800,cursor:'pointer',opacity:savingPlayer===pl.name?.6:1}}>{savingPlayer===pl.name?'…':'Save'}</button>
+                        </div>
+                        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+                          {LEAGUE_MANUAL_FIELDS.map(f=>(
+                            <div key={f.key} style={{display:'flex',alignItems:'center',gap:6}}>
+                              <div style={{flex:1,minWidth:0}}>
+                                <div style={{fontSize:10.5,fontWeight:700,color:f.tone==='bad'?T.bad:T.ink2,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{f.label}</div>
+                                <div style={{fontSize:9,color:T.ink4}}>{f.pts} pt</div>
+                              </div>
+                              <input type="number" min="0" value={(draftRows[pl.name]&&draftRows[pl.name][f.key])??'0'} onChange={e=>setDraft(pl.name,f.key,e.target.value)} style={{...inputStyle,width:52,flexShrink:0}}/>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        <div style={{height:28}}/>
+      </div>
+      <BottomNav screen="home" nav={nav}/>
+    </div>
+  );
+}
+
 function ReportsScreen({ctx}) {
   const {orders,nav} = ctx;
   const [from,setFrom]     = useState('');
@@ -2943,6 +3388,13 @@ function HomeScreen({ctx}) {
           <button onClick={()=>nav('reports')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 18px',background:T.green,color:'#fff',border:'none',borderRadius:8,cursor:'pointer',textAlign:'left'}}>
             <div><div style={{fontSize:11,fontWeight:600,opacity:.7,letterSpacing:.5,textTransform:'uppercase'}}>REPORTS</div><div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4,marginTop:2}}>Sales summary</div></div>
             <div style={{width:40,height:40,borderRadius:99,background:'#fff',display:'flex',alignItems:'center',justifyContent:'center'}}>{Icon.doc(T.green,20)}</div>
+          </button>
+        </div>
+        {/* 4S Premier League — live team scoreboard */}
+        <div style={{padding:'0 18px 12px'}}>
+          <button onClick={()=>nav('league')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 18px',background:'linear-gradient(100deg,#0b2a6b 0%,#12173a 48%,#7a1420 100%)',color:'#fff',border:'none',borderRadius:8,cursor:'pointer',textAlign:'left',boxShadow:'0 4px 14px rgba(10,20,60,.25)'}}>
+            <div><div style={{fontSize:11,fontWeight:700,opacity:.8,letterSpacing:1,textTransform:'uppercase'}}>🏏 LIVE SCOREBOARD</div><div style={{fontSize:18,fontWeight:800,letterSpacing:-0.3,marginTop:2}}>4S Premier League</div><div style={{fontSize:11,opacity:.75,marginTop:1}}>Strikers vs Titans · winner every Sunday</div></div>
+            <div style={{fontSize:26}}>🏆</div>
           </button>
         </div>
         {/* Outstanding payments — live total still to collect across all booked orders */}
