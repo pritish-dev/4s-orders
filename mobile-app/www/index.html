@@ -3163,12 +3163,58 @@ function SwatchChip({src}) {
   return <span style={{width:40,height:40,borderRadius:10,border:'1px solid rgba(0,0,0,.12)',overflow:'hidden',background:T.paper2,display:'inline-block'}}><img src={src} loading="lazy" alt="" onError={()=>setErr(true)} style={{width:'100%',height:'100%',objectFit:'cover'}}/></span>;
 }
 
+// ─── Manual item entry ───────────────────────────────────────────
+// For items that aren't in the price list: the salesperson types the item code,
+// description and price by hand and the item is added to the order like any
+// other. The price entered is the customer-facing MRP (GST-inclusive) — the same
+// terms as the MRP / SELL boxes on the order form — so the rest of the flow
+// (order form, PDF, GST breakup, saving) treats it identically to a catalog item.
+function ManualItemSheet({onClose, onAdd, initialName}) {
+  const [code,setCode] = React.useState('');
+  const [name,setName] = React.useState(initialName||'');
+  const [price,setPrice] = React.useState('');
+  const [tried,setTried] = React.useState(false);
+  const codeOk  = code.trim().length>0;
+  const nameOk  = name.trim().length>0;
+  const priceNum= parseFloat(price);
+  const priceOk = isFinite(priceNum) && priceNum>0;
+  const valid   = codeOk && nameOk && priceOk;
+  function submit(){
+    setTried(true);
+    if(!valid) return;
+    onAdd({code:code.trim(), name:name.trim(), price:priceNum});
+  }
+  return (
+    <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(10,15,13,.45)',zIndex:9997,display:'flex',alignItems:'flex-end',justifyContent:'center'}}>
+      <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:430,background:T.paper,borderTopLeftRadius:16,borderTopRightRadius:16,maxHeight:'88vh',display:'flex',flexDirection:'column',animation:'slideUp .2s ease'}}>
+        <div style={{width:38,height:4,borderRadius:99,background:T.line2||T.line,margin:'9px auto 2px',flexShrink:0}}/>
+        <div className="scroll" style={{paddingBottom:14}}>
+          <div style={{padding:'12px 16px 2px'}}>
+            <div style={{fontSize:19,fontWeight:800,letterSpacing:-0.4,lineHeight:1.18}}>Add a manual item</div>
+            <div style={{fontSize:12,color:T.ink4,marginTop:4,lineHeight:1.5}}>Not in the price list? Enter the item code, description and price by hand. Everything else about the order stays the same.</div>
+          </div>
+          <div style={{margin:'12px 16px',border:`1px solid ${T.line}`,borderRadius:12,overflow:'hidden'}}>
+            <Field label="Item Code" value={code} onChange={setCode} mono required placeholder="e.g. CUSTOM-001" error={tried&&!codeOk?'Enter the item code':''}/>
+            <Field label="Item Description" value={name} onChange={setName} multiline required placeholder="Full product description" error={tried&&!nameOk?'Enter a description':''}/>
+            <Field label="Price ₹ (incl. 18% GST)" value={price} onChange={v=>setPrice(v.replace(/[^\d.]/g,''))} mono required type="tel" placeholder="Customer price incl. GST" hint="The customer-facing MRP. Add a discount later on the order form if needed." error={tried&&!priceOk?'Enter a valid price':''}/>
+          </div>
+          <div style={{padding:'2px 16px 4px'}}>
+            <Btn primary full icon={Icon.plus('#fff',15)} onClick={submit} disabled={!valid}>Add to order</Btn>
+            <button onClick={onClose} style={{width:'100%',marginTop:8,background:'none',border:'none',color:T.ink4,fontSize:13,fontWeight:600,cursor:'pointer',padding:'8px 0'}}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SearchScreen({ctx}) {
   const {items, priceItems, syncedAt, priceSyncedAt, nav, back, order, setOrder, syncPriceList, loading} = ctx;
   // Product Catalog map (photos + specs), looked up by each item's catKey. Read
   // from localStorage and re-parsed whenever the price list is re-synced.
   const catalog = React.useMemo(() => { try { return JSON.parse(localStorage.getItem('4s_catalog_v1')||'{}'); } catch { return {}; } }, [priceSyncedAt, priceItems.length]);
   const [preview, setPreview] = React.useState(null);
+  const [manualEntry, setManualEntry] = React.useState(false);
   const [q,   setQ]   = useState('');
   const [cat, setCat] = useState('all');
   const cartCount = (order.items||[]).reduce((s,i)=>s+(i.qty||0),0);
@@ -3268,11 +3314,24 @@ function SearchScreen({ctx}) {
         // (34S preferred) and the salesperson can override it.
         whOptions:warehouseOptionsOf(item.stock),
         whTag:warehouseDefaultOf(item.stock),
+        // Hand-entered item (not from the price list): item code, description and
+        // price were typed by the salesperson.
+        manual:!!item.manual,
       }];
     }
     setOrder({...order,items:newItems});
     const totalStock = (item.stock||[]).reduce((s,x)=>s+x.q,0);
-    ctx.showToast(totalStock===0?item.name.slice(0,22)+'… added (OOS)':item.name.slice(0,30)+'… added', totalStock===0?'warn':'ok');
+    const oos = totalStock===0 && !item.manual;   // manual items have no stock — don't flag them OOS
+    ctx.showToast(oos?item.name.slice(0,22)+'… added (OOS)':item.name.slice(0,30)+'… added', oos?'warn':'ok');
+  }
+
+  // Add a hand-entered item that isn't in the price list. The typed price is the
+  // customer MRP (GST-inclusive); store the pre-GST base so the rest of the app —
+  // which adds 18% GST for display — shows exactly what was typed.
+  function addManualItem({code, name, price}) {
+    const base = Number(price) / (1 + GST_RATE);
+    addToOrder({ code, name, cat:'Manual entry', item:'', mrp:base, cpl:base, stock:[], manual:true });
+    setManualEntry(false);
   }
 
   return (
@@ -3370,6 +3429,12 @@ function SearchScreen({ctx}) {
               />
               {q&&<span onClick={()=>setQ('')} style={{cursor:'pointer',lineHeight:1,padding:'0 2px'}}>{Icon.close(T.ink4)}</span>}
               {q&&<span style={{fontFamily:T.mono,fontSize:11,color:T.ink4,flexShrink:0}}>{filtered.length}</span>}
+            </div>
+            {/* Item not in the price list? Enter it by hand. */}
+            <div style={{marginTop:8,textAlign:'center'}}>
+              <span onClick={()=>setManualEntry(true)} style={{fontSize:12,color:T.green,fontWeight:700,cursor:'pointer',display:'inline-flex',alignItems:'center',gap:4}}>
+                {Icon.plus(T.green,13)} Item not in the list? Add it manually
+              </span>
             </div>
           </div>
         )}
@@ -3477,12 +3542,14 @@ function SearchScreen({ctx}) {
           <div style={{padding:40,textAlign:'center'}}>
             <div style={{fontSize:15,fontWeight:700,color:T.bad,marginBottom:8}}>No match found</div>
             <div style={{fontSize:13,color:T.ink4,lineHeight:1.6,marginBottom:16}}>"{q}" is not in the {cat!=='all'?cat+' ':''}price list.</div>
-            <div style={{fontSize:12,color:T.ink4,lineHeight:1.7}}>
+            <div style={{fontSize:12,color:T.ink4,lineHeight:1.7,marginBottom:18}}>
               <b>Tips:</b><br/>
               • Try fewer words: <i>osiris</i> instead of <i>osiris media unit blue</i><br/>
               • Use the product series name or item code<br/>
               • Switch category (All / Home Furniture & Storage / Mattress)
             </div>
+            <Btn primary icon={Icon.plus('#fff',15)} onClick={()=>setManualEntry(true)}>Add "{q}" as a manual item</Btn>
+            <div style={{fontSize:11,color:T.ink4,marginTop:8}}>Enter the item code, description &amp; price by hand.</div>
           </div>
         )}
         {hasPriceList&&filtered.length===0&&!q&&(
@@ -3500,6 +3567,7 @@ function SearchScreen({ctx}) {
         </div>
       )}
       {preview && <ProductSheet item={preview} cat={catalog[preview.catKey]} onClose={()=>setPreview(null)} onAdd={()=>{addToOrder(preview);setPreview(null);}}/>}
+      {manualEntry && <ManualItemSheet initialName={q} onClose={()=>setManualEntry(false)} onAdd={addManualItem}/>}
       <BottomNav screen="search" nav={nav}/>
     </div>
   );
