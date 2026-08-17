@@ -2661,9 +2661,11 @@ function handleLeagueGet(p) {
         rows.push(o);
       });
     }
-    var target = Number(PropertiesService.getScriptProperties().getProperty('LEAGUE_MONTHLY_TARGET')) || 0;
-    var som    = PropertiesService.getScriptProperties().getProperty('LEAGUE_SALESMAN_OF_MONTH') || '';
-    return { ok: true, scores: rows, monthlyTarget: target, salesmanOfMonth: som, scriptVersion: SCRIPT_VERSION };
+    var props   = PropertiesService.getScriptProperties();
+    var target  = Number(props.getProperty('LEAGUE_MONTHLY_TARGET')) || 0;
+    var wTarget = Number(props.getProperty('LEAGUE_WEEKLY_TARGET')) || 0;
+    var som     = props.getProperty('LEAGUE_SALESMAN_OF_MONTH') || '';
+    return { ok: true, scores: rows, monthlyTarget: target, weeklyTarget: wTarget, salesmanOfMonth: som, scriptVersion: SCRIPT_VERSION };
   } catch (e) { return { ok: false, error: e.message }; }
 }
 
@@ -2719,10 +2721,13 @@ function handleLeagueSaveConfig(body) {
     if (body && body.monthlyTarget !== undefined && body.monthlyTarget !== null && body.monthlyTarget !== '') {
       props.setProperty('LEAGUE_MONTHLY_TARGET', String(Math.max(0, Math.round(Number(body.monthlyTarget) || 0))));
     }
+    if (body && body.weeklyTarget !== undefined && body.weeklyTarget !== null && body.weeklyTarget !== '') {
+      props.setProperty('LEAGUE_WEEKLY_TARGET', String(Math.max(0, Math.round(Number(body.weeklyTarget) || 0))));
+    }
     if (body && body.salesmanOfMonth !== undefined) {
       props.setProperty('LEAGUE_SALESMAN_OF_MONTH', String(body.salesmanOfMonth || ''));
     }
-    _appendLog(by, '', 'LEAGUE_CONFIG', 'target=' + (body && body.monthlyTarget) + ' som=' + (body && body.salesmanOfMonth));
+    _appendLog(by, '', 'LEAGUE_CONFIG', 'monthly=' + (body && body.monthlyTarget) + ' weekly=' + (body && body.weeklyTarget) + ' som=' + (body && body.salesmanOfMonth));
     return { ok: true, scriptVersion: SCRIPT_VERSION };
   } catch (e) { return { ok: false, error: e.message }; }
 }

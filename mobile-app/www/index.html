@@ -1924,7 +1924,7 @@ function App() {
   const [misLoading,    setMisLoading]   = useState(false);
   const [misDiag,       setMisDiag]      = useState(null);   // backend diagnostics (tab used, rows, etc.)
   // 4S Premier League — manual daily scores + config (monthly target, salesman of the month).
-  const [league,        setLeague]       = useState(() => { try { return JSON.parse(localStorage.getItem('4s_league')||'{"scores":[],"monthlyTarget":0,"salesmanOfMonth":""}'); } catch { return {scores:[],monthlyTarget:0,salesmanOfMonth:''}; } });
+  const [league,        setLeague]       = useState(() => { try { return JSON.parse(localStorage.getItem('4s_league')||'{"scores":[],"monthlyTarget":0,"weeklyTarget":0,"salesmanOfMonth":""}'); } catch { return {scores:[],monthlyTarget:0,weeklyTarget:0,salesmanOfMonth:''}; } });
   const [leagueLoading, setLeagueLoading]= useState(false);
 
   const showToast = (msg,type='ok') => setToast({msg,type});
@@ -2184,7 +2184,7 @@ function App() {
     try {
       const res = await apiGet('leagueScores', {}, 30000, 2);
       if (res && res.ok) {
-        const data = { scores: res.scores || [], monthlyTarget: Number(res.monthlyTarget)||0, salesmanOfMonth: res.salesmanOfMonth || '' };
+        const data = { scores: res.scores || [], monthlyTarget: Number(res.monthlyTarget)||0, weeklyTarget: Number(res.weeklyTarget)||0, salesmanOfMonth: res.salesmanOfMonth || '' };
         setLeague(data);
         localStorage.setItem('4s_league', JSON.stringify(data));
         return data;
@@ -2657,16 +2657,19 @@ function leagueWeek(offset){
   return { start, end, startISO:_isoOf(start), endISO:_isoOf(end), label:fmt(start)+' – '+fmt(end), month:start.getMonth(), year:start.getFullYear() };
 }
 function _daysInMonth(y,m){ return new Date(y,m+1,0).getDate(); }
-// Live orders → per-player order count (excl. B2B) and net-basic value (excl. 4S).
+// Live orders → per-player order count and net-basic value. B2B orders are
+// excluded ENTIRELY (neither counted nor valued); the 4S sales channel is also
+// stripped out of the value so only the net-basic franchise sale counts.
 function leagueAuto(orders, matchKey, startISO, endISO){
   let orderCount=0, basic=0;
   (orders||[]).forEach(o=>{
     if(!o || o.status==='draft') return;
+    if(String(o.orderType||'').toUpperCase()==='B2B') return;         // B2B excluded from count AND value
     const iso=_toISO(o.date); if(!iso) return;
     if(startISO && iso<startISO) return;
     if(endISO   && iso>endISO)   return;
     if(!String(o.salesExec||'').toLowerCase().includes(matchKey)) return;
-    if(String(o.orderType||'').toUpperCase()!=='B2B') orderCount++;   // orders booked (excl. B2B)
+    orderCount++;                                                     // orders booked (excl. B2B)
     basic += _channelSplit(o).franchise;                             // net basic (excl. 4S channel)
   });
   return { orderCount, basic };
@@ -2686,10 +2689,15 @@ function leagueManualSum(scores, playerName, startISO, endISO){
 // Full computed standings for a week.
 function computeLeague(orders, league, wk){
   const monthlyTarget = Number(league&&league.monthlyTarget)||0;
+  const weeklyTarget  = Number(league&&league.weeklyTarget)||0;   // whole-showroom weekly target (admin-set)
   const scores = (league&&league.scores)||[];
-  // Each team's target for THIS week = (monthly target ÷ 2) pro-rated to 7 days.
+  // Each team's weekly target. An admin-set weekly target (which fluctuates with
+  // the previous week's performance) wins; otherwise fall back to the monthly
+  // target ÷ 2 pro-rated to 7 days. Either way it's the showroom figure split
+  // equally between the two teams.
   const dim = _daysInMonth(wk.year, wk.month);
-  const weeklyTeamTarget = monthlyTarget>0 ? Math.round((monthlyTarget/2)*7/dim) : 0;
+  const weeklyTeamTarget = weeklyTarget>0 ? Math.round(weeklyTarget/2)
+    : (monthlyTarget>0 ? Math.round((monthlyTarget/2)*7/dim) : 0);
   const teams = LEAGUE_TEAMS.map(team=>{
     const players = team.players.map(pl=>{
       const auto = leagueAuto(orders, pl.match, wk.startISO, wk.endISO);
@@ -2810,8 +2818,9 @@ function LeagueScreen({ctx}) {
   // ── Admin editor state ──
   const [editDate,setEditDate] = useState(_todayISO());
   const [monthlyTarget,setMonthlyTarget] = useState(String((league&&league.monthlyTarget)||''));
+  const [weeklyTarget,setWeeklyTarget]   = useState(String((league&&league.weeklyTarget)||''));
   const [som,setSom] = useState((league&&league.salesmanOfMonth)||'');
-  useEffect(()=>{ setMonthlyTarget(String((league&&league.monthlyTarget)||'')); setSom((league&&league.salesmanOfMonth)||''); },[league&&league.monthlyTarget,league&&league.salesmanOfMonth]);
+  useEffect(()=>{ setMonthlyTarget(String((league&&league.monthlyTarget)||'')); setWeeklyTarget(String((league&&league.weeklyTarget)||'')); setSom((league&&league.salesmanOfMonth)||''); },[league&&league.monthlyTarget,league&&league.weeklyTarget,league&&league.salesmanOfMonth]);
   // Existing manual entry for a given (date, player), so the inputs pre-fill.
   function entryFor(date,player){
     return ((league&&league.scores)||[]).find(s=>String(s.date||'').slice(0,10)===date && String(s.player||'').trim().toLowerCase()===player.toLowerCase()) || {};
@@ -2957,8 +2966,8 @@ function LeagueScreen({ctx}) {
             </button>
             {showAdmin&&(
               <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:'0 0 10px 10px',marginTop:-2,padding:'12px 14px 16px'}}>
-                {/* Config */}
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:14}}>
+                {/* Config — targets */}
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:10}}>
                   <div>
                     <label style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.5}}>MONTHLY TARGET (₹, basic)</label>
                     <div style={{display:'flex',gap:6,marginTop:4}}>
@@ -2967,17 +2976,25 @@ function LeagueScreen({ctx}) {
                     </div>
                   </div>
                   <div>
-                    <label style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.5}}>SALESMAN OF THE MONTH</label>
+                    <label style={{fontSize:10,fontWeight:700,color:T.accent||'#1560d0',letterSpacing:.5}}>WEEKLY TARGET (₹, basic)</label>
                     <div style={{display:'flex',gap:6,marginTop:4}}>
-                      <select value={som} onChange={e=>setSom(e.target.value)} style={{...inputStyle,textAlign:'left',padding:'0 6px'}}>
-                        <option value="">— none —</option>
-                        {LEAGUE_TEAMS.flatMap(t=>t.players).map(p=><option key={p.name} value={p.name}>{p.name}</option>)}
-                      </select>
-                      <button onClick={()=>doSaveLeagueConfig({salesmanOfMonth:som})} style={{flexShrink:0,height:32,padding:'0 12px',borderRadius:6,background:T.green,color:'#fff',border:'none',fontSize:12,fontWeight:700,cursor:'pointer'}}>Save</button>
+                      <input type="number" value={weeklyTarget} onChange={e=>setWeeklyTarget(e.target.value)} placeholder="this week" style={{...inputStyle,textAlign:'left',padding:'0 8px'}}/>
+                      <button onClick={()=>doSaveLeagueConfig({weeklyTarget:Number(weeklyTarget)||0})} style={{flexShrink:0,height:32,padding:'0 12px',borderRadius:6,background:T.green,color:'#fff',border:'none',fontSize:12,fontWeight:700,cursor:'pointer'}}>Save</button>
                     </div>
+                    {weeklyTarget!==''&&Number(weeklyTarget)>0&&<button onClick={()=>{setWeeklyTarget('0');doSaveLeagueConfig({weeklyTarget:0});}} style={{marginTop:4,fontSize:10,color:T.ink4,background:'none',border:'none',textDecoration:'underline',cursor:'pointer',padding:0}}>clear (use monthly)</button>}
                   </div>
                 </div>
-                <div style={{fontSize:11,color:T.ink4,background:T.paper2||'#f7f7f8',borderRadius:6,padding:'7px 10px',marginBottom:12}}>Orders &amp; sales value are pulled automatically. Enter the daily manual criteria below — pick the date, fill each player, and Save. The scoreboard updates instantly.</div>
+                <div style={{marginBottom:12}}>
+                  <label style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.5}}>SALESMAN OF THE MONTH</label>
+                  <div style={{display:'flex',gap:6,marginTop:4}}>
+                    <select value={som} onChange={e=>setSom(e.target.value)} style={{...inputStyle,textAlign:'left',padding:'0 6px'}}>
+                      <option value="">— none —</option>
+                      {LEAGUE_TEAMS.flatMap(t=>t.players).map(p=><option key={p.name} value={p.name}>{p.name}</option>)}
+                    </select>
+                    <button onClick={()=>doSaveLeagueConfig({salesmanOfMonth:som})} style={{flexShrink:0,height:32,padding:'0 12px',borderRadius:6,background:T.green,color:'#fff',border:'none',fontSize:12,fontWeight:700,cursor:'pointer'}}>Save</button>
+                  </div>
+                </div>
+                <div style={{fontSize:11,color:T.ink4,background:T.paper2||'#f7f7f8',borderRadius:6,padding:'7px 10px',marginBottom:12}}>Both targets are the <b>whole-showroom</b> basic value and are split equally between the two teams. A <b>weekly target</b>, if set, is used for this week's sales-value % (it wins over the monthly target — set it each week from last week's performance); leave it blank/clear to auto-derive the week from the monthly target. Orders &amp; sales value are pulled automatically (B2B orders are excluded). Fill the daily manual criteria below — pick the date, fill each player, Save. The board updates instantly.</div>
                 {/* Date */}
                 <label style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.5}}>SCORE DATE</label>
                 <input type="date" value={editDate} max={_todayISO()} onChange={e=>setEditDate(e.target.value)} style={{...inputStyle,textAlign:'left',padding:'0 8px',marginTop:4,marginBottom:12}}/>
