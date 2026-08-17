@@ -4357,48 +4357,49 @@ function orderWhatsAppMessage(o) {
   return `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${gstInclLine(i).toLocaleString('en-IN')}`).join('\n')}\n\n*Total (incl. GST):* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${earnest.toLocaleString('en-IN')}\n*Balance:* ₹${balance.toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
 }
 
-// Am I running inside the installed Android/iOS shell (Capacitor WebView)?
-function isNativeApp() {
-  try { return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()); }
-  catch (e) { return false; }
+// The native PdfSaver Capacitor plugin, present only inside the installed app
+// (registered by MainActivity). Returns null in a regular browser. This is the
+// ONLY reliable way to produce/attach a real PDF file inside the Android
+// WebView: jsPDF's doc.save() (a hidden <a download> blob) is silently dropped,
+// and the WebView's navigator.share can't attach files — so both "download" and
+// "share PDF" must go through this plugin when running in the app.
+function nativePdfSaver() {
+  try {
+    const P = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.PdfSaver;
+    return (P && typeof P.save === 'function') ? P : null;
+  } catch (e) { return null; }
 }
 
-// Deliver a freshly generated PDF to the user, using whatever the current
-// environment actually supports. This exists because jsPDF's doc.save() — a
-// blob download on a hidden <a download> — is SILENTLY DROPPED by the Android
-// WebView, so the "Customer PDF"/"Sales PDF" buttons did nothing in the
-// installed APK. Order of preference:
-//   1) Native app with the AndroidPDF save bridge (rebuilt APK): hand the bytes
-//      to the shell, which writes the file to Downloads and opens it.
-//   2) Native app without that bridge (older build): fall back to the OS share
-//      sheet where the WebView supports sharing files.
-//   3) A regular browser (desktop or mobile web): normal doc.save() download —
-//      unchanged behaviour, so the website is unaffected.
+// Base64 payload (no data: prefix) for a generated jsPDF document.
+function pdfBase64(doc) {
+  const uri = doc.output('datauristring');
+  return uri.substring(uri.indexOf('base64,') + 7);
+}
+
+// Save a freshly generated PDF for the user. In the installed app this hands the
+// bytes to the native plugin, which writes the file to the phone's Downloads
+// folder and opens it. In a regular browser it's the normal doc.save() download,
+// so the website is unaffected.
 function deliverPDF(doc, fname, showToast) {
-  const native = isNativeApp();
-  // 1) Installed app with the native save bridge.
-  try {
-    if (native && window.AndroidPDF && typeof window.AndroidPDF.save === 'function') {
-      const uri = doc.output('datauristring');
-      const b64 = uri.substring(uri.indexOf('base64,') + 7);
-      window.AndroidPDF.save(b64, fname);
-      if (showToast) showToast('Saved to Downloads', 'ok');
-      return;
-    }
-  } catch (e) {}
-  // 2) Installed app without the bridge — try the share sheet.
-  try {
-    if (native) {
-      const file = new File([doc.output('blob')], fname, {type:'application/pdf'});
-      if (navigator.canShare && navigator.canShare({files:[file]})) {
-        navigator.share({files:[file]}).catch(()=>{});
-        return;
-      }
-    }
-  } catch (e) {}
-  // 3) Regular browser download (also the last-resort attempt in-app).
+  const P = nativePdfSaver();
+  if (P) {
+    P.save({ data: pdfBase64(doc), filename: fname })
+      .then(() => { if (showToast) showToast('Saved to Downloads', 'ok'); })
+      .catch(() => { if (showToast) showToast('Could not save the PDF', 'bad'); });
+    return;
+  }
   try { doc.save(fname); }
   catch (e) { if (showToast) showToast('Could not save the PDF', 'bad'); }
+}
+
+// Share a generated PDF with a caption via the native share sheet (installed
+// app). Returns true if the native share was launched, false if not native so
+// the caller can run its browser fallback.
+async function nativeSharePDF(doc, fname, text) {
+  const P = nativePdfSaver();
+  if (!P || typeof P.share !== 'function') return false;
+  await P.share({ data: pdfBase64(doc), filename: fname, text: text || '' });
+  return true;
 }
 
 // Share the order PDF through the device share sheet (WhatsApp, Gmail, Drive…)
@@ -4413,6 +4414,10 @@ async function shareOrderPDF(o, copyType, showToast) {
   let doc;
   try { doc = generatePDF(o, copyType); }
   catch(e) { if (showToast) showToast('Could not build the PDF','bad'); return; }
+  // Installed app: attach the real PDF file through the native share sheet
+  // (WhatsApp attaches the file, caption pre-filled). The WebView's
+  // navigator.share can't attach files here, so this native path is required.
+  try { if (await nativeSharePDF(doc, fname, text)) return; } catch(e) { return; }
   try {
     const file = new File([doc.output('blob')], fname, {type:'application/pdf'});
     if (navigator.canShare && navigator.canShare({files:[file]})) {
@@ -4461,6 +4466,8 @@ async function shareOrderToSalesTeam(o, showToast) {
   let doc;
   try { doc = generatePDF(o, 'sales'); }
   catch(e) { if (showToast) showToast('Could not build the PDF','bad'); return; }
+  // Installed app: attach the real PDF via the native share sheet (see above).
+  try { if (await nativeSharePDF(doc, fname, text)) return; } catch(e) { return; }
   try {
     const file = new File([doc.output('blob')], fname, {type:'application/pdf'});
     if (navigator.canShare && navigator.canShare({files:[file]})) {
