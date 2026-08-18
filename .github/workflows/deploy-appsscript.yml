@@ -152,7 +152,7 @@ jobs:
           node -e '
             const fs = require("fs");
             const url = process.env.URL;
-            const re = /(var BAKED_API_URL = ")[^"]*(";)/;
+            const re = /(var BAKED_API_URL = ')[^']*(';)/;
             for (const f of ["index.html", "mobile-app/www/index.html"]) {
               let s = fs.readFileSync(f, "utf8");
               if (re.test(s)) {
