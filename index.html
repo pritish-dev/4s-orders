@@ -5380,6 +5380,7 @@ function HistoryScreen({ctx}) {
   const [serviceOrder,setServiceOrder] = useState(null);   // order whose service request is being raised/edited
   const [statusView,setStatusView] = useState(null);       // null=ledger · 'menu'=category grid · <catId>=that category's orders
   const [statusSales,setStatusSales] = useState('');       // salesperson filter inside a status category ('' = all)
+  const [statusMonth,setStatusMonth] = useState('');       // month filter for the Completed status ('' = all months, else 'yyyy-mm')
   const [reportView,setReportView] = useState(false);      // false=ledger · true=sales-team follow-up report
   const [reportSales,setReportSales] = useState('');       // salesperson filter on the report ('' = whole team)
   const [dateView,setDateView] = useState(false);          // false=ledger · true=by-date drill-down
@@ -5548,7 +5549,7 @@ function HistoryScreen({ctx}) {
             {CATS.map(c=>{
               const n = orders.filter(c.filter).length;
               return (
-                <div key={c.id} onClick={()=>{setStatusSales('');setStatusView(c.id);}} style={{background:'#fff',border:`1px solid ${T.line}`,borderLeft:`4px solid ${c.tone}`,borderRadius:10,padding:'14px 16px',cursor:'pointer',display:'flex',flexDirection:'column',gap:4}}>
+                <div key={c.id} onClick={()=>{setStatusSales('');setStatusMonth('');setStatusView(c.id);}} style={{background:'#fff',border:`1px solid ${T.line}`,borderLeft:`4px solid ${c.tone}`,borderRadius:10,padding:'14px 16px',cursor:'pointer',display:'flex',flexDirection:'column',gap:4}}>
                   <div style={{fontSize:30,fontWeight:800,letterSpacing:-1,color:c.tone,lineHeight:1}}>{n}</div>
                   <div style={{fontSize:13,fontWeight:700,color:T.ink}}>{c.label}</div>
                   <div style={{fontSize:10,color:T.ink4}}>{n===1?'1 order':n+' orders'}</div>
@@ -5563,36 +5564,104 @@ function HistoryScreen({ctx}) {
   }
   if (statusView && statusView !== 'menu') {
     const cat = CATS.find(c=>c.id===statusView) || CATS[0];
-    const catOrders = orders.filter(cat.filter);
-    // Per-salesperson breakdown within this status. Tapping a name narrows the
-    // list to just that person's orders in the status, so the team can be
-    // followed up individually.
-    const statusSalesCounts = {};
-    catOrders.forEach(o=>{ const n=(o.salesExec||'').trim()||'—'; statusSalesCounts[n]=(statusSalesCounts[n]||0)+1; });
-    const statusSalesNames = Object.keys(statusSalesCounts).sort((a,b)=>a.localeCompare(b));
+    const allCatOrders = orders.filter(cat.filter);
+    const isCompletedCat = cat.id==='completed';
+    // Monthly filter (Completed section only) — grouped by the order's booking
+    // date ("dd.mm.yy"), so the owner can see how many orders completed in each
+    // month and their net-basic value.
+    const monthKeyOf = o => { const iso=_toISO(o.date); return iso ? iso.slice(0,7) : ''; };
+    const monthLabelOf = ym => { const p=ym.split('-'); return _MONTHS[Number(p[1])-1]+' '+p[0]; };
+    const monthOptions = isCompletedCat
+      ? [...new Set(allCatOrders.map(monthKeyOf).filter(Boolean))].sort().reverse()
+      : [];
+    // Narrow to the chosen month first (Completed only); everything below —
+    // counts, salesperson breakdown and net-basic value — reflects that month.
+    const catOrders = (isCompletedCat && statusMonth)
+      ? allCatOrders.filter(o=>monthKeyOf(o)===statusMonth)
+      : allCatOrders;
+    // Net-basic value (ex-GST) always split into Franchise (KB / 34S / untagged)
+    // vs 4Sinteriors (items tagged "4S") — this is the amount actually earned
+    // once the orders complete.
+    const splitOf = list => list.reduce((a,o)=>{ const s=_channelSplit(o); a.franchise+=s.franchise; a.foursint+=s.foursint; return a; }, {franchise:0,foursint:0});
+    // Per-salesperson breakdown within this status: order count + net-basic split.
+    // Tapping a name narrows the list to just that person's orders in the status,
+    // so the team can be followed up individually.
+    const statusSalesMap = {};
+    catOrders.forEach(o=>{ const n=(o.salesExec||'').trim()||'—'; const s=_channelSplit(o); const e=statusSalesMap[n]||(statusSalesMap[n]={count:0,franchise:0,foursint:0}); e.count++; e.franchise+=s.franchise; e.foursint+=s.foursint; });
+    const statusSalesNames = Object.keys(statusSalesMap).sort((a,b)=>a.localeCompare(b));
     const catShown = statusSales ? catOrders.filter(o=>(((o.salesExec||'').trim())||'—')===statusSales) : catOrders;
+    const shownSplit = splitOf(catShown);
     const salesChip = sel => ({padding:'6px 10px',borderRadius:999,border:`1px solid ${sel?cat.tone:T.line}`,background:sel?cat.tone:'#fff',color:sel?'#fff':T.ink2,fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap',flexShrink:0});
     return (
       <div className="screen">
         <div style={{flexShrink:0}}>
           <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 10px'}}>
-            <button onClick={()=>{setStatusSales('');setStatusView('menu');}} title="Back to statuses" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+            <button onClick={()=>{setStatusSales('');setStatusMonth('');setStatusView('menu');}} title="Back to statuses" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
             <div style={{flex:1}}>
               <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>ORDER STATUS</div>
               <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>{cat.label} · {statusSales?catShown.length+' / '+catOrders.length:catOrders.length}</div>
             </div>
           </div>
+          {/* Monthly filter — Completed section only */}
+          {isCompletedCat && monthOptions.length>0 && (
+            <div style={{display:'flex',alignItems:'center',gap:8,padding:'0 14px 10px'}}>
+              <span style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:.6}}>MONTH</span>
+              <select value={statusMonth} onChange={e=>setStatusMonth(e.target.value)}
+                style={{flex:1,padding:'7px 10px',borderRadius:6,border:`1px solid ${T.line}`,background:'#fff',color:T.ink,fontSize:13,fontWeight:600,cursor:'pointer'}}>
+                <option value="">All months</option>
+                {monthOptions.map(ym=><option key={ym} value={ym}>{monthLabelOf(ym)}</option>)}
+              </select>
+            </div>
+          )}
           {/* Salesperson filter — order count per person in this status; tap to drill in */}
           {statusSalesNames.length>0 && (
             <div style={{display:'flex',gap:6,padding:'0 14px 10px',overflowX:'auto',WebkitOverflowScrolling:'touch'}}>
               <div onClick={()=>setStatusSales('')} style={salesChip(!statusSales)}>All · {catOrders.length}</div>
               {statusSalesNames.map(n=>(
-                <div key={n} onClick={()=>setStatusSales(n===statusSales?'':n)} style={salesChip(statusSales===n)}>{n} · {statusSalesCounts[n]}</div>
+                <div key={n} onClick={()=>setStatusSales(n===statusSales?'':n)} style={salesChip(statusSales===n)}>{n} · {statusSalesMap[n].count}</div>
               ))}
             </div>
           )}
         </div>
         <div className="scroll">
+          {/* Net-basic value for the shown orders — always split Franchise vs 4Sinteriors */}
+          <div style={{padding:'10px 14px 4px'}}>
+            <div style={{background:T.paper2,border:`1px solid ${T.line}`,borderRadius:10,padding:'10px 12px'}}>
+              <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8,marginBottom:6}}>NET BASIC VALUE · EX-GST{statusSales?' · '+statusSales:''}{isCompletedCat&&statusMonth?' · '+monthLabelOf(statusMonth):''}</div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+                <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'9px 11px'}}>
+                  <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.6}}>FRANCHISE</div>
+                  <div style={{fontSize:19,fontWeight:800,letterSpacing:-0.6,color:T.ink,lineHeight:1.1,marginTop:2}}>{_fmtAmt(shownSplit.franchise)}</div>
+                </div>
+                <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'9px 11px'}}>
+                  <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.6}}>4SINTERIORS</div>
+                  <div style={{fontSize:19,fontWeight:800,letterSpacing:-0.6,color:T.ink,lineHeight:1.1,marginTop:2}}>{_fmtAmt(shownSplit.foursint)}</div>
+                </div>
+              </div>
+              <div style={{fontSize:10,color:T.ink4,marginTop:6}}>{catShown.length} order{catShown.length===1?'':'s'} · total {_fmtAmt(shownSplit.franchise+shownSplit.foursint)}</div>
+            </div>
+          </div>
+          {/* Net-basic value per salesperson — tap a row to filter the list below */}
+          {statusSalesNames.length>0 && (
+            <div style={{padding:'6px 14px 4px'}}>
+              <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:.6,margin:'2px 2px 6px'}}>NET BASIC BY SALESPERSON · EX-GST</div>
+              <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:10,overflow:'hidden'}}>
+                <div style={{display:'grid',gridTemplateColumns:'1fr auto auto',gap:10,padding:'7px 12px',background:T.paper2,fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.6}}>
+                  <div>SALESPERSON</div><div style={{textAlign:'right'}}>FRANCHISE</div><div style={{textAlign:'right'}}>4S</div>
+                </div>
+                {statusSalesNames.map(n=>{ const e=statusSalesMap[n]; const sel=statusSales===n; return (
+                  <div key={n} onClick={()=>setStatusSales(sel?'':n)} style={{display:'grid',gridTemplateColumns:'1fr auto auto',gap:10,padding:'9px 12px',borderTop:`1px solid ${T.line}`,cursor:'pointer',alignItems:'center',background:sel?T.paper2:'#fff'}}>
+                    <div style={{minWidth:0}}>
+                      <div style={{fontSize:13,fontWeight:700,color:T.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{n}</div>
+                      <div style={{fontSize:10,color:T.ink4}}>{e.count} order{e.count===1?'':'s'}</div>
+                    </div>
+                    <div style={{textAlign:'right',fontFamily:T.mono,fontSize:13,fontWeight:700,color:T.ink}}>{_fmtAmt(e.franchise)}</div>
+                    <div style={{textAlign:'right',fontFamily:T.mono,fontSize:13,fontWeight:700,color:T.ink2}}>{_fmtAmt(e.foursint)}</div>
+                  </div>
+                );})}
+              </div>
+            </div>
+          )}
           {catShown.map(orderCard)}
           {catShown.length===0 && (
             <div style={{padding:'48px 24px',textAlign:'center'}}>
