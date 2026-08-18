@@ -1,24 +1,25 @@
 name: Deploy Apps Script backend
 
-# Pushes Code.gs to the Google Apps Script project, (re)deploys the web app, and
-# — crucially — makes the deployment SELF-HEALING so the app can never again be
-# stranded on a dead /exec URL:
+# Pushes Code.gs to Google Apps Script and publishes the web app. The pipeline
+# is SELF-HEALING and can even rebuild a lost backend with no manual steps:
 #
-#   1. Redeploy the known web-app deployment (keeps the same /exec URL).
-#   2. If that deployment no longer exists, create a FRESH one automatically.
-#   3. Capture whichever deployment id is now live, write its /exec URL into the
-#      app (index.html + mobile-app/www/index.html), and remember the id in a
-#      committed file so future runs reuse it (no URL churn).
-#   4. If the URL changed, commit it back to master and kick off the Pages deploy
-#      so the published app immediately points at the working backend.
+#   1. Point clasp at the tracked/seed script id.
+#   2. If that script is gone/inaccessible, CREATE a fresh standalone Apps Script
+#      project automatically (clasp create) and track its new id.
+#   3. Push Code.gs + appsscript.json (web app: execute as me / anyone anonymous).
+#   4. Redeploy the tracked web-app deployment, or create a new one; capture the
+#      live /exec URL.
+#   5. Write that URL into index.html + mobile-app/www/index.html, remember the
+#      script id and deployment id in the repo, and — if anything changed — commit
+#      and kick off the Pages deploy so the published app uses the new backend.
 #
-# Required repository secrets (Settings → Secrets and variables → Actions):
-#   CLASPRC_JSON               Contents of your local ~/.clasprc.json after `clasp login`
-#   APPS_SCRIPT_ID             The script ID of the Apps Script project
-#   APPS_SCRIPT_DEPLOYMENT_ID  (optional) seed deployment id; once a deployment
-#                              exists it is tracked in .apps_script_deployment_id
+# Secrets (Settings → Secrets and variables → Actions):
+#   CLASPRC_JSON               Contents of ~/.clasprc.json after `clasp login`
+#   APPS_SCRIPT_ID             (optional) seed script id; tracked in .apps_script_id
+#   APPS_SCRIPT_DEPLOYMENT_ID  (optional) seed deployment id; tracked in
+#                              .apps_script_deployment_id
 #
-# See APPS_SCRIPT_DEPLOY.md for the full one-time setup.
+# See APPS_SCRIPT_DEPLOY.md for the one-time credential setup.
 
 on:
   push:
@@ -29,12 +30,10 @@ on:
       - '.github/workflows/deploy-appsscript.yml'
   workflow_dispatch: {}
 
-# Never let two deploys race each other.
 concurrency:
   group: appsscript-deploy
   cancel-in-progress: false
 
-# Needed to commit the resolved backend URL back to master and to dispatch Pages.
 permissions:
   contents: write
   actions: write
@@ -64,77 +63,90 @@ jobs:
           fi
           printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
 
-      - name: Write .clasp.json
-        env:
-          APPS_SCRIPT_ID: ${{ secrets.APPS_SCRIPT_ID }}
-        run: |
-          if [ -z "$APPS_SCRIPT_ID" ]; then
-            echo "::error::APPS_SCRIPT_ID secret is not set. See APPS_SCRIPT_DEPLOY.md."
-            exit 1
-          fi
-          printf '{ "scriptId": "%s", "rootDir": "." }\n' "$APPS_SCRIPT_ID" > .clasp.json
-
-      - name: Push code to Apps Script (updates the editor / HEAD)
-        run: clasp push --force
-
-      - name: Diagnose Apps Script project access
-        run: |
-          set +e
-          echo "===== clasp status ====="; clasp status 2>&1
-          echo "===== clasp deployments ====="; clasp deployments 2>&1
-          echo "===== clasp versions ====="; clasp versions 2>&1
-          echo "(diagnostics only — never fails the job)"
-          exit 0
-
-      - name: Deploy the web app and capture the live /exec URL
+      - name: Ensure a script exists, push code, and publish the web app
         id: deploy
         env:
+          SEED_SCRIPT_ID: ${{ secrets.APPS_SCRIPT_ID }}
           SEED_DEPLOYMENT_ID: ${{ secrets.APPS_SCRIPT_DEPLOYMENT_ID }}
         run: |
-          set +e   # never let a clasp non-zero abort before we can print its output
-          # Prefer a deployment id we've tracked in the repo; fall back to the seed secret.
-          TRACKED="$(cat .apps_script_deployment_id 2>/dev/null | tr -d '[:space:]' || true)"
-          TARGET="${TRACKED:-$SEED_DEPLOYMENT_ID}"
-          ID=""
+          set +e   # handle clasp non-zero exits ourselves so we can react/log
 
-          if [ -n "$TARGET" ]; then
-            echo "Redeploying existing deployment: $TARGET"
-            OUT="$(clasp deploy --deploymentId "$TARGET" --description "CI ${GITHUB_SHA}" 2>&1)"
-            RC=$?
-            echo "$OUT"
-            if [ $RC -eq 0 ]; then ID="$TARGET"; else
-              echo "::warning::Redeploy to the tracked/seed deployment failed (rc=$RC) — it no longer exists. Creating a fresh web-app deployment."
+          # ---- Resolve which script id to target (tracked file wins over seed) ----
+          SCRIPT_ID="$(cat .apps_script_id 2>/dev/null | tr -d '[:space:]' || true)"
+          SCRIPT_ID="${SCRIPT_ID:-$SEED_SCRIPT_ID}"
+
+          write_clasp() { printf '{ "scriptId": "%s", "rootDir": "." }\n' "$1" > .clasp.json; }
+
+          ACCESSIBLE=0
+          if [ -n "$SCRIPT_ID" ]; then
+            write_clasp "$SCRIPT_ID"
+            echo "Checking access to script $SCRIPT_ID …"
+            if clasp deployments >/dev/null 2>&1; then
+              ACCESSIBLE=1
+              echo "Existing script is accessible."
+            else
+              echo "::warning::Script '$SCRIPT_ID' is not accessible (deleted or access lost) — will create a fresh backend."
             fi
           fi
 
-          if [ -z "$ID" ]; then
-            echo "Creating a new web-app deployment…"
-            OUT="$(clasp deploy --description "CI ${GITHUB_SHA}" 2>&1)"
-            RC=$?
-            echo "----- clasp deploy (new) output (rc=$RC) -----"
+          # ---- Create a brand-new backend if we have no accessible script ----
+          if [ "$ACCESSIBLE" -ne 1 ]; then
+            echo "Creating a new standalone Apps Script project…"
+            cp appsscript.json /tmp/appsscript.json.keep   # clasp create overwrites the manifest
+            rm -f .clasp.json
+            OUT="$(clasp create --type standalone --title "4S Orders Backend (auto-recovered)" --rootDir . 2>&1)"
             echo "$OUT"
-            echo "----------------------------------------------"
-            ID="$(printf '%s' "$OUT" | grep -oiE 'AKfyc[0-9A-Za-z_-]{20,}' | head -1)"
+            cp /tmp/appsscript.json.keep appsscript.json    # restore our manifest (anyone-anonymous web app)
+            SCRIPT_ID="$(node -e 'try{process.stdout.write((require("./.clasp.json").scriptId)||"")}catch(e){}')"
+            if [ -z "$SCRIPT_ID" ]; then
+              echo "::error::clasp create did not yield a script id. Output above."
+              exit 1
+            fi
+            echo "New script id: $SCRIPT_ID"
           fi
 
+          # ---- Push our code + manifest ----
+          echo "Pushing code to $SCRIPT_ID …"
+          clasp push --force || { echo "::error::clasp push failed."; exit 1; }
+
+          # ---- Publish the web app; capture the live deployment id ----
+          DEP_TRACKED="$(cat .apps_script_deployment_id 2>/dev/null | tr -d '[:space:]' || true)"
+          DEP_TARGET="${DEP_TRACKED:-$SEED_DEPLOYMENT_ID}"
+          ID=""
+          if [ "$ACCESSIBLE" -eq 1 ] && [ -n "$DEP_TARGET" ]; then
+            echo "Redeploying existing deployment $DEP_TARGET …"
+            OUT="$(clasp deploy --deploymentId "$DEP_TARGET" --description "CI ${GITHUB_SHA}" 2>&1)"; RC=$?
+            echo "$OUT"
+            [ $RC -eq 0 ] && ID="$DEP_TARGET"
+          fi
           if [ -z "$ID" ]; then
-            echo "::error::Apps Script project not found (every clasp call returns 'Requested entity was not found'). The backend project appears DELETED/TRASHED in Google Drive, or the deploy account lost access. RECOVER: open Google Drive → Trash → restore the Apps Script project, then re-run this workflow. Only if it cannot be restored, recreate it and update the APPS_SCRIPT_ID / APPS_SCRIPT_DEPLOYMENT_ID secrets."
+            echo "Creating a new web-app deployment…"
+            OUT="$(clasp deploy --description "CI ${GITHUB_SHA}" 2>&1)"; RC=$?
+            echo "----- clasp deploy (new) output (rc=$RC) -----"; echo "$OUT"; echo "----------------------------------------------"
+            ID="$(printf '%s' "$OUT" | grep -oiE 'AKfyc[0-9A-Za-z_-]{20,}' | head -1)"
+          fi
+          if [ -z "$ID" ]; then
+            echo "::error::Could not publish a web-app deployment — see clasp output above."
             exit 1
           fi
 
           URL="https://script.google.com/macros/s/${ID}/exec"
-          echo "Live web-app deployment id: $ID"
-          echo "Live web-app URL:            $URL"
-          echo "id=$ID"   >> "$GITHUB_OUTPUT"
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Live script id:     $SCRIPT_ID"
+          echo "Live deployment id: $ID"
+          echo "Live web-app URL:   $URL"
+          echo "script_id=$SCRIPT_ID" >> "$GITHUB_OUTPUT"
+          echo "dep_id=$ID"           >> "$GITHUB_OUTPUT"
+          echo "url=$URL"             >> "$GITHUB_OUTPUT"
 
-      - name: Point the app at the live URL and commit if it changed
+      - name: Point the app at the live URL and commit if anything changed
         env:
-          DEP_ID: ${{ steps.deploy.outputs.id }}
+          SCRIPT_ID: ${{ steps.deploy.outputs.script_id }}
+          DEP_ID: ${{ steps.deploy.outputs.dep_id }}
           URL: ${{ steps.deploy.outputs.url }}
         run: |
-          # Track the deployment id so future runs reuse it (prevents URL churn).
-          printf '%s\n' "$DEP_ID" > .apps_script_deployment_id
+          # Track the ids so future runs reuse them (no churn, and rebuild is sticky).
+          printf '%s\n' "$SCRIPT_ID" > .apps_script_id
+          printf '%s\n' "$DEP_ID"    > .apps_script_deployment_id
 
           # Rewrite the baked backend URL in both app copies.
           node -e '
@@ -147,21 +159,19 @@ jobs:
                 const n = s.replace(re, `$1${url}$2`);
                 if (n !== s) { fs.writeFileSync(f, n); console.log("updated backend URL in", f); }
                 else { console.log("backend URL already current in", f); }
-              } else {
-                console.log("::warning:: BAKED_API_URL not found in " + f);
-              }
+              } else { console.log("::warning:: BAKED_API_URL not found in " + f); }
             }
           '
 
-          git add index.html mobile-app/www/index.html .apps_script_deployment_id
+          git add index.html mobile-app/www/index.html .apps_script_id .apps_script_deployment_id
           if git diff --cached --quiet; then
-            echo "Backend URL unchanged — the existing /exec URL is live again; no republish needed."
+            echo "Nothing changed — existing backend URL is already live."
             exit 0
           fi
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -m "CI: point app at live Apps Script deployment URL [skip appsscript]"
+          git commit -m "CI: point app at live Apps Script backend [skip appsscript]"
           git push origin HEAD:master
 
           echo "Committed the new backend URL. Dispatching the Pages deploy to publish it."
