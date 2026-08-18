@@ -1113,9 +1113,9 @@ function generatePDF(order, copyType) {
     let tx = ml+1;
     const F = PDF_ASSETS.fs;
     if (F && F.data) {
-      const s = 13, ar = F.w/F.h; let w = s*ar, h = s;
-      if (w > 15) { w = 15; h = w/ar; }
-      try { doc.addImage(F.data,'PNG', ml+1, y+5.5, w, h, 'fslogo', 'MEDIUM'); tx = ml+1+w+2; } catch(e) {}
+      const s = 16, ar = F.w/F.h; let w = s*ar, h = s;
+      if (w > 18) { w = 18; h = w/ar; }
+      try { doc.addImage(F.data,'PNG', ml+1, y+5, w, h, 'fslogo', 'MEDIUM'); tx = ml+1+w+2; } catch(e) {}
     }
     val(tx, y+8, fit1('4S Interiors', c1w-(tx-ml)-2, 7.5), 7.5, true);
     doc.setFont('helvetica','normal'); doc.setFontSize(5.4); doc.setTextColor(...INK);
