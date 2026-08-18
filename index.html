@@ -6658,27 +6658,50 @@ function SettingsScreen({ctx}) {
   }
 
   async function testConnection() {
-    const url = (apiUrl||'').trim() || localStorage.getItem('4s_api_url');
-    if (!url) { showToast('Paste your Apps Script URL first', 'warn'); return; }
+    const url = ((apiUrl||'').trim() || localStorage.getItem('4s_api_url') || '').trim();
+    if (!url) { showToast('No backend URL configured', 'warn'); return; }
     setPinging(true); setPingResult(null);
+    const out = { url };
+    // Which service worker is actually controlling this page (tells us if a stale
+    // worker is still installed after a deploy).
     try {
-      const res = await apiGet('ping', {}, 20000);
-      if (res && res.ok) {
-        const opsOk    = res.opsSheet?.ok;
-        const opsSheets = res.opsSheet?.sheets || [];
-        setPingResult({
-          ok: true,
-          msg: 'Connected ✓' + (opsOk ? ' · OPS sheet found' : ' · OPS sheet missing'),
-          detail: opsSheets.join(', '),
-          sheetUrl: res.opsSheet?.url || '',
-        });
-        showToast('Connection OK ✓');
-      } else {
-        setPingResult({ ok:false, msg: res?.error || 'Server returned an error' });
-      }
+      const c = navigator.serviceWorker && navigator.serviceWorker.controller;
+      out.sw = c ? c.scriptURL : 'none (no controlling worker)';
+    } catch(e) { out.sw = 'unknown'; }
+    // 1) READ transport — JSONP GET (the path that already works for you).
+    try {
+      const g = await apiGet('ping', {}, 20000, 1);
+      out.read = (g && g.ok) ? 'OK ✓' : ('server replied: ' + ((g && g.error) || 'unknown error'));
+      out.readOk = !!(g && g.ok);
+    } catch(e) { out.read = 'FAILED — ' + e.message; out.readOk = false; }
+    // 2) WRITE transport — a RAW fetch POST, bypassing the app's retry/offline
+    //    guards so we see the true HTTP result. Uses a no-op action the backend
+    //    doesn't recognise, so it writes NOTHING (doPost just replies
+    //    { ok:false, error:'Unknown action…' }). If we get ANY JSON reply back,
+    //    the write transport works and the outage is elsewhere; if this throws,
+    //    the POST itself can't reach the server (network / CORS / redirect).
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 30000);
+      const r = await fetch(url, {
+        method: 'POST',
+        body: JSON.stringify({ action: '__diag_ping' }),
+        headers: { 'Content-Type': 'text/plain' },
+        redirect: 'follow',
+        signal: ctrl.signal,
+      });
+      clearTimeout(t);
+      let txt = '';
+      try { txt = await r.text(); } catch(e) { txt = '(could not read body)'; }
+      out.write = 'reached server — HTTP ' + r.status + ' [' + r.type + '] · ' + String(txt).slice(0, 200);
+      out.writeOk = true;
     } catch(e) {
-      setPingResult({ ok:false, msg: e.message });
-    } finally { setPinging(false); }
+      out.write = 'FAILED — ' + (e && e.name ? e.name + ': ' : '') + (e && e.message ? e.message : String(e));
+      out.writeOk = false;
+    }
+    setPingResult(out);
+    setPinging(false);
+    showToast(out.writeOk ? 'Diagnostic done — see the result' : 'Write path failed — see the result', out.writeOk ? 'ok' : 'bad');
   }
 
   return (
@@ -6701,6 +6724,30 @@ function SettingsScreen({ctx}) {
             <div style={{transform:'rotate(180deg)',flexShrink:0,opacity:0.5}}>{Icon.back(T.ink3,18)}</div>
           </div>
         </div>
+
+        {/* ── Connection diagnostic (admin) — probes READ + WRITE transport ── */}
+        {isAdmin && (
+          <div style={{padding:'0 18px 14px'}}>
+            <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>CONNECTION DIAGNOSTIC</div>
+            <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'14px'}}>
+              <div style={{fontSize:12,color:T.ink3,lineHeight:1.6,marginBottom:10}}>
+                Checks whether the app can <b>read</b> and <b>write</b> to the backend. The write check sends a harmless test — it does <b>not</b> create or change any order.
+              </div>
+              <button onClick={testConnection} disabled={pinging}
+                style={{width:'100%',padding:'11px',borderRadius:7,border:'none',background:pinging?T.line2:T.green,color:'#fff',fontSize:14,fontWeight:700,cursor:pinging?'default':'pointer'}}>
+                {pinging ? 'Testing…' : 'Test connection'}
+              </button>
+              {pingResult && (
+                <div style={{marginTop:10,padding:'10px 12px',background:T.paper,border:`1px solid ${T.line}`,borderRadius:6,fontSize:11.5,lineHeight:1.7,fontFamily:T.mono,color:T.ink2,wordBreak:'break-word'}}>
+                  <div><b style={{color:pingResult.readOk?T.ok:T.bad}}>READ:</b> {pingResult.read}</div>
+                  <div style={{marginTop:4}}><b style={{color:pingResult.writeOk?T.ok:T.bad}}>WRITE:</b> {pingResult.write}</div>
+                  <div style={{marginTop:4,color:T.ink4}}><b>SW:</b> {pingResult.sw}</div>
+                  <div style={{marginTop:4,color:T.ink4,fontSize:10}}>{pingResult.url}</div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Backend URL, Google review link and connection test are managed in
             the background — no setup UI is shown to users. */}
