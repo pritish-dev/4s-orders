@@ -162,39 +162,36 @@ const PDF_ASSETS = {};   // key -> { data:<pngDataURL>, w, h }
 // Bump ASSET_VERSION whenever a brand PNG (logo / review QR) is replaced —
 // it cache-busts the HTTP + service-worker caches so the new image loads.
 const ASSET_VERSION = 'v21';
-// Crop the transparent / near-white border baked into a logo PNG so it fills
-// its PDF box tightly (the source fs-logo.png carries a wide, uneven margin).
-// Returns the original canvas unchanged if pixels can't be read or nothing
-// is found. This only affects the PDF render — the PNG file is never modified.
-function _trimCanvas(c) {
-  const W = c.width, H = c.height;
-  let d;
-  try { d = c.getContext('2d').getImageData(0, 0, W, H).data; } catch (e) { return c; }
-  let minx = W, miny = H, maxx = -1, maxy = -1;
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const i = (y * W + x) * 4, r = d[i], g = d[i+1], b = d[i+2], a = d[i+3];
-    if (a > 16 && !(r > 242 && g > 242 && b > 242)) {
-      if (x < minx) minx = x; if (x > maxx) maxx = x;
-      if (y < miny) miny = y; if (y > maxy) maxy = y;
-    }
-  }
-  if (maxx < minx || maxy < miny) return c;   // fully blank — leave as-is
-  const w = maxx - minx + 1, h = maxy - miny + 1;
-  const t = document.createElement('canvas'); t.width = w; t.height = h;
-  t.getContext('2d').drawImage(c, minx, miny, w, h, 0, 0, w, h);
-  return t;
-}
+// Some brand PNGs carry a wide, uneven transparent/white margin baked in. For
+// the PDF we crop to the artwork so it fills its box — using a measured crop
+// rectangle expressed as fractions of the source image. The crop uses
+// drawImage only (never getImageData) and, if anything fails, always falls
+// back to embedding the FULL image, so the logo can never go missing. The PNG
+// file itself is never modified.
 function _loadImageAsset(key, url, opts) {
   const img = new Image();
   img.crossOrigin = 'anonymous';
   img.onload = () => {
-    try {
-      let c = document.createElement('canvas');
-      c.width = img.naturalWidth; c.height = img.naturalHeight;
-      c.getContext('2d').drawImage(img, 0, 0);
-      if (opts && opts.trim) c = _trimCanvas(c);
-      PDF_ASSETS[key] = { data: c.toDataURL('image/png'), w: c.width, h: c.height };
-    } catch (e) { /* tainted or unsupported — skip, fall back to drawn version */ }
+    const nW = img.naturalWidth, nH = img.naturalHeight;
+    const cr = opts && opts.crop;
+    // 1) Preferred: cropped embed (tight artwork, fills its box).
+    if (cr) {
+      try {
+        const sx = Math.round(cr.sx * nW), sy = Math.round(cr.sy * nH);
+        const sw = Math.round(cr.sw * nW), sh = Math.round(cr.sh * nH);
+        const c = document.createElement('canvas'); c.width = sw; c.height = sh;
+        c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+        PDF_ASSETS[key] = { data: c.toDataURL('image/png'), w: sw, h: sh };
+      } catch (e) { /* fall through to full embed */ }
+    }
+    // 2) Guaranteed fallback: the full image, so the asset is never lost.
+    if (!PDF_ASSETS[key]) {
+      try {
+        const c = document.createElement('canvas'); c.width = nW; c.height = nH;
+        c.getContext('2d').drawImage(img, 0, 0);
+        PDF_ASSETS[key] = { data: c.toDataURL('image/png'), w: nW, h: nH };
+      } catch (e) { /* tainted / unsupported — fall back to drawn version */ }
+    }
   };
   img.onerror = () => {};
   img.src = url;
@@ -202,7 +199,10 @@ function _loadImageAsset(key, url, opts) {
 function preloadPdfAssets() {
   const v = '?a=' + ASSET_VERSION;
   _loadImageAsset('interio', 'interio-logo.png' + v);
-  _loadImageAsset('fs',      'fs-logo.png' + v, {trim:true});   // trim its wide margin so the mark fills its cell
+  // fs-logo.png has a wide margin around the orange mark (the artwork sits at
+  // x 39-188, y 23-167 of a 211x199 image). Crop to a centred 150x150 square
+  // so the logo fills its store-address cell top-to-bottom.
+  _loadImageAsset('fs', 'fs-logo.png' + v, {crop:{sx:39/211, sy:20/199, sw:150/211, sh:150/199}});
   _loadImageAsset('reviewQR','review-qr.png' + v);
 }
 preloadPdfAssets();
