@@ -289,7 +289,17 @@ async function apiPost(body, tries = 3) {
       });
       clearTimeout(t);
       if (!r.ok) throw new Error('Server error: ' + r.status);
-      return await r.json();
+      const data = await r.json();
+      // Belt-and-suspenders: a service worker or proxy that can't reach the
+      // network may hand back a synthetic { ok:false, error:'offline' } body
+      // with a 200 status. That is NOT a real server reply (the backend never
+      // returns error:'offline'), so treat it as a network failure — this lets
+      // the retry loop and the offline queue engage instead of surfacing it as
+      // a hard "Save failed" and swallowing the order.
+      if (data && data.ok === false && data.error === 'offline') {
+        throw new Error('offline');
+      }
+      return data;
     } catch (e) {
       lastErr = e;
       if (attempt < tries) await new Promise(res => setTimeout(res, 800 * attempt)); // backoff, then retry
