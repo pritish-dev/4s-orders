@@ -1,10 +1,10 @@
 // ============================================================
-// 4S Interiors Orders — Service Worker  v41
+// 4S Interiors Orders — Service Worker  v42
 // Cache-first for app shell & CDN assets.
-// Network-first for API calls to Google Apps Script.
+// Apps Script API calls are never proxied — they go straight to the network.
 // ============================================================
 
-const CACHE  = '4s-orders-e5c9a10';
+const CACHE  = '4s-orders-f7d1b20';
 const SHELL  = [
   '/4s-orders/',
   '/4s-orders/index.html',
@@ -53,15 +53,20 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = e.request.url;
 
-  // 1. Google Apps Script API → network-first (always fresh data)
+  // 1. Google Apps Script API → do NOT proxy. Let every request go straight to
+  //    the network with native fetch semantics (no respondWith).
+  //
+  //    Why: the order-save POST relies on following a cross-origin 302 redirect
+  //    (/exec → script.googleusercontent.com) that a service worker cannot
+  //    reliably re-issue. The previous handler caught that failure and returned
+  //    a FAKE HTTP-200 body { ok:false, error:'offline' }. That fake "success"
+  //    fooled apiPost (r.ok was true, so it never threw), which defeated both
+  //    its retry loop AND the offline queue, surfaced a bogus "offline" toast,
+  //    and — because doSaveOrder then returned null — blocked PDF generation on
+  //    submit. Passing these requests through untouched restores the exact
+  //    native behaviour apiPost/apiGet expect, so retries and the offline queue
+  //    work and a real network failure throws instead of masquerading as a reply.
   if (url.includes('script.google.com')) {
-    e.respondWith(
-      fetch(e.request).catch(() =>
-        new Response(JSON.stringify({ ok: false, error: 'offline' }), {
-          headers: { 'Content-Type': 'application/json' },
-        })
-      )
-    );
     return;
   }
 
