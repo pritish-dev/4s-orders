@@ -1106,15 +1106,15 @@ function generatePDF(order, copyType) {
   // ── TOP BLOCK (page 1 only): store / customer / instructions ─
   function drawTopBlock(y) {
     // Store + WON + Order row (taller to fit the 4S logo + full address)
-    const r1H = 22, c1w = 74, c2w = 56, c3w = cw - c1w - c2w;
+    const r1H = 26, c1w = 74, c2w = 56, c3w = cw - c1w - c2w;
     brd(ml,y,cw,r1H); vln(ml+c1w, y, y+r1H); vln(ml+c1w+c2w, y, y+r1H);
     lbl(ml+1, y+3.5, 'Store Address :');
     // 4S Interiors logo (image if supplied)
     let tx = ml+1;
     const F = PDF_ASSETS.fs;
     if (F && F.data) {
-      const s = 16, ar = F.w/F.h; let w = s*ar, h = s;
-      if (w > 18) { w = 18; h = w/ar; }
+      const s = 20, ar = F.w/F.h; let w = s*ar, h = s;
+      if (w > 22) { w = 22; h = w/ar; }
       try { doc.addImage(F.data,'PNG', ml+1, y+5, w, h, 'fslogo', 'MEDIUM'); tx = ml+1+w+2; } catch(e) {}
     }
     val(tx, y+8, fit1('4S Interiors', c1w-(tx-ml)-2, 7.5), 7.5, true);
