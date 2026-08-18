@@ -162,15 +162,38 @@ const PDF_ASSETS = {};   // key -> { data:<pngDataURL>, w, h }
 // Bump ASSET_VERSION whenever a brand PNG (logo / review QR) is replaced —
 // it cache-busts the HTTP + service-worker caches so the new image loads.
 const ASSET_VERSION = 'v21';
-function _loadImageAsset(key, url) {
+// Crop the transparent / near-white border baked into a logo PNG so it fills
+// its PDF box tightly (the source fs-logo.png carries a wide, uneven margin).
+// Returns the original canvas unchanged if pixels can't be read or nothing
+// is found. This only affects the PDF render — the PNG file is never modified.
+function _trimCanvas(c) {
+  const W = c.width, H = c.height;
+  let d;
+  try { d = c.getContext('2d').getImageData(0, 0, W, H).data; } catch (e) { return c; }
+  let minx = W, miny = H, maxx = -1, maxy = -1;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 4, r = d[i], g = d[i+1], b = d[i+2], a = d[i+3];
+    if (a > 16 && !(r > 242 && g > 242 && b > 242)) {
+      if (x < minx) minx = x; if (x > maxx) maxx = x;
+      if (y < miny) miny = y; if (y > maxy) maxy = y;
+    }
+  }
+  if (maxx < minx || maxy < miny) return c;   // fully blank — leave as-is
+  const w = maxx - minx + 1, h = maxy - miny + 1;
+  const t = document.createElement('canvas'); t.width = w; t.height = h;
+  t.getContext('2d').drawImage(c, minx, miny, w, h, 0, 0, w, h);
+  return t;
+}
+function _loadImageAsset(key, url, opts) {
   const img = new Image();
   img.crossOrigin = 'anonymous';
   img.onload = () => {
     try {
-      const c = document.createElement('canvas');
+      let c = document.createElement('canvas');
       c.width = img.naturalWidth; c.height = img.naturalHeight;
       c.getContext('2d').drawImage(img, 0, 0);
-      PDF_ASSETS[key] = { data: c.toDataURL('image/png'), w: img.naturalWidth, h: img.naturalHeight };
+      if (opts && opts.trim) c = _trimCanvas(c);
+      PDF_ASSETS[key] = { data: c.toDataURL('image/png'), w: c.width, h: c.height };
     } catch (e) { /* tainted or unsupported — skip, fall back to drawn version */ }
   };
   img.onerror = () => {};
@@ -179,7 +202,7 @@ function _loadImageAsset(key, url) {
 function preloadPdfAssets() {
   const v = '?a=' + ASSET_VERSION;
   _loadImageAsset('interio', 'interio-logo.png' + v);
-  _loadImageAsset('fs',      'fs-logo.png' + v);
+  _loadImageAsset('fs',      'fs-logo.png' + v, {trim:true});   // trim its wide margin so the mark fills its cell
   _loadImageAsset('reviewQR','review-qr.png' + v);
 }
 preloadPdfAssets();
