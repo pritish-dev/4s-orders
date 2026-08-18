@@ -1589,6 +1589,13 @@ const BLANK_ORDER = () => ({
   entryDoorWidth:'', entryDoorHeight:'',
 });
 
+// Normalise salesperson names to UPPERCASE so the same person typed with
+// different casing (e.g. "Aditya" vs "ADITYA") collapses to a single entry
+// everywhere the ledger groups or filters by salesperson.
+const normalizeSalesNames = list => (Array.isArray(list) ? list : []).map(o =>
+  (o && (o.salesExec != null)) ? { ...o, salesExec: String(o.salesExec).trim().toUpperCase() } : o
+);
+
 // Delivery-status options. The order is only "Completed" once installation is done.
 // "Partial Delivery" means some items are delivered and the rest are still Pending
 // for delivery (the delivered items are tracked per-order).
@@ -1915,7 +1922,7 @@ function App() {
   // orders refresh silently in the background on every open.
   const [items,         setItems]        = useState(() => { try { return JSON.parse(localStorage.getItem('4s_items')||'[]'); } catch { return []; } });
   const [priceItems,    setPriceItems]   = useState(() => { try { return JSON.parse(localStorage.getItem('4s_price_items_v9')||'[]'); } catch { return []; } });
-  const [orders,        setOrders]       = useState(() => { try { return JSON.parse(localStorage.getItem('4s_orders')||'[]'); } catch { return []; } });
+  const [orders,        setOrders]       = useState(() => { try { return normalizeSalesNames(JSON.parse(localStorage.getItem('4s_orders')||'[]')); } catch { return []; } });
   const [syncedAt,      setSyncedAt]     = useState(null);
   const [priceSyncedAt, setPriceSyncedAt]= useState(() => localStorage.getItem('4s_price_items_v9_ts') ? new Date(Number(localStorage.getItem('4s_price_items_v9_ts'))).toISOString() : null);
   const [priceSyncError, setPriceSyncError] = useState(null);
@@ -2145,8 +2152,9 @@ function App() {
     try {
       const res = await apiGet('orders', { exec: user?.name || '' }, 30000, 2);
       if (res && res.ok) {
-        setOrders(res.orders);
-        localStorage.setItem('4s_orders', JSON.stringify(res.orders));
+        const norm = normalizeSalesNames(res.orders);
+        setOrders(norm);
+        localStorage.setItem('4s_orders', JSON.stringify(norm));
       } else if (!silent && !haveCache) {
         showToast((res && res.error) || 'Failed to load orders','bad');
       }
@@ -4359,7 +4367,7 @@ function OrderFormScreen({ctx}) {
     // Whether this is a brand-new placement (vs. re-saving an already-submitted
     // order, e.g. an admin edit) decides if we fire the celebration below.
     const wasAlreadyPlaced = isOrderSubmitted(o);
-    const saved = await doSaveOrder(withMeasurements({...o,orderStatus:'submitted',salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)}));
+    const saved = await doSaveOrder(withMeasurements({...o,orderStatus:'submitted',salesExec:(o.salesExec||user?.name||'').trim().toUpperCase(),source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)}));
     if(saved) {
       setOrder(saved);
       // Celebrate a genuinely new order the moment it's placed.
@@ -4386,14 +4394,14 @@ function OrderFormScreen({ctx}) {
     if(!o.items||o.items.length===0) return ctx.showToast('Add at least one item to save a draft','bad');
     // Save Draft keeps the order editable by everyone — mark it a DRAFT (never
     // downgrade an already-submitted order: the backend guards against that too).
-    const saved = await doSaveOrder(withMeasurements({...o,orderStatus:isOrderSubmitted(o)?'submitted':'draft',salesExec:o.salesExec||user?.name||'',source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)}));
+    const saved = await doSaveOrder(withMeasurements({...o,orderStatus:isOrderSubmitted(o)?'submitted':'draft',salesExec:(o.salesExec||user?.name||'').trim().toUpperCase(),source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)}));
     if(saved) { setOrder(saved); ctx.showToast('Draft saved — you can reopen it from Orders','ok'); }
   }
 
   // Sales-team restricted edit: only WON, money receipts + dates, and delivery
   // status are editable. Everything else stays read-only (admins get the full form).
   async function handleRestrictedSave(){
-    const saved = await doSaveOrder(withMeasurements({...o,salesExec:o.salesExec||user?.name||''}));
+    const saved = await doSaveOrder(withMeasurements({...o,salesExec:(o.salesExec||user?.name||'').trim().toUpperCase()}));
     if(saved){ setOrder(saved); ctx.showToast('Order updated ✓','ok'); nav('history'); }
   }
   const setMRestricted=(i,field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:''},{no:'',date:''},{no:'',date:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; });
