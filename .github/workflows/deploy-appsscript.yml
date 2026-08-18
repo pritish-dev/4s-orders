@@ -77,12 +77,21 @@ jobs:
       - name: Push code to Apps Script (updates the editor / HEAD)
         run: clasp push --force
 
+      - name: Diagnose Apps Script project access
+        run: |
+          set +e
+          echo "===== clasp status ====="; clasp status 2>&1
+          echo "===== clasp deployments ====="; clasp deployments 2>&1
+          echo "===== clasp versions ====="; clasp versions 2>&1
+          echo "(diagnostics only — never fails the job)"
+          exit 0
+
       - name: Deploy the web app and capture the live /exec URL
         id: deploy
         env:
           SEED_DEPLOYMENT_ID: ${{ secrets.APPS_SCRIPT_DEPLOYMENT_ID }}
         run: |
-          set -o pipefail
+          set +e   # never let a clasp non-zero abort before we can print its output
           # Prefer a deployment id we've tracked in the repo; fall back to the seed secret.
           TRACKED="$(cat .apps_script_deployment_id 2>/dev/null | tr -d '[:space:]' || true)"
           TARGET="${TRACKED:-$SEED_DEPLOYMENT_ID}"
@@ -90,23 +99,26 @@ jobs:
 
           if [ -n "$TARGET" ]; then
             echo "Redeploying existing deployment: $TARGET"
-            if OUT="$(clasp deploy --deploymentId "$TARGET" --description "CI ${GITHUB_SHA}" 2>&1)"; then
-              echo "$OUT"
-              ID="$TARGET"
-            else
-              echo "$OUT"
-              echo "::warning::Redeploy to '$TARGET' failed — it no longer exists. Creating a fresh web-app deployment."
+            OUT="$(clasp deploy --deploymentId "$TARGET" --description "CI ${GITHUB_SHA}" 2>&1)"
+            RC=$?
+            echo "$OUT"
+            if [ $RC -eq 0 ]; then ID="$TARGET"; else
+              echo "::warning::Redeploy to the tracked/seed deployment failed (rc=$RC) — it no longer exists. Creating a fresh web-app deployment."
             fi
           fi
 
           if [ -z "$ID" ]; then
             echo "Creating a new web-app deployment…"
-            OUT="$(clasp deploy --description "CI ${GITHUB_SHA}" 2>&1)"; echo "$OUT"
+            OUT="$(clasp deploy --description "CI ${GITHUB_SHA}" 2>&1)"
+            RC=$?
+            echo "----- clasp deploy (new) output (rc=$RC) -----"
+            echo "$OUT"
+            echo "----------------------------------------------"
             ID="$(printf '%s' "$OUT" | grep -oiE 'AKfyc[0-9A-Za-z_-]{20,}' | head -1)"
           fi
 
           if [ -z "$ID" ]; then
-            echo "::error::Could not determine a live deployment id from clasp output."
+            echo "::error::Could not create or find a live web-app deployment. The Apps Script project (APPS_SCRIPT_ID) or its credentials appear to be missing — see the clasp output above."
             exit 1
           fi
 
