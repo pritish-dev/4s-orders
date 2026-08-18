@@ -118,7 +118,7 @@ jobs:
           fi
 
           if [ -z "$ID" ]; then
-            echo "::error::Could not create or find a live web-app deployment. The Apps Script project (APPS_SCRIPT_ID) or its credentials appear to be missing — see the clasp output above."
+            echo "::error::Apps Script project not found (every clasp call returns 'Requested entity was not found'). The backend project appears DELETED/TRASHED in Google Drive, or the deploy account lost access. RECOVER: open Google Drive → Trash → restore the Apps Script project, then re-run this workflow. Only if it cannot be restored, recreate it and update the APPS_SCRIPT_ID / APPS_SCRIPT_DEPLOYMENT_ID secrets."
             exit 1
           fi
 
