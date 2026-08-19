@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v51';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v52';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -110,6 +110,7 @@ function doGet(e) {
       case 'auditLog':       result = handleAuditLog(p);        break;
       case 'leagueScores':   result = handleLeagueGet(p);       break;
       case 'lookupCustomer': result = handleLookupCustomer(p);  break;
+      case 'serviceRequests':result = handleListServiceRequests(); break;
       case 'debugPriceList': result = handleDebugPriceList();   break;
       default:               result = { ok: false, error: 'Unknown action: ' + (p.action || '(none)') };
     }
@@ -130,6 +131,8 @@ function doPost(e) {
       case 'updateWON':       result = handleUpdateWON(body);         break;
       case 'updateDelivery':  result = handleUpdateDelivery(body);    break;
       case 'updateService':   result = handleUpdateService(body);     break;
+      case 'createServiceRequest': result = handleCreateServiceRequest(body); break;
+      case 'updateServiceRequest': result = handleUpdateServiceRequest(body); break;
       case 'deleteOrder':     result = handleDeleteOrder(body);       break;
       case 'setAppSerial':    result = handleSetAppSerial(body);      break;
       case 'saveLeagueScore': result = handleLeagueSaveScore(body);   break;
@@ -1113,6 +1116,7 @@ function handleOrders(p) {
   var cSvcOwner = colOf(['SERVICE ASSIGNEE','SERVICE OWNER','SERVICE HANDLED BY']);
   var cSvcReslv = colOf(['SERVICE RESOLVED DATE','SERVICE RESOLUTION DATE']);
   var cSvcStat  = colOf(['SERVICE STATUS','SERVICE REQUEST STATUS']);
+  var cSvcRem   = colOf(['SERVICE REMARKS DATA','SERVICE REMARKS']);
 
   var lastRow = sh.getLastRow();
   var data    = lastRow >= 2 ? sh.getRange(2, 1, lastRow - 1, ncol).getValues() : [];
@@ -1214,6 +1218,12 @@ function handleOrders(p) {
         serviceAssignee: sval(r, cSvcOwner),
         serviceResolvedDate: dstr(r, cSvcReslv),
         serviceStatus: sval(r, cSvcStat),
+        serviceRemarks: (function () {
+          if (cSvcRem < 0) return [];
+          var raw = sval(r, cSvcRem);
+          if (!raw) return [];
+          try { var a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+        })(),
         amt: 0,
         items: [],
         _row: i,
@@ -1614,6 +1624,10 @@ var CRM_APP_COLUMNS = [
   ['SERVICE ASSIGNEE', 'SERVICE OWNER', 'SERVICE HANDLED BY'],
   ['SERVICE RESOLVED DATE', 'SERVICE RESOLUTION DATE'],
   ['SERVICE STATUS', 'SERVICE REQUEST STATUS'],
+  // Dated remarks timeline for a service request — a JSON array of
+  // { date, text, by } entries, appended each time a remark is added, so the
+  // full history of updates is preserved (order-level, repeated on every row).
+  ['SERVICE REMARKS DATA', 'SERVICE REMARKS'],
 ];
 
 // Appends any missing CRM columns (by header name) to the end of the header row
@@ -2272,7 +2286,14 @@ function handleUpdateService(body) {
   var cOwn   = colOf(['SERVICE ASSIGNEE','SERVICE OWNER','SERVICE HANDLED BY']);
   var cResl  = colOf(['SERVICE RESOLVED DATE','SERVICE RESOLUTION DATE']);
   var cStat  = colOf(['SERVICE STATUS','SERVICE REQUEST STATUS']);
+  var cRem   = colOf(['SERVICE REMARKS DATA','SERVICE REMARKS']);
   if (cFlag < 0) return { ok: false, error: 'Service columns are missing from the CRM sheet.' };
+
+  // A dated remark to append to the timeline (optional). Computed once from the
+  // first matching row's existing history, then written to every row of the order.
+  var newRemark = String(body.serviceNewRemark || body.newRemark || '').trim();
+  var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  var remarksJson = null;
 
   var lastRow = sh.getLastRow();
   if (lastRow < 2) return { ok: false, error: 'Order not found: ' + orderNo };
@@ -2290,11 +2311,195 @@ function handleUpdateService(body) {
     if (cOwn   >= 0) sh.getRange(rowN, cOwn   + 1).setValue(assignee);
     if (cResl  >= 0) sh.getRange(rowN, cResl  + 1).setValue(resolved);
     if (cStat  >= 0) sh.getRange(rowN, cStat  + 1).setValue(status);
+    if (cRem   >= 0) {
+      if (!flagOn) {
+        sh.getRange(rowN, cRem + 1).setValue('');   // clearing the request wipes its history
+      } else if (newRemark) {
+        if (remarksJson === null) {
+          var rem = [];
+          try { var a = JSON.parse(String(data[i][cRem] || '')); if (Array.isArray(a)) rem = a; } catch (e) {}
+          rem.push({ date: today, text: newRemark, by: updatedBy });
+          remarksJson = JSON.stringify(rem);
+        }
+        sh.getRange(rowN, cRem + 1).setValue(remarksJson);
+      }
+    }
     updated++;
   }
   if (!updated) return { ok: false, error: 'Order not found: ' + orderNo };
   _appendLog(updatedBy, orderNo, 'UPDATE_SERVICE', (flagOn ? (status || 'Open') : 'Cleared') + (issue ? ' · ' + issue.slice(0, 60) : ''));
   return { ok: true, rows: updated };
+}
+
+// ─── MANUAL SERVICE REQUESTS ──────────────────────────────────────────────────
+// Standalone service requests for orders booked ON PAPER before the app existed
+// (pre-July manual bookings that are not in the CRM). They live in their own tab
+// in the CRM spreadsheet — one row per request — so they can be tracked exactly
+// like the order-based ones: an identifying detail (order no / SO no / customer /
+// contact), a status (Open → Resolved) and a dated remarks timeline.
+var MANUAL_SVC_TAB    = 'MANUAL_SERVICE_REQUESTS';
+var MANUAL_SVC_HEADER = ['ID','ORDER NO','SO NO','CUSTOMER NAME','CONTACT NUMBER','STATUS','CREATED DATE','RESOLVED DATE','CREATED BY','REMARKS DATA'];
+
+function _svcTz(sh) {
+  try { return sh.getParent().getSpreadsheetTimeZone() || Session.getScriptTimeZone(); }
+  catch (e) { return Session.getScriptTimeZone(); }
+}
+
+// Open (and, when `create` is true, lazily create + header) the manual-request tab.
+function _openManualSvcSheet(create) {
+  var ss = SpreadsheetApp.openById(CRM_SHEET_ID);
+  var sh = ss.getSheetByName(MANUAL_SVC_TAB);
+  if (!sh && create) {
+    sh = ss.insertSheet(MANUAL_SVC_TAB);
+    sh.getRange(1, 1, 1, MANUAL_SVC_HEADER.length).setValues([MANUAL_SVC_HEADER]);
+    try { sh.getRange(1, 1, 1, MANUAL_SVC_HEADER.length).setFontWeight('bold'); } catch (e) {}
+    try { sh.setFrozenRows(1); } catch (e) {}
+  }
+  return sh;
+}
+
+// Header→column resolver for the manual-request tab (tolerant of column reorder).
+function _manualSvcCols(sh) {
+  var lastCol = Math.max(1, sh.getLastColumn());
+  var header  = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+  var idx = {};
+  for (var c = 0; c < header.length; c++) { var k = _crmKey(header[c]); if (k && idx[k] === undefined) idx[k] = c; }
+  return {
+    header: header,
+    col: function (name) { var ci = idx[_crmKey(name)]; return ci === undefined ? -1 : ci; }
+  };
+}
+
+// List all manual (paper-order) service requests.
+function handleListServiceRequests() {
+  var sh;
+  try { sh = _openManualSvcSheet(false); } catch (e) { return { ok: false, error: e.message }; }
+  if (!sh) return { ok: true, requests: [] };
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return { ok: true, requests: [] };
+
+  var C = _manualSvcCols(sh), ncol = C.header.length;
+  var cId = C.col('ID'), cOrd = C.col('ORDER NO'), cSo = C.col('SO NO'),
+      cCust = C.col('CUSTOMER NAME'), cPh = C.col('CONTACT NUMBER'), cStat = C.col('STATUS'),
+      cCr = C.col('CREATED DATE'), cRes = C.col('RESOLVED DATE'), cBy = C.col('CREATED BY'),
+      cRem = C.col('REMARKS DATA');
+
+  var tz = _svcTz(sh);
+  function ds(v) {
+    if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+    return String(v == null ? '' : v).trim();
+  }
+
+  var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
+  var out = [];
+  for (var i = 0; i < data.length; i++) {
+    var r = data[i];
+    var id = cId >= 0 ? String(r[cId] || '').trim() : '';
+    if (!id) continue;
+    var rem = [];
+    if (cRem >= 0) { try { var a = JSON.parse(String(r[cRem] || '')); if (Array.isArray(a)) rem = a; } catch (e) {} }
+    out.push({
+      id: id,
+      no:       cOrd  >= 0 ? String(r[cOrd]  || '').trim() : '',
+      soNo:     cSo   >= 0 ? String(r[cSo]   || '').trim() : '',
+      customer: cCust >= 0 ? String(r[cCust] || '').trim() : '',
+      phone:    cPh   >= 0 ? String(r[cPh]   || '').trim() : '',
+      serviceStatus:       (cStat >= 0 ? String(r[cStat] || '').trim() : '') || 'Open',
+      serviceRaisedDate:   ds(cCr  >= 0 ? r[cCr]  : ''),
+      serviceResolvedDate: ds(cRes >= 0 ? r[cRes] : ''),
+      createdBy:  cBy >= 0 ? String(r[cBy] || '').trim() : '',
+      serviceRemarks: rem
+    });
+  }
+  return { ok: true, requests: out };
+}
+
+// Create a manual (paper-order) service request. Needs at least one identifying
+// detail; starts Open with an optional first remark on its timeline.
+function handleCreateServiceRequest(body) {
+  var orderNo  = String(body.orderNo  || '').trim();
+  var soNo     = String(body.soNo     || '').trim();
+  var customer = String(body.customer || '').trim();
+  var phone    = String(body.phone    || '').trim();
+  var remark   = String(body.remark   || '').trim();
+  var by       = String(body.createdBy || body.updatedBy || '').trim();
+  if (!orderNo && !soNo && !customer && !phone)
+    return { ok: false, error: 'Enter at least an order no, SO no, customer name or contact number.' };
+
+  var lock = LockService.getScriptLock();
+  var haveLock = false;
+  try { haveLock = lock.tryLock(15000); } catch (e) {}
+  try {
+    var sh;
+    try { sh = _openManualSvcSheet(true); } catch (e) { return { ok: false, error: e.message }; }
+    var tz = _svcTz(sh);
+    var today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+    var id = 'MSR-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+    var remarks = [];
+    if (remark) remarks.push({ date: today, text: remark, by: by });
+
+    var C = _manualSvcCols(sh), ncol = C.header.length;
+    var row = new Array(ncol);
+    for (var k = 0; k < ncol; k++) row[k] = '';
+    function put(name, val) { var ci = C.col(name); if (ci >= 0) row[ci] = val; }
+    put('ID', id);
+    put('ORDER NO', orderNo);
+    put('SO NO', soNo);
+    put('CUSTOMER NAME', customer);
+    put('CONTACT NUMBER', phone);
+    put('STATUS', 'Open');
+    put('CREATED DATE', today);
+    put('RESOLVED DATE', '');
+    put('CREATED BY', by);
+    put('REMARKS DATA', JSON.stringify(remarks));
+    sh.appendRow(row);
+
+    _appendLog(by, orderNo || soNo || customer, 'CREATE_SERVICE_REQ', (customer || '') + (remark ? ' · ' + remark.slice(0, 60) : ''));
+    return { ok: true, id: id };
+  } finally {
+    if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
+  }
+}
+
+// Update a manual service request: change its status (Open/Resolved) and/or
+// append a dated remark to its timeline.
+function handleUpdateServiceRequest(body) {
+  var id = String(body.id || '').trim();
+  if (!id) return { ok: false, error: 'Service request id is required.' };
+  var status    = String(body.serviceStatus || '').trim();
+  var newRemark = String(body.serviceNewRemark || body.newRemark || '').trim();
+  var by        = String(body.updatedBy || '').trim();
+
+  var sh;
+  try { sh = _openManualSvcSheet(false); } catch (e) { return { ok: false, error: e.message }; }
+  if (!sh) return { ok: false, error: 'No service requests found.' };
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return { ok: false, error: 'Service request not found: ' + id };
+
+  var C = _manualSvcCols(sh), ncol = C.header.length;
+  var cId = C.col('ID'), cStat = C.col('STATUS'), cRes = C.col('RESOLVED DATE'), cRem = C.col('REMARKS DATA');
+  var tz = _svcTz(sh);
+  var today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+
+  var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
+  for (var i = 0; i < data.length; i++) {
+    if (cId < 0 || String(data[i][cId] || '').trim() !== id) continue;
+    var rowN = i + 2;
+    if (status && cStat >= 0) sh.getRange(rowN, cStat + 1).setValue(status);
+    if (cRes >= 0 && status) {
+      if (/resolved/i.test(status)) sh.getRange(rowN, cRes + 1).setValue(String(body.serviceResolvedDate || '').trim() || today);
+      else                          sh.getRange(rowN, cRes + 1).setValue('');
+    }
+    if (newRemark && cRem >= 0) {
+      var rem = [];
+      try { var a = JSON.parse(String(data[i][cRem] || '')); if (Array.isArray(a)) rem = a; } catch (e) {}
+      rem.push({ date: today, text: newRemark, by: by });
+      sh.getRange(rowN, cRem + 1).setValue(JSON.stringify(rem));
+    }
+    _appendLog(by, id, 'UPDATE_SERVICE_REQ', (status || '') + (newRemark ? ' · ' + newRemark.slice(0, 60) : ''));
+    return { ok: true };
+  }
+  return { ok: false, error: 'Service request not found: ' + id };
 }
 
 // Index tabs (inside the CRM spreadsheet) that list every historical order sheet
