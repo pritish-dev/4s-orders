@@ -5731,6 +5731,7 @@ function HistoryScreen({ctx}) {
   const [dateTo,setDateTo]     = useState('');             // ISO yyyy-mm-dd range end for the by-date view
   const [financeFrom,setFinanceFrom] = useState('');       // ISO yyyy-mm-dd range start for Finance Scheme Orders ('' = no lower bound)
   const [financeTo,setFinanceTo]     = useState('');       // ISO yyyy-mm-dd range end for Finance Scheme Orders ('' = no upper bound)
+  const [financeScheme,setFinanceScheme] = useState('');   // financier filter for Finance Scheme Orders ('' = both, else 'Bajaj Finance' | 'Pine Labs')
   useEffect(()=>{ loadOrders(); loadMis({silent:true}); },[]);
   // Delivery-status category helpers. "rescheduled for delivery" also contains
   // "scheduled", so anchor both with ^ to keep the two buckets separate.
@@ -5781,7 +5782,14 @@ function HistoryScreen({ctx}) {
     if(financeTo   && iso > financeTo)   return false;
     return true;
   };
-  const financeOrders = orders.filter(isFinanceScheme).filter(matchesQuery).filter(matchesSales).filter(financeInRange);
+  // Financier filter. '' shows both; otherwise only that financier's orders.
+  // financeBase is everything matching the search / salesperson / date filters;
+  // per-financier counts come off it so the Bajaj / Pine Labs chips stay accurate.
+  const financeSchemeMatch = o => !financeScheme || financeSchemeOf(o.paymentMode)===financeScheme;
+  const financeBase = orders.filter(isFinanceScheme).filter(matchesQuery).filter(matchesSales).filter(financeInRange);
+  const financeBajajCount = financeBase.filter(o=>financeSchemeOf(o.paymentMode)==='Bajaj Finance').length;
+  const financePineCount  = financeBase.filter(o=>financeSchemeOf(o.paymentMode)==='Pine Labs').length;
+  const financeOrders = financeBase.filter(financeSchemeMatch);
   const financeCount = orders.filter(isFinanceScheme).length;
   const financeTotalExGst = financeOrders.reduce((s,o)=>s+financeExGst(o),0);
 
@@ -6400,6 +6408,13 @@ function HistoryScreen({ctx}) {
               <div style={{fontSize:26}}>💳</div>
             </div>
           </div>
+          {/* Financier filter — separate Bajaj Finance from Pine Labs (All shows both). */}
+          <div style={{padding:'0 18px 8px',display:'flex',gap:6,overflowX:'auto',alignItems:'center'}}>
+            <span style={{fontSize:11,color:T.ink4,fontWeight:700,flexShrink:0}}>SCHEME</span>
+            <span onClick={()=>setFinanceScheme('')} style={{padding:'5px 10px',borderRadius:99,background:!financeScheme?T.ink:'#fff',color:!financeScheme?'#fff':T.ink2,border:`1px solid ${!financeScheme?T.ink:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0}}>All ({financeBajajCount+financePineCount})</span>
+            <span onClick={()=>setFinanceScheme('Bajaj Finance')} style={{padding:'5px 10px',borderRadius:99,background:financeScheme==='Bajaj Finance'?T.ink:'#fff',color:financeScheme==='Bajaj Finance'?'#fff':T.ink2,border:`1px solid ${financeScheme==='Bajaj Finance'?T.ink:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>Bajaj Finance ({financeBajajCount})</span>
+            <span onClick={()=>setFinanceScheme('Pine Labs')} style={{padding:'5px 10px',borderRadius:99,background:financeScheme==='Pine Labs'?T.ink:'#fff',color:financeScheme==='Pine Labs'?'#fff':T.ink2,border:`1px solid ${financeScheme==='Pine Labs'?T.ink:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>Pine Labs ({financePineCount})</span>
+          </div>
           <div style={{padding:'0 18px 8px',display:'flex',gap:6,overflowX:'auto',alignItems:'center'}}>
             <span style={{fontSize:11,color:T.ink4,fontWeight:700,flexShrink:0}}>SALES</span>
             <span onClick={()=>setSalesFilter('')} style={{padding:'5px 10px',borderRadius:99,background:!salesFilter?T.green:'#fff',color:!salesFilter?'#fff':T.ink2,border:`1px solid ${!salesFilter?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0}}>All</span>
@@ -6434,7 +6449,7 @@ function HistoryScreen({ctx}) {
             <div style={{padding:'48px 24px',textAlign:'center'}}>
               <div style={{width:52,height:52,borderRadius:14,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12,fontSize:24}}>💳</div>
               <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No finance-scheme orders</div>
-              <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>{(financeFrom||financeTo)?'None booked in this date range — try widening or clearing it.':(query||salesFilter)?'None match the current search / salesperson filter.':'Orders booked with Bajaj Finance or Pine Labs EMI appear here.'}</div>
+              <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>{financeScheme?`No ${financeScheme} orders match the current filters.`:(financeFrom||financeTo)?'None booked in this date range — try widening or clearing it.':(query||salesFilter)?'None match the current search / salesperson filter.':'Orders booked with Bajaj Finance or Pine Labs EMI appear here.'}</div>
             </div>
           )}
           <div style={{height:24}}/>
