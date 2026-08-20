@@ -541,7 +541,10 @@ function orderTotals(o) {
 function orderReceived(o) {
   const { total } = orderTotals(o);
   const later   = (o.moneyReceipts || []).slice(1).reduce((s, mr) => s + (Number(mr && mr.amt) || 0), 0);
-  let received  = (Number(o.earnest) || 0) + later;
+  // Finance-scheme orders: the Godrej reimbursement is part of the money paid for
+  // the order (financier advance + Godrej reimbursement = order value), so count it.
+  const reimb   = Number(o.godrejReimbursement) || 0;
+  let received  = (Number(o.earnest) || 0) + later + reimb;
   if (received > total) received = total;            // never record more than the bill
   let balance = total - received;
   const roundBudget = 2 + 10 * ((o.items || []).length);   // per-line GST rounding tolerance
@@ -1573,6 +1576,12 @@ const BLANK_ORDER = () => ({
   customerCode:'', poRef:'', source:'',
   orderDiscount:'', plannedDly:'', installNote:'',
   paymentMode:'', earnest:'',
+  // Finance-scheme (Bajaj Finance / Pine Labs EMI) bookings: the financier funds the
+  // booking advance (earnest) and Godrej reimburses the rest — together they equal
+  // the order value. godrejReimbursement holds that reimbursed amount + its date.
+  godrejReimbursement:'', godrejReimbursementDate:'',
+  // Installation Happy Code — required to move the order to "Installation Done".
+  happyCode:'',
   // SI No — the order-form serial the salesperson enters (printed as the "Sl"
   // part of the PDF's "Order No. (Sl / Receipt)" field).
   slNo:'',
@@ -1589,7 +1598,7 @@ const BLANK_ORDER = () => ({
   // After-sales service / issue tracking. serviceFlag is set when a delivered order
   // needs a service visit (e.g. a product found damaged/defective at installation).
   // status is 'Open' until the issue is resolved, then 'Resolved'.
-  serviceFlag:false, serviceIssue:'', serviceRaisedDate:'', serviceAssignee:'', serviceResolvedDate:'', serviceStatus:'',
+  serviceFlag:false, serviceReqNo:'', serviceIssue:'', serviceRaisedDate:'', serviceAssignee:'', serviceResolvedDate:'', serviceStatus:'', serviceHappyCode:'',
   followUp:'', salesExec:'', won:'',
   orderType:'B2C', items:[],
   // Customer profiling (saved to sheet, not on PDF). DOB & anniversary optional.
@@ -1623,6 +1632,17 @@ const normalizeSalesNames = list => (Array.isArray(list) ? list : []).map(o =>
 // "Partial Delivery" means some items are delivered and the rest are still Pending
 // for delivery (the delivered items are tracked per-order).
 const DELIVERY_STATUSES = ['Pending', 'Scheduled for Delivery', 'Rescheduled for Delivery', 'Partial Delivery', 'Delivered', 'Installation Done'];
+// Finance-scheme (EMI) payment modes. When one is chosen at booking, Money Receipt 1
+// becomes the financier (Bajaj Finance / Pine Labs) — its amount + date are entered by
+// us — and a "Reimbursement from Godrej" amount is added; together the two make up the
+// order value (the total the customer pays). Returns the financier name, or ''.
+function financeSchemeOf(paymentMode) {
+  const p = String(paymentMode || '');
+  if (/bajaj/i.test(p)) return 'Bajaj Finance';
+  if (/pine\s*labs/i.test(p)) return 'Pine Labs';
+  return '';
+}
+function isFinanceScheme(o) { return !!financeSchemeOf(o && o.paymentMode); }
 // Godrej modular product families. On the CUSTOMER copy of the PDF, every item
 // belonging to one family is collapsed into a single line (family name + the
 // summed line total). The SALES copy stays fully itemised.
@@ -2346,10 +2366,10 @@ function App() {
     finally { setLoading(false); }
   }
 
-  async function doUpdateDelivery(orderNo, internalNo, deliveryStatus, deliveredItems, plannedDly) {
+  async function doUpdateDelivery(orderNo, internalNo, deliveryStatus, deliveredItems, plannedDly, happyCode) {
     setLoading(true);
     try {
-      const res = await apiPost({ action:'updateDelivery', orderNo, internalNo, deliveryStatus, deliveredItems, plannedDly, updatedBy: user?.name });
+      const res = await apiPost({ action:'updateDelivery', orderNo, internalNo, deliveryStatus, deliveredItems, plannedDly, happyCode, updatedBy: user?.name });
       if (res.ok) { showToast('Delivery status updated ✓'); loadOrders(); return true; }
       else { showToast(res.error||'Update failed','bad'); return false; }
     } catch(e) { showToast(e.message,'bad'); return false; }
@@ -4144,6 +4164,7 @@ function OrderFormScreen({ctx}) {
   const o = order;
   const [partialPicker,setPartialPicker] = React.useState(false);
   const [reschedulePicker,setReschedulePicker] = React.useState(false);
+  const [happyPrompt,setHappyPrompt] = React.useState(false);   // Installation Done → Happy Code
   // Delivery-status change: "Partial Delivery" opens the item picker so we can
   // record which items are delivered (the rest stay Pending for Delivery).
   // "Rescheduled for Delivery" opens a date picker to set the new delivery date.
@@ -4157,7 +4178,17 @@ function OrderFormScreen({ctx}) {
     }
     if(/partial/i.test(val)){ setPartialPicker(true); return; }
     if(/rescheduled/i.test(val)){ setReschedulePicker(true); return; }
+    // "Installation Done" (Completed) requires a Happy Code — unless one is already
+    // on record for this order.
+    if(/installation done/i.test(val) && !String(o.happyCode||'').trim()){ setHappyPrompt(true); return; }
     setOrder(prev=>({...prev,deliveryStatus:val}));
+  }
+  async function confirmInstallHappy(code){
+    setHappyPrompt(false);
+    setOrder(prev=>({...prev,deliveryStatus:'Installation Done',happyCode:code}));
+    // Persist immediately if the order already exists so the gate is enforced server-side too.
+    if(order.no){ const ok = await doUpdateDelivery(order.no, order.internalNo, 'Installation Done', null, null, code); return ok; }
+    return true;
   }
   async function confirmPartialDelivery(deliveredItems){
     setPartialPicker(false);
@@ -4512,6 +4543,16 @@ function OrderFormScreen({ctx}) {
               </div>
             </div>
           );})}
+          {financeSchemeOf(o.paymentMode) && (
+            <div style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
+              <div style={{flex:2,borderRight:`1px solid ${T.line}`}}>
+                <Field label="Reimbursement from Godrej" value={o.godrejReimbursement} onChange={v=>setF('godrejReimbursement',String(v).replace(/[^\d.]/g,''))} mono type="number" hint={`${financeSchemeOf(o.paymentMode)} amount + this = order value`}/>
+              </div>
+              <div style={{flex:1}}>
+                <Field label="Date" value={o.godrejReimbursementDate} onChange={v=>setF('godrejReimbursementDate',v)} mono type="date"/>
+              </div>
+            </div>
+          )}
           {(()=>{ const {received,balance}=orderReceived(o); return (
             <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12}}>
               <span style={{color:T.ink3,fontWeight:600}}>Received so far <b style={{fontFamily:T.mono,color:T.ink}}>₹{received.toLocaleString('en-IN')}</b></span>
@@ -4535,6 +4576,7 @@ function OrderFormScreen({ctx}) {
         </div>
         {partialPicker && <PartialDeliveryModal order={o} onCancel={()=>setPartialPicker(false)} onConfirm={confirmPartialDelivery}/>}
         {reschedulePicker && <RescheduleModal order={o} onCancel={()=>setReschedulePicker(false)} onConfirm={confirmReschedule}/>}
+        {happyPrompt && <HappyCodeModal title="Happy Code" subtitle={(o.no||'')+' · '+(o.customer||'')} note='A Happy Code is required to mark this order "Installation Done" (Completed).' confirmLabel="Mark Installed" onCancel={()=>setHappyPrompt(false)} onConfirm={confirmInstallHappy}/>}
       </div>
     );
   }
@@ -4895,7 +4937,7 @@ function OrderFormScreen({ctx}) {
         <SectionHead n="06" label="Payment" id="sec-payment"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>PAYMENT MODE <span style={{color:T.bad,marginLeft:3}}>*</span></div>
-          <select value={o.paymentMode} onChange={e=>setF('paymentMode',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.paymentMode?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+          <select value={o.paymentMode} onChange={e=>{const pm=e.target.value; const fin=financeSchemeOf(pm); setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:'',amt:''}); if(fin){arr[0]={...arr[0],no:fin};} else if(financeSchemeOf(prev.paymentMode)){arr[0]={...arr[0],no:''};} return {...prev,paymentMode:pm,moneyReceipts:arr,receiptNo: fin?fin:(financeSchemeOf(prev.paymentMode)?'':prev.receiptNo)};});}} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.paymentMode?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
             <option value="">Select payment mode…</option>
             <option>Cash</option>
             <option>UPI (GPay / PhonePe / Paytm)</option>
@@ -4911,25 +4953,70 @@ function OrderFormScreen({ctx}) {
         {/* Money receipt no + date + amount — updatable up to 3 times. Each receipt
             carries the amount collected against it: receipt 1 is the booking advance
             (stored in `earnest`), receipts 2 & 3 their own part-payments. The three
-            amounts add up to the total advance and shrink the outstanding balance. */}
-        {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:'',amt:''}; const setMR=(field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:'',amt:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; });
-          // Receipt 1's amount is the booking advance kept in `earnest`; receipts 2 & 3
-          // store their own `amt`.
-          const amtVal = i===0 ? o.earnest : mr.amt;
-          const setAmt = i===0 ? (v=>setF('earnest',v)) : (v=>setMR('amt',v));
-          return (
-          <div key={i} style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
-            <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
-              <Field label={`Money Receipt No ${i+1}`} value={mr.no} onChange={v=>setMR('no',v)} mono/>
+            amounts add up to the total advance and shrink the outstanding balance.
+            For a finance-scheme (Bajaj Finance / Pine Labs EMI) booking, Money Receipt
+            1 IS the financier (amount + date entered by us) and a "Reimbursement from
+            Godrej" is added — together they equal the order value. */}
+        {(()=>{
+          const setMR=(i,field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:'',amt:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; });
+          const fin=financeSchemeOf(o.paymentMode);
+          if(fin){
+            const mr1=(o.moneyReceipts&&o.moneyReceipts[0])||{no:'',date:'',amt:''};
+            const finAmt=Number(o.earnest)||0, reimb=Number(o.godrejReimbursement)||0, paid=finAmt+reimb, roundT=Math.round(total), gap=roundT-paid;
+            return (<React.Fragment>
+              <div style={{padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.ink3,lineHeight:1.45}}>Financed via <b>{fin}</b>. Enter the <b>{fin}</b> amount &amp; date, plus the <b>Reimbursement from Godrej</b> — together they make up the order value.</div>
+              <div style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
+                <div style={{flex:1,borderRight:`1px solid ${T.line}`,padding:'11px 14px'}}>
+                  <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:3}}>Money Receipt 1</div>
+                  <div style={{fontSize:15,fontWeight:700,color:T.ink}}>{fin}</div>
+                </div>
+                <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
+                  <Field label="Date" value={mr1.date} onChange={v=>setMR(0,'date',v)} mono type="date"/>
+                </div>
+                <div style={{flex:1}}>
+                  <Field label={fin+' Amount'} value={o.earnest} onChange={v=>setF('earnest',v)} mono type="number" error={paid>roundT?`Exceeds order total ₹${roundT.toLocaleString('en-IN')}`:undefined}/>
+                </div>
+              </div>
+              <div style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
+                <div style={{flex:2,borderRight:`1px solid ${T.line}`}}>
+                  <Field label="Reimbursement from Godrej" value={o.godrejReimbursement} onChange={v=>setF('godrejReimbursement',v.replace(/[^\d.]/g,''))} mono type="number" hint="Amount Godrej reimburses"/>
+                </div>
+                <div style={{flex:1}}>
+                  <Field label="Date" value={o.godrejReimbursementDate} onChange={v=>setF('godrejReimbursementDate',v)} mono type="date"/>
+                </div>
+              </div>
+              <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12,gap:8,flexWrap:'wrap'}}>
+                <span style={{color:T.ink3,fontWeight:600}}>{fin} <b style={{fontFamily:T.mono,color:T.ink}}>₹{finAmt.toLocaleString('en-IN')}</b> + Godrej <b style={{fontFamily:T.mono,color:T.ink}}>₹{reimb.toLocaleString('en-IN')}</b></span>
+                <span style={{color:Math.abs(gap)<=2?T.ok:(gap<0?T.bad:T.warn),fontWeight:700}}>{Math.abs(gap)<=2?'= Order value ✓':(gap<0?`Over by ₹${Math.abs(gap).toLocaleString('en-IN')}`:`₹${gap.toLocaleString('en-IN')} to reach order value`)}</span>
+              </div>
+              {[1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:'',amt:''}; return (
+                <div key={i} style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
+                  <div style={{flex:1,borderRight:`1px solid ${T.line}`}}><Field label={`Money Receipt No ${i+1}`} value={mr.no} onChange={v=>setMR(i,'no',v)} mono/></div>
+                  <div style={{flex:1,borderRight:`1px solid ${T.line}`}}><Field label={`Date ${i+1}`} value={mr.date} onChange={v=>setMR(i,'date',v)} mono type="date"/></div>
+                  <div style={{flex:1}}><Field label={`Amount ${i+1}`} value={mr.amt} onChange={v=>setMR(i,'amt',v)} mono type="number" hint="Later payment"/></div>
+                </div>
+              );})}
+            </React.Fragment>);
+          }
+          return [0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:'',amt:''};
+            // Receipt 1's amount is the booking advance kept in `earnest`; receipts 2 & 3
+            // store their own `amt`.
+            const amtVal = i===0 ? o.earnest : mr.amt;
+            const setAmt = i===0 ? (v=>setF('earnest',v)) : (v=>setMR(i,'amt',v));
+            return (
+            <div key={i} style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
+              <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
+                <Field label={`Money Receipt No ${i+1}`} value={mr.no} onChange={v=>setMR(i,'no',v)} mono/>
+              </div>
+              <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
+                <Field label={`Date ${i+1}`} value={mr.date} onChange={v=>setMR(i,'date',v)} mono type="date"/>
+              </div>
+              <div style={{flex:1}}>
+                <Field label={`Amount ${i+1}`} value={amtVal} onChange={setAmt} mono type="number" hint={i===0?'Advance at booking':'Later payment'} error={i===0 && (Number(o.earnest)||0) > total ? `Exceeds order total ₹${total.toLocaleString('en-IN')}` : undefined}/>
+              </div>
             </div>
-            <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
-              <Field label={`Date ${i+1}`} value={mr.date} onChange={v=>setMR('date',v)} mono type="date"/>
-            </div>
-            <div style={{flex:1}}>
-              <Field label={`Amount ${i+1}`} value={amtVal} onChange={setAmt} mono type="number" hint={i===0?'Advance at booking':'Later payment'} error={i===0 && (Number(o.earnest)||0) > total ? `Exceeds order total ₹${total.toLocaleString('en-IN')}` : undefined}/>
-            </div>
-          </div>
-        );})}
+          );});
+        })()}
         {(()=>{ const {received,balance}=orderReceived(o); return (
           <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12}}>
             <span style={{color:T.ink3,fontWeight:600}}>Received so far <b style={{fontFamily:T.mono,color:T.ink}}>₹{received.toLocaleString('en-IN')}</b></span>
@@ -4998,6 +5085,7 @@ function OrderFormScreen({ctx}) {
         <Btn primary full disabled={ctx.loading} onClick={handleSave}>Save & PDF →</Btn>
       </div>
       {partialPicker && <PartialDeliveryModal order={o} onCancel={()=>setPartialPicker(false)} onConfirm={confirmPartialDelivery}/>}
+      {happyPrompt && <HappyCodeModal title="Happy Code" subtitle={(o.no||'')+' · '+(o.customer||'')} note='A Happy Code is required to mark this order "Installation Done" (Completed).' confirmLabel="Mark Installed" onCancel={()=>setHappyPrompt(false)} onConfirm={confirmInstallHappy}/>}
     </div>
   );
 }
@@ -5295,6 +5383,41 @@ function PDFPreviewScreen({ctx}) {
   );
 }
 
+// ─── Happy Code prompt ───────────────────────────────────────
+// A small modal that collects the Happy Code needed to complete an action — either
+// moving an order to "Installation Done" or resolving a service request. The action
+// is blocked until a non-empty code is entered.
+function HappyCodeModal({title, subtitle, note, confirmLabel, onCancel, onConfirm}){
+  const [code,setCode] = useState('');
+  const [busy,setBusy] = useState(false);
+  async function go(){
+    const c = code.trim();
+    if(!c) return;
+    setBusy(true);
+    const ok = await onConfirm(c);
+    setBusy(false);
+    if(ok===false) return;   // keep open on failure
+  }
+  return (
+    <div onClick={onCancel} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.5)',zIndex:10000,display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+      <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:380,background:'#fff',borderRadius:14,overflow:'hidden'}}>
+        <div style={{padding:'16px 18px 10px'}}>
+          <div style={{fontSize:16,fontWeight:800}}>{title||'Enter Happy Code'}</div>
+          {subtitle && <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:3}}>{subtitle}</div>}
+          {note && <div style={{fontSize:12,color:T.ink3,marginTop:8,lineHeight:1.45}}>{note}</div>}
+        </div>
+        <div style={{padding:'0 18px 6px'}}>
+          <input autoFocus value={code} onChange={e=>setCode(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')go();}} placeholder="Happy Code" style={{width:'100%',border:`1px solid ${T.line}`,borderRadius:8,padding:'11px 12px',fontSize:16,fontFamily:T.mono,color:T.ink,outline:'none',boxSizing:'border-box'}}/>
+        </div>
+        <div style={{display:'flex',gap:8,padding:'12px 18px 16px'}}>
+          <Btn onClick={onCancel} disabled={busy}>Cancel</Btn>
+          <Btn primary full onClick={go} disabled={busy||!code.trim()}>{confirmLabel||'Confirm'}</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Service Requests (after-sales issue tracking) ───────────
 // Raise / track a service request against an order — e.g. a product found damaged
 // or defective at installation. A flagged order records the issue, when it was
@@ -5331,11 +5454,14 @@ function ServiceRequestModal({order, ctx, onClose}){
   const [assignee,setAssignee] = useState(order.serviceAssignee||'');
   const [status,setStatus]     = useState(order.serviceStatus||'Open');
   const [resolved,setResolved] = useState(order.serviceResolvedDate||'');
+  const [happyCode,setHappyCode] = useState(order.serviceHappyCode||'');
   const [newRemark,setNewRemark] = useState('');
   const [busy,setBusy]         = useState(false);
   const flagged = !!order.serviceFlag;
   async function save(flagOn){
     if(flagOn && !issue.trim()){ ctx.showToast('Describe the issue first','bad'); return; }
+    // Resolving a service request requires a Happy Code.
+    if(flagOn && status==='Resolved' && !happyCode.trim()){ ctx.showToast('Enter the Happy Code to resolve this request','bad'); return; }
     setBusy(true);
     const ok = await doUpdateService(order.no, order.internalNo, {
       serviceFlag: flagOn,
@@ -5344,6 +5470,7 @@ function ServiceRequestModal({order, ctx, onClose}){
       serviceAssignee: assignee.trim(),
       serviceResolvedDate: status==='Resolved' ? (resolved||today) : '',
       serviceStatus: flagOn ? status : '',
+      serviceHappyCode: flagOn && status==='Resolved' ? happyCode.trim() : '',
       serviceNewRemark: flagOn ? newRemark.trim() : '',
     });
     setBusy(false);
@@ -5354,12 +5481,13 @@ function ServiceRequestModal({order, ctx, onClose}){
       <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:600,background:'#fff',borderRadius:'14px 14px 0 0',maxHeight:'92vh',overflowY:'auto'}}>
         <div style={{padding:'14px 16px',borderBottom:`1px solid ${T.line}`,display:'flex',justifyContent:'space-between',alignItems:'center',position:'sticky',top:0,background:'#fff',zIndex:1}}>
           <div>
-            <div style={{fontSize:16,fontWeight:700}}>Service request</div>
+            <div style={{fontSize:16,fontWeight:700}}>Service request{order.serviceReqNo?(' · '+order.serviceReqNo):''}</div>
             <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{order.no} · {order.customer}</div>
           </div>
           <span onClick={onClose} style={{cursor:'pointer'}}>{Icon.close(T.ink4)}</span>
         </div>
         <div>
+          {order.serviceReqNo && <div style={{padding:'9px 14px',borderBottom:`1px solid ${T.line}`,background:T.paper}}><div style={{fontSize:10,color:T.ink4,letterSpacing:0.6,textTransform:'uppercase'}}>Service Request No</div><div style={{fontSize:15,fontWeight:700,fontFamily:T.mono}}>{order.serviceReqNo}</div></div>}
           <Field label="Issue / complaint" value={issue} onChange={setIssue} multiline required hint="e.g. Wardrobe shutter found damaged at installation; customer raised a complaint"/>
           <Field label="Issue raised on" value={raised} onChange={setRaised} type="date" mono/>
           <Field label="Handled by" value={assignee} onChange={setAssignee} hint="Who is taking care of this issue"/>
@@ -5370,6 +5498,7 @@ function ServiceRequestModal({order, ctx, onClose}){
             </select>
           </div>
           {status==='Resolved' && <Field label="Resolved on" value={resolved} onChange={setResolved} type="date" mono/>}
+          {status==='Resolved' && <Field label="Happy Code" value={happyCode} onChange={setHappyCode} mono required hint="Required to resolve — the code the customer shares once the issue is fixed"/>}
           <ServiceRemarks remarks={order.serviceRemarks} newRemark={newRemark} setNewRemark={setNewRemark}/>
         </div>
         <div style={{display:'flex',gap:8,padding:'12px 14px',borderTop:`1px solid ${T.line}`,position:'sticky',bottom:0,background:'#fff'}}>
@@ -5396,6 +5525,7 @@ function ManualServiceModal({req, ctx, onClose}){
   const [remark0,setRemark0]   = useState('');          // first remark (create only)
   const [status,setStatus]     = useState(req?.serviceStatus||'Open');
   const [resolved,setResolved] = useState(req?.serviceResolvedDate||'');
+  const [happyCode,setHappyCode] = useState(req?.serviceHappyCode||'');
   const [newRemark,setNewRemark] = useState('');
   const [busy,setBusy]         = useState(false);
   async function create(){
@@ -5406,10 +5536,13 @@ function ManualServiceModal({req, ctx, onClose}){
     if(ok) onClose();
   }
   async function update(){
+    // Resolving a service request requires a Happy Code.
+    if(status==='Resolved' && !happyCode.trim()){ ctx.showToast('Enter the Happy Code to resolve this request','bad'); return; }
     setBusy(true);
     const ok = await doUpdateServiceRequest(req.id, {
       serviceStatus: status,
       serviceResolvedDate: status==='Resolved' ? (resolved||today) : '',
+      happyCode: status==='Resolved' ? happyCode.trim() : '',
       newRemark: newRemark.trim(),
     });
     setBusy(false);
@@ -5420,7 +5553,7 @@ function ManualServiceModal({req, ctx, onClose}){
       <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:600,background:'#fff',borderRadius:'14px 14px 0 0',maxHeight:'92vh',overflowY:'auto'}}>
         <div style={{padding:'14px 16px',borderBottom:`1px solid ${T.line}`,display:'flex',justifyContent:'space-between',alignItems:'center',position:'sticky',top:0,background:'#fff',zIndex:1}}>
           <div>
-            <div style={{fontSize:16,fontWeight:700}}>{isNew?'New service request':'Service request'}</div>
+            <div style={{fontSize:16,fontWeight:700}}>{isNew?'New service request':('Service request'+(req.srNo?(' · '+req.srNo):''))}</div>
             <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{isNew?'Manual / paper order':((req.no||req.soNo||'—')+' · '+(req.customer||'—'))}</div>
           </div>
           <span onClick={onClose} style={{cursor:'pointer'}}>{Icon.close(T.ink4)}</span>
@@ -5437,6 +5570,7 @@ function ManualServiceModal({req, ctx, onClose}){
         ) : (
           <div>
             <div style={{padding:'11px 14px',borderBottom:`1px solid ${T.line}`,display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+              {req.srNo && <div><div style={{fontSize:10,color:T.ink4,letterSpacing:0.6,textTransform:'uppercase'}}>Service Request No</div><div style={{fontSize:14,fontWeight:700,fontFamily:T.mono}}>{req.srNo}</div></div>}
               {req.no   && <div><div style={{fontSize:10,color:T.ink4,letterSpacing:0.6,textTransform:'uppercase'}}>Order no</div><div style={{fontSize:14,fontWeight:600,fontFamily:T.mono}}>{req.no}</div></div>}
               {req.soNo && <div><div style={{fontSize:10,color:T.ink4,letterSpacing:0.6,textTransform:'uppercase'}}>Godrej SO no</div><div style={{fontSize:14,fontWeight:600,fontFamily:T.mono}}>{req.soNo}</div></div>}
               {req.customer && <div><div style={{fontSize:10,color:T.ink4,letterSpacing:0.6,textTransform:'uppercase'}}>Customer</div><div style={{fontSize:14,fontWeight:600}}>{req.customer}</div></div>}
@@ -5449,6 +5583,7 @@ function ManualServiceModal({req, ctx, onClose}){
               </select>
             </div>
             {status==='Resolved' && <Field label="Resolved on" value={resolved} onChange={setResolved} type="date" mono/>}
+            {status==='Resolved' && <Field label="Happy Code" value={happyCode} onChange={setHappyCode} mono required hint="Required to resolve — the code the customer shares once the issue is fixed"/>}
             <ServiceRemarks remarks={req.serviceRemarks} newRemark={newRemark} setNewRemark={setNewRemark}/>
           </div>
         )}
@@ -5485,6 +5620,7 @@ function ServiceScreen({ctx}){
       <div key={o._manual?('m'+o.id):('o'+o.no)} onClick={()=>o._manual?setSelManual(o):setSel(o)} style={{background:'#fff',borderBottom:`1px solid ${T.line}`,padding:'12px 18px',cursor:'pointer',display:'grid',gridTemplateColumns:'1fr auto',gap:10}}>
         <div style={{minWidth:0}}>
           <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+            {(o._manual?o.srNo:o.serviceReqNo) && <Pill tone="ink" mono size="sm">{o._manual?o.srNo:o.serviceReqNo}</Pill>}
             <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no||o.soNo||'—'}</span>
             <Pill tone={isOpen?'bad':'ok'} size="sm">{isOpen?'OPEN':'RESOLVED'}</Pill>
             {o._manual && <Pill tone="purple" size="sm">MANUAL</Pill>}
@@ -5567,6 +5703,7 @@ function HistoryScreen({ctx}) {
   const [partialOrder,setPartialOrder] = useState(null);   // order awaiting the partial-delivery picker
   const [rescheduleOrder,setRescheduleOrder] = useState(null); // order awaiting the reschedule date picker
   const [serviceOrder,setServiceOrder] = useState(null);   // order whose service request is being raised/edited
+  const [happyOrder,setHappyOrder] = useState(null);       // order awaiting a Happy Code to mark Installation Done
   const [statusView,setStatusView] = useState(null);       // null=ledger · 'menu'=category grid · <catId>=that category's orders
   const [statusSales,setStatusSales] = useState('');       // salesperson filter inside a status category ('' = all)
   const [statusMonth,setStatusMonth] = useState('');       // month filter for the Completed status ('' = all months, else 'yyyy-mm')
@@ -5574,6 +5711,7 @@ function HistoryScreen({ctx}) {
   const [reportSales,setReportSales] = useState('');       // salesperson filter on the report ('' = whole team)
   const [dateView,setDateView] = useState(false);          // false=ledger · true=by-date drill-down
   const [watchView,setWatchView] = useState(false);        // false=ledger · true=Delivery Watch (approaching/overdue)
+  const [financeView,setFinanceView] = useState(false);    // false=ledger · true=Finance Scheme Orders (Bajaj / Pine Labs)
   const [dateFrom,setDateFrom] = useState('');             // ISO yyyy-mm-dd range start for the by-date view
   const [dateTo,setDateTo]     = useState('');             // ISO yyyy-mm-dd range end for the by-date view
   useEffect(()=>{ loadOrders(); loadMis({silent:true}); },[]);
@@ -5611,6 +5749,15 @@ function HistoryScreen({ctx}) {
   const matchesSales = o => !salesFilter || (o.salesExec||'').trim().toLowerCase()===salesFilter.toLowerCase();
   const shown = orders.filter(active.filter).filter(matchesQuery).filter(matchesSales);
 
+  // ── Finance Scheme Orders ───────────────────────────────────────────────────
+  // Every order booked with a finance scheme (Bajaj Finance / Pine Labs EMI), shown
+  // with its order value WITHOUT GST (order value ÷ 1.18). Search + salesperson
+  // filters from the ledger still apply.
+  const financeExGst = o => Math.round((Number(o.amt)||0)/(1+GST_RATE));
+  const financeOrders = orders.filter(isFinanceScheme).filter(matchesQuery).filter(matchesSales);
+  const financeCount = orders.filter(isFinanceScheme).length;
+  const financeTotalExGst = financeOrders.reduce((s,o)=>s+financeExGst(o),0);
+
   // ── Delivery Watch data ────────────────────────────────────────────────────
   // Orders whose delivery is due tomorrow, due today, or already overdue AND that
   // still need action (not Scheduled / Delivered / Installation Done). Sorted
@@ -5637,6 +5784,8 @@ function HistoryScreen({ctx}) {
     if(/partial/i.test(val)){ setPartialOrder(o); return; }
     // Rescheduled for Delivery needs a new date.
     if(/rescheduled/i.test(val)){ setRescheduleOrder(o); return; }
+    // "Installation Done" (Completed) needs a Happy Code — unless one is on record.
+    if(/installation done/i.test(val) && !String(o.happyCode||'').trim()){ setHappyOrder(o); return; }
     await doUpdateDelivery(o.no, o.internalNo, val);
   }
   async function confirmPartial(deliveredItems){
@@ -5646,6 +5795,12 @@ function HistoryScreen({ctx}) {
   async function confirmReschedule(newDate){
     const o = rescheduleOrder; setRescheduleOrder(null);
     if(o && newDate) await doUpdateDelivery(o.no, o.internalNo, 'Rescheduled for Delivery', null, newDate);
+  }
+  async function confirmHappy(code){
+    const o = happyOrder;
+    const ok = o ? await doUpdateDelivery(o.no, o.internalNo, 'Installation Done', null, null, code) : true;
+    if(ok!==false) setHappyOrder(null);
+    return ok;
   }
 
   if(wonOrder) return <WONUpdateScreen ctx={ctx} orderOverride={wonOrder} onClose={()=>setWonOrder(null)}/>;
@@ -5863,6 +6018,7 @@ function HistoryScreen({ctx}) {
         </div>
         {partialOrder && <PartialDeliveryModal order={partialOrder} onCancel={()=>setPartialOrder(null)} onConfirm={confirmPartial}/>}
         {rescheduleOrder && <RescheduleModal order={rescheduleOrder} onCancel={()=>setRescheduleOrder(null)} onConfirm={confirmReschedule}/>}
+        {happyOrder && <HappyCodeModal title="Happy Code" subtitle={(happyOrder.no||'')+' · '+(happyOrder.customer||'')} note='A Happy Code is required to mark this order "Installation Done" (Completed).' confirmLabel="Mark Installed" onCancel={()=>setHappyOrder(null)} onConfirm={confirmHappy}/>}
         {serviceOrder && <ServiceRequestModal order={serviceOrder} ctx={ctx} onClose={()=>setServiceOrder(null)}/>}
         <BottomNav screen="history" nav={nav}/>
       </div>
@@ -5929,6 +6085,7 @@ function HistoryScreen({ctx}) {
         </div>
         {partialOrder && <PartialDeliveryModal order={partialOrder} onCancel={()=>setPartialOrder(null)} onConfirm={confirmPartial}/>}
         {rescheduleOrder && <RescheduleModal order={rescheduleOrder} onCancel={()=>setRescheduleOrder(null)} onConfirm={confirmReschedule}/>}
+        {happyOrder && <HappyCodeModal title="Happy Code" subtitle={(happyOrder.no||'')+' · '+(happyOrder.customer||'')} note='A Happy Code is required to mark this order "Installation Done" (Completed).' confirmLabel="Mark Installed" onCancel={()=>setHappyOrder(null)} onConfirm={confirmHappy}/>}
         {serviceOrder && <ServiceRequestModal order={serviceOrder} ctx={ctx} onClose={()=>setServiceOrder(null)}/>}
         <BottomNav screen="history" nav={nav}/>
       </div>
@@ -6183,6 +6340,73 @@ function HistoryScreen({ctx}) {
     );
   }
 
+  // ── Finance Scheme Orders drill-down ───────────────────────────────────────
+  // All orders booked via a finance scheme (Bajaj Finance / Pine Labs EMI), each
+  // shown with its order value WITHOUT GST. Reached from the "Finance Scheme
+  // Orders" box on the ledger. Salesperson + search filters still apply here.
+  if (financeView) {
+    const money = n => '₹'+Math.round(n||0).toLocaleString('en-IN');
+    return (
+      <div className="screen">
+        <div style={{flexShrink:0}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 8px'}}>
+            <button onClick={()=>setFinanceView(false)} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>ORDERS · FINANCE SCHEME</div>
+              <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Finance Scheme Orders</div>
+            </div>
+          </div>
+          <div style={{fontSize:12,color:T.ink4,padding:'0 18px 8px'}}>Bajaj Finance / Pine Labs EMI bookings. Order value shown <b>without GST</b>.</div>
+          <div style={{padding:'0 18px 10px'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'12px 14px',background:T.ink,color:'#fff',borderRadius:10}}>
+              <div><div style={{fontSize:11,opacity:.7}}>{financeOrders.length} order{financeOrders.length===1?'':'s'} · value excl. GST</div><div style={{fontSize:20,fontWeight:800,fontFamily:T.mono,marginTop:2}}>{money(financeTotalExGst)}</div></div>
+              <div style={{fontSize:26}}>💳</div>
+            </div>
+          </div>
+          <div style={{padding:'0 18px 8px',display:'flex',gap:6,overflowX:'auto',alignItems:'center'}}>
+            <span style={{fontSize:11,color:T.ink4,fontWeight:700,flexShrink:0}}>SALES</span>
+            <span onClick={()=>setSalesFilter('')} style={{padding:'5px 10px',borderRadius:99,background:!salesFilter?T.green:'#fff',color:!salesFilter?'#fff':T.ink2,border:`1px solid ${!salesFilter?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0}}>All</span>
+            {salespeople.map(sp=>(
+              <span key={sp} onClick={()=>setSalesFilter(sp)} style={{padding:'5px 10px',borderRadius:99,background:salesFilter===sp?T.green:'#fff',color:salesFilter===sp?'#fff':T.ink2,border:`1px solid ${salesFilter===sp?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>{sp}</span>
+            ))}
+          </div>
+        </div>
+        <div className="scroll">
+          {financeOrders.map(o=>{
+            const fin = financeSchemeOf(o.paymentMode);
+            return (
+              <div key={o.no} onClick={()=>openOrder(o)} style={{background:'#fff',borderBottom:`1px solid ${T.line}`,borderLeft:`4px solid ${T.ink}`,padding:'12px 18px',display:'grid',gridTemplateColumns:'1fr auto',gap:10,cursor:'pointer'}}>
+                <div style={{minWidth:0}}>
+                  <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3,flexWrap:'wrap'}}>
+                    <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
+                    <Pill tone="ink" size="sm">{fin}</Pill>
+                    {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:null}
+                  </div>
+                  <div style={{fontSize:14,fontWeight:700,color:T.ink}}>{o.customer}</div>
+                  <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.salesExec}</div>
+                </div>
+                <div style={{textAlign:'right'}}>
+                  <div style={{fontSize:16,fontFamily:T.mono,fontWeight:700,color:T.ink,letterSpacing:-0.4}}>{money(financeExGst(o))}</div>
+                  <div style={{fontSize:10,color:T.ink4,marginTop:2}}>excl. GST</div>
+                  <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:1}}>incl. GST {money(o.amt)}</div>
+                </div>
+              </div>
+            );
+          })}
+          {financeOrders.length===0 && (
+            <div style={{padding:'48px 24px',textAlign:'center'}}>
+              <div style={{width:52,height:52,borderRadius:14,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12,fontSize:24}}>💳</div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No finance-scheme orders</div>
+              <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>{(query||salesFilter)?'None match the current search / salesperson filter.':'Orders booked with Bajaj Finance or Pine Labs EMI appear here.'}</div>
+            </div>
+          )}
+          <div style={{height:24}}/>
+        </div>
+        <BottomNav screen="history" nav={nav}/>
+      </div>
+    );
+  }
+
   // ── Orders by Date drill-down ──────────────────────────────────────────────
   // Groups orders by their booking date (Today, Yesterday, then each earlier day)
   // and offers a from–to range filter. Reached from the "Orders by Date" box on
@@ -6254,6 +6478,7 @@ function HistoryScreen({ctx}) {
         </div>
         {partialOrder && <PartialDeliveryModal order={partialOrder} onCancel={()=>setPartialOrder(null)} onConfirm={confirmPartial}/>}
         {rescheduleOrder && <RescheduleModal order={rescheduleOrder} onCancel={()=>setRescheduleOrder(null)} onConfirm={confirmReschedule}/>}
+        {happyOrder && <HappyCodeModal title="Happy Code" subtitle={(happyOrder.no||'')+' · '+(happyOrder.customer||'')} note='A Happy Code is required to mark this order "Installation Done" (Completed).' confirmLabel="Mark Installed" onCancel={()=>setHappyOrder(null)} onConfirm={confirmHappy}/>}
         {serviceOrder && <ServiceRequestModal order={serviceOrder} ctx={ctx} onClose={()=>setServiceOrder(null)}/>}
         <BottomNav screen="history" nav={nav}/>
       </div>
@@ -6309,6 +6534,18 @@ function HistoryScreen({ctx}) {
               : <span style={{fontSize:18,opacity:.8}}>›</span>}
           </div>
         </div>
+        {/* Finance Scheme Orders entry — Bajaj Finance / Pine Labs EMI, value excl. GST */}
+        <div style={{padding:'2px 18px 8px'}}>
+          <div onClick={()=>setFinanceView(true)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'14px 16px',background:T.ink,color:'#fff',borderRadius:10,cursor:'pointer'}}>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              <div style={{width:34,height:34,borderRadius:8,background:'rgba(255,255,255,.14)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>💳</div>
+              <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>Finance Scheme Orders</div><div style={{fontSize:11,opacity:.7}}>Bajaj Finance / Pine Labs EMI · value excl. GST</div></div>
+            </div>
+            {financeCount>0
+              ? <span style={{minWidth:26,height:26,padding:'0 8px',borderRadius:99,background:'#fff',color:T.ink,fontSize:14,fontWeight:800,display:'inline-flex',alignItems:'center',justifyContent:'center'}}>{financeCount}</span>
+              : <span style={{fontSize:18,opacity:.8}}>›</span>}
+          </div>
+        </div>
         {/* Search by Order ID or SO No (WON) */}
         <div style={{padding:'2px 18px 8px'}}>
           <div style={{display:'flex',alignItems:'center',gap:8,background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'8px 12px'}}>
@@ -6347,6 +6584,7 @@ function HistoryScreen({ctx}) {
       </div>
       {partialOrder && <PartialDeliveryModal order={partialOrder} onCancel={()=>setPartialOrder(null)} onConfirm={confirmPartial}/>}
       {rescheduleOrder && <RescheduleModal order={rescheduleOrder} onCancel={()=>setRescheduleOrder(null)} onConfirm={confirmReschedule}/>}
+      {happyOrder && <HappyCodeModal title="Happy Code" subtitle={(happyOrder.no||'')+' · '+(happyOrder.customer||'')} note='A Happy Code is required to mark this order "Installation Done" (Completed).' confirmLabel="Mark Installed" onCancel={()=>setHappyOrder(null)} onConfirm={confirmHappy}/>}
       {serviceOrder && <ServiceRequestModal order={serviceOrder} ctx={ctx} onClose={()=>setServiceOrder(null)}/>}
       <BottomNav screen="history" nav={nav}/>
     </div>

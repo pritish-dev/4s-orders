@@ -1096,6 +1096,10 @@ function handleOrders(p) {
   // Per-receipt amounts for receipts 2 & 3 (receipt 1's amount is the earnest /
   // ADV RECEIVED). Let the running balance reflect part-payments made after booking.
   var cMr2a=colOf(['MONEY RECEIPT AMT 2','MONEY RECEIPT AMOUNT 2']), cMr3a=colOf(['MONEY RECEIPT AMT 3','MONEY RECEIPT AMOUNT 3']);
+  // Finance-scheme reimbursement + installation happy code (order-level).
+  var cGReimb  = colOf(['GODREJ REIMBURSEMENT','REIMBURSEMENT FROM GODREJ']);
+  var cGReimbDt= colOf(['GODREJ REIMBURSEMENT DATE','REIMBURSEMENT FROM GODREJ DATE']);
+  var cHappy   = colOf(['HAPPY CODE','INSTALLATION HAPPY CODE','ORDER HAPPY CODE']);
   // Per-item columns
   var cICode = colOf(['ITEM CODE','CODE']);
   var cIName = colOf(['PRODUCT NAME']);
@@ -1111,6 +1115,8 @@ function handleOrders(p) {
   var cIWhSub= colOf(['WAREHOUSE SUB','WAREHOUSE SUBCATEGORY','WH SUB']);
   // After-sales service / issue tracking (order-level).
   var cSvcFlag  = colOf(['SERVICE FLAG','SERVICE REQUIRED','HAS SERVICE REQUEST']);
+  var cSvcReqNo = colOf(['SERVICE REQUEST NO','SERVICE REQ NO']);
+  var cSvcHappy = colOf(['SERVICE HAPPY CODE','SERVICE RESOLUTION HAPPY CODE']);
   var cSvcIssue = colOf(['SERVICE ISSUE','ISSUE DESCRIPTION','SERVICE ISSUE DESCRIPTION']);
   var cSvcRaised= colOf(['SERVICE RAISED DATE','ISSUE RAISED DATE','SERVICE REQUEST DATE']);
   var cSvcOwner = colOf(['SERVICE ASSIGNEE','SERVICE OWNER','SERVICE HANDLED BY']);
@@ -1194,6 +1200,10 @@ function handleOrders(p) {
         orderDiscount: disc,
         paymentMode: sval(r, cPay),
         earnest: cAdv >= 0 ? Number(r[cAdv]) || 0 : 0,
+        // Finance-scheme (Bajaj / Pine Labs EMI) Godrej reimbursement + installation happy code.
+        godrejReimbursement: cGReimb >= 0 ? Number(r[cGReimb]) || 0 : 0,
+        godrejReimbursementDate: dstr(r, cGReimbDt),
+        happyCode: sval(r, cHappy),
         followUp: dstr(r, cFollow),
         salesExec: sval(r, cSales),
         orderType: sval(r, cOrdType) || 'B2C',
@@ -1213,6 +1223,8 @@ function handleOrders(p) {
         date: sval(r, cDate),
         // After-sales service / issue tracking.
         serviceFlag: /^(yes|true|1)$/i.test(sval(r, cSvcFlag)),
+        serviceReqNo: sval(r, cSvcReqNo),
+        serviceHappyCode: sval(r, cSvcHappy),
         serviceIssue: sval(r, cSvcIssue),
         serviceRaisedDate: dstr(r, cSvcRaised),
         serviceAssignee: sval(r, cSvcOwner),
@@ -1596,6 +1608,14 @@ var CRM_APP_COLUMNS = [
   ['MONEY RECEIPT NO 3'],
   ['MONEY RECEIPT DATE 3'],
   ['MONEY RECEIPT AMT 3', 'MONEY RECEIPT AMOUNT 3'],
+  // Finance-scheme (Bajaj Finance / Pine Labs EMI) bookings: the financier funds the
+  // booking (its amount is the ADV RECEIVED, its name is Money Receipt No 1) and Godrej
+  // reimburses the rest. Together they equal the order value (total paid by customer).
+  ['GODREJ REIMBURSEMENT', 'REIMBURSEMENT FROM GODREJ'],
+  ['GODREJ REIMBURSEMENT DATE', 'REIMBURSEMENT FROM GODREJ DATE'],
+  // Installation Happy Code — required to move an order's delivery status to
+  // "Installation Done" (the code the customer shares once installation is complete).
+  ['HAPPY CODE', 'INSTALLATION HAPPY CODE', 'ORDER HAPPY CODE'],
   ['DELIVERY STATUS'],
   // Partial-delivery tracking — JSON array of the item signatures that have been
   // delivered when the delivery status is "Partial Delivery"; the rest are Pending.
@@ -1619,11 +1639,16 @@ var CRM_APP_COLUMNS = [
   // product found damaged/defective at installation). The rest capture the issue,
   // when it was raised, who is handling it, when it was resolved, and its status.
   ['SERVICE FLAG', 'SERVICE REQUIRED', 'HAS SERVICE REQUEST'],
+  // Human-readable service-request number (SR-0001 …) — shared sequence with the
+  // manual/paper service requests.
+  ['SERVICE REQUEST NO', 'SERVICE REQ NO', 'SR NO'],
   ['SERVICE ISSUE', 'ISSUE DESCRIPTION', 'SERVICE ISSUE DESCRIPTION'],
   ['SERVICE RAISED DATE', 'ISSUE RAISED DATE', 'SERVICE REQUEST DATE'],
   ['SERVICE ASSIGNEE', 'SERVICE OWNER', 'SERVICE HANDLED BY'],
   ['SERVICE RESOLVED DATE', 'SERVICE RESOLUTION DATE'],
   ['SERVICE STATUS', 'SERVICE REQUEST STATUS'],
+  // Happy Code required to move a service request to Resolved.
+  ['SERVICE HAPPY CODE', 'SERVICE RESOLUTION HAPPY CODE'],
   // Dated remarks timeline for a service request — a JSON array of
   // { date, text, by } entries, appended each time a remark is added, so the
   // full history of updates is preserved (order-level, repeated on every row).
@@ -2086,6 +2111,13 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['MONEY RECEIPT NO 3'], mr3.no || '');
     put(['MONEY RECEIPT DATE 3'], mr3.date || '');
     put(['MONEY RECEIPT AMT 3'], Number(mr3.amt) || 0);
+    // Finance-scheme (Bajaj / Pine Labs EMI) Godrej reimbursement (order-level — first row only).
+    if (i === 0) {
+      put(['GODREJ REIMBURSEMENT', 'REIMBURSEMENT FROM GODREJ'], Number(o.godrejReimbursement) || 0);
+      put(['GODREJ REIMBURSEMENT DATE', 'REIMBURSEMENT FROM GODREJ DATE'], o.godrejReimbursementDate || '');
+    }
+    // Installation Happy Code (order-level; written on every row like delivery status).
+    put(['HAPPY CODE', 'INSTALLATION HAPPY CODE', 'ORDER HAPPY CODE'], o.happyCode || '');
     put(['DELIVERY STATUS'], o.deliveryStatus || 'Pending');
     put(['ORDER FORM RECEIPT NO','ORDER FORM RECEIPT NO.','ORDER FORM RECEIPT'], o.orderFormReceiptNo || '');
     put(['SI NO', 'SI NO.'], o.slNo || '');
@@ -2101,11 +2133,13 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     // After-sales service / issue tracking — order-level, written on every row so a
     // row scan (like delivery status) always finds it.
     put(['SERVICE FLAG','SERVICE REQUIRED','HAS SERVICE REQUEST'], o.serviceFlag ? 'Yes' : '');
+    put(['SERVICE REQUEST NO','SERVICE REQ NO'], o.serviceReqNo || '');
     put(['SERVICE ISSUE','ISSUE DESCRIPTION','SERVICE ISSUE DESCRIPTION'], o.serviceIssue || '');
     put(['SERVICE RAISED DATE','ISSUE RAISED DATE','SERVICE REQUEST DATE'], o.serviceRaisedDate || '');
     put(['SERVICE ASSIGNEE','SERVICE OWNER','SERVICE HANDLED BY'], o.serviceAssignee || '');
     put(['SERVICE RESOLVED DATE','SERVICE RESOLUTION DATE'], o.serviceResolvedDate || '');
     put(['SERVICE STATUS','SERVICE REQUEST STATUS'], o.serviceStatus || '');
+    put(['SERVICE HAPPY CODE','SERVICE RESOLUTION HAPPY CODE'], o.serviceHappyCode || '');
 
     out.push(row);
   }
@@ -2193,7 +2227,11 @@ function handleUpdateDelivery(body) {
   var internalNo = Number(body.internalNo || 0);
   var status     = String(body.deliveryStatus || body.status || '').trim();
   var updatedBy  = String(body.updatedBy  || '');
+  var happyCode  = String(body.happyCode || '').trim();
   if (!status) return { ok: false, error: 'Delivery status is required.' };
+  // Moving an order to "Installation Done" (i.e. marking it Completed) requires a
+  // Happy Code — the code the customer shares once installation is complete.
+  var needsHappy = /installation done/i.test(status);
 
   // Partial Delivery: the app sends `deliveredItems` — the list of item signatures
   // that have physically been delivered. Persist it as JSON so the remaining items
@@ -2214,8 +2252,8 @@ function handleUpdateDelivery(body) {
   try { sh = _openCRMSheet(); }
   catch (e) { return { ok: false, error: e.message }; }
 
-  // Make sure the DELIVERED ITEMS column exists before we try to write to it.
-  if (isPartial) { try { _ensureCrmColumns(sh); } catch (e) {} }
+  // Make sure the DELIVERED ITEMS / HAPPY CODE columns exist before we try to write.
+  if (isPartial || needsHappy) { try { _ensureCrmColumns(sh); } catch (e) {} }
 
   var C     = _crmCols(sh);
   var colOf = C.colOf;
@@ -2226,11 +2264,27 @@ function handleUpdateDelivery(body) {
   var cDeliv   = colOf(CRM_H.DELIVERY);
   var cDelItems= colOf(['DELIVERED ITEMS DATA', 'DELIVERED ITEMS']);
   var cPlanned = colOf(['CUSTOMER DELIVERY DATE (TO BE)']);
+  var cHappy   = colOf(['HAPPY CODE', 'INSTALLATION HAPPY CODE', 'ORDER HAPPY CODE']);
   if (cDeliv < 0) return { ok: false, error: 'No "Delivery Remarks" column found in the CRM sheet.' };
 
   var lastRow = sh.getLastRow();
   if (lastRow < 2) return { ok: false, error: 'Order not found: ' + orderNo };
   var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
+
+  // Gate "Installation Done": require a Happy Code (supplied now, or already stored
+  // on the order). Without it the delivery status is NOT allowed to change.
+  if (needsHappy) {
+    var storedHappy = '';
+    if (cHappy >= 0) {
+      for (var h = 0; h < data.length; h++) {
+        var mO = cOrderNo >= 0 && orderNo    && String(data[h][cOrderNo] || '').trim() === orderNo;
+        var mI = cIntNo   >= 0 && internalNo && Number(data[h][cIntNo]) === internalNo;
+        if ((mO || mI) && String(data[h][cHappy] || '').trim()) { storedHappy = String(data[h][cHappy]).trim(); break; }
+      }
+    }
+    happyCode = happyCode || storedHappy;
+    if (!happyCode) return { ok: false, error: 'A Happy Code is required to mark an order "Installation Done".' };
+  }
 
   var updated = 0;
   for (var i = 0; i < data.length; i++) {
@@ -2242,11 +2296,13 @@ function handleUpdateDelivery(body) {
       if (cDelItems >= 0) sh.getRange(i + 2, cDelItems + 1).setValue(isPartial ? deliveredJson : '');
       // Stamp the new planned delivery date when the app sent one (reschedule).
       if (newDate && cPlanned >= 0) sh.getRange(i + 2, cPlanned + 1).setValue(newDate);
+      // Persist the Happy Code on Installation Done.
+      if (needsHappy && cHappy >= 0) sh.getRange(i + 2, cHappy + 1).setValue(happyCode);
       updated++;
     }
   }
   if (!updated) return { ok: false, error: 'Order not found: ' + orderNo };
-  _appendLog(updatedBy, orderNo, 'UPDATE_DELIVERY', 'Delivery: ' + status + (newDate ? ' · new date ' + newDate : ''));
+  _appendLog(updatedBy, orderNo, 'UPDATE_DELIVERY', 'Delivery: ' + status + (newDate ? ' · new date ' + newDate : '') + (needsHappy ? ' · happy ' + happyCode : ''));
   return { ok: true, rows: updated };
 }
 
@@ -2267,6 +2323,7 @@ function handleUpdateService(body) {
   var assignee = String(body.serviceAssignee || '').trim();
   var resolved = String(body.serviceResolvedDate || '').trim();
   var status   = String(body.serviceStatus || '').trim();
+  var happyCode= String(body.happyCode || body.serviceHappyCode || '').trim();
   // Sensible defaults: raising a request with no explicit status/date fills them in.
   if (flagOn && !status)  status = resolved ? 'Resolved' : 'Open';
   if (flagOn && !raised)  raised = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
@@ -2281,11 +2338,13 @@ function handleUpdateService(body) {
   var cOrderNo = colOf(CRM_H.ORDER_NO);
   var cIntNo   = colOf(CRM_H.INT_NO);
   var cFlag  = colOf(['SERVICE FLAG','SERVICE REQUIRED','HAS SERVICE REQUEST']);
+  var cReqNo = colOf(['SERVICE REQUEST NO','SERVICE REQ NO']);
   var cIssue = colOf(['SERVICE ISSUE','ISSUE DESCRIPTION','SERVICE ISSUE DESCRIPTION']);
   var cRais  = colOf(['SERVICE RAISED DATE','ISSUE RAISED DATE','SERVICE REQUEST DATE']);
   var cOwn   = colOf(['SERVICE ASSIGNEE','SERVICE OWNER','SERVICE HANDLED BY']);
   var cResl  = colOf(['SERVICE RESOLVED DATE','SERVICE RESOLUTION DATE']);
   var cStat  = colOf(['SERVICE STATUS','SERVICE REQUEST STATUS']);
+  var cHappy = colOf(['SERVICE HAPPY CODE','SERVICE RESOLUTION HAPPY CODE']);
   var cRem   = colOf(['SERVICE REMARKS DATA','SERVICE REMARKS']);
   if (cFlag < 0) return { ok: false, error: 'Service columns are missing from the CRM sheet.' };
 
@@ -2299,6 +2358,27 @@ function handleUpdateService(body) {
   if (lastRow < 2) return { ok: false, error: 'Order not found: ' + orderNo };
   var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
 
+  // Look across the order's rows for an existing service-request number and happy
+  // code (both order-level, mirrored on every row).
+  var existingReqNo = '', existingHappy = '';
+  for (var s = 0; s < data.length; s++) {
+    var sO = cOrderNo >= 0 && orderNo    && String(data[s][cOrderNo] || '').trim() === orderNo;
+    var sI = cIntNo   >= 0 && internalNo && Number(data[s][cIntNo]) === internalNo;
+    if (!sO && !sI) continue;
+    if (!existingReqNo && cReqNo >= 0 && String(data[s][cReqNo] || '').trim()) existingReqNo = String(data[s][cReqNo]).trim();
+    if (!existingHappy && cHappy >= 0 && String(data[s][cHappy] || '').trim()) existingHappy = String(data[s][cHappy]).trim();
+  }
+  // Assign a service-request number the first time a request is raised on the order.
+  var reqNo = existingReqNo;
+  if (flagOn && !reqNo) reqNo = _nextServiceReqNo();
+  if (!flagOn) reqNo = '';   // clearing the request wipes its number too
+  // Resolving requires a Happy Code (supplied now or already stored).
+  if (flagOn && /resolved/i.test(status)) {
+    happyCode = happyCode || existingHappy;
+    if (!happyCode) return { ok: false, error: 'A Happy Code is required to resolve a service request.' };
+  }
+  if (!flagOn) happyCode = '';
+
   var updated = 0;
   for (var i = 0; i < data.length; i++) {
     var matchOrder = cOrderNo >= 0 && orderNo    && String(data[i][cOrderNo] || '').trim() === orderNo;
@@ -2306,6 +2386,8 @@ function handleUpdateService(body) {
     if (!matchOrder && !matchInt) continue;
     var rowN = i + 2;
     sh.getRange(rowN, cFlag + 1).setValue(flagOn ? 'Yes' : '');
+    if (cReqNo >= 0) sh.getRange(rowN, cReqNo + 1).setValue(reqNo);
+    if (cHappy >= 0) sh.getRange(rowN, cHappy + 1).setValue(happyCode);
     if (cIssue >= 0) sh.getRange(rowN, cIssue + 1).setValue(issue);
     if (cRais  >= 0) sh.getRange(rowN, cRais  + 1).setValue(raised);
     if (cOwn   >= 0) sh.getRange(rowN, cOwn   + 1).setValue(assignee);
@@ -2327,8 +2409,8 @@ function handleUpdateService(body) {
     updated++;
   }
   if (!updated) return { ok: false, error: 'Order not found: ' + orderNo };
-  _appendLog(updatedBy, orderNo, 'UPDATE_SERVICE', (flagOn ? (status || 'Open') : 'Cleared') + (issue ? ' · ' + issue.slice(0, 60) : ''));
-  return { ok: true, rows: updated };
+  _appendLog(updatedBy, orderNo, 'UPDATE_SERVICE', (reqNo ? reqNo + ' · ' : '') + (flagOn ? (status || 'Open') : 'Cleared') + (issue ? ' · ' + issue.slice(0, 60) : ''));
+  return { ok: true, rows: updated, serviceReqNo: reqNo };
 }
 
 // ─── MANUAL SERVICE REQUESTS ──────────────────────────────────────────────────
@@ -2338,11 +2420,30 @@ function handleUpdateService(body) {
 // like the order-based ones: an identifying detail (order no / SO no / customer /
 // contact), a status (Open → Resolved) and a dated remarks timeline.
 var MANUAL_SVC_TAB    = 'MANUAL_SERVICE_REQUESTS';
-var MANUAL_SVC_HEADER = ['ID','ORDER NO','SO NO','CUSTOMER NAME','CONTACT NUMBER','STATUS','CREATED DATE','RESOLVED DATE','CREATED BY','REMARKS DATA'];
+var MANUAL_SVC_HEADER = ['SR NO','ID','ORDER NO','SO NO','CUSTOMER NAME','CONTACT NUMBER','STATUS','HAPPY CODE','CREATED DATE','RESOLVED DATE','CREATED BY','REMARKS DATA'];
 
 function _svcTz(sh) {
   try { return sh.getParent().getSpreadsheetTimeZone() || Session.getScriptTimeZone(); }
   catch (e) { return Session.getScriptTimeZone(); }
+}
+
+// A single, showroom-wide running sequence for service-request numbers (SR-0001,
+// SR-0002 …), shared by BOTH the manual (paper-order) requests and the order-based
+// ones, so every service request carries one unique human-readable number. Backed
+// by a Script Property counter and guarded by a short lock against double-issue.
+function _nextServiceReqNo() {
+  var lock = LockService.getScriptLock();
+  var haveLock = false;
+  try { haveLock = lock.tryLock(10000); } catch (e) {}
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var n = parseInt(props.getProperty('SVC_REQ_SEQ') || '0', 10) || 0;
+    n += 1;
+    props.setProperty('SVC_REQ_SEQ', String(n));
+    return 'SR-' + ('0000' + n).slice(-4);
+  } finally {
+    if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
+  }
 }
 
 // Open (and, when `create` is true, lazily create + header) the manual-request tab.
@@ -2354,6 +2455,23 @@ function _openManualSvcSheet(create) {
     sh.getRange(1, 1, 1, MANUAL_SVC_HEADER.length).setValues([MANUAL_SVC_HEADER]);
     try { sh.getRange(1, 1, 1, MANUAL_SVC_HEADER.length).setFontWeight('bold'); } catch (e) {}
     try { sh.setFrozenRows(1); } catch (e) {}
+  } else if (sh && create) {
+    // Append any header columns added in later versions (SR NO, HAPPY CODE) so an
+    // existing tab keeps working without a manual migration.
+    try {
+      var lastCol = Math.max(1, sh.getLastColumn());
+      var hdr = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+      var have = {};
+      for (var c = 0; c < hdr.length; c++) { var k = _crmKey(hdr[c]); if (k) have[k] = true; }
+      var missing = [];
+      for (var m = 0; m < MANUAL_SVC_HEADER.length; m++) {
+        if (!have[_crmKey(MANUAL_SVC_HEADER[m])]) missing.push(MANUAL_SVC_HEADER[m]);
+      }
+      if (missing.length) {
+        sh.getRange(1, hdr.length + 1, 1, missing.length).setValues([missing]);
+        try { sh.getRange(1, 1, 1, hdr.length + missing.length).setFontWeight('bold'); } catch (e) {}
+      }
+    } catch (e) {}
   }
   return sh;
 }
@@ -2379,8 +2497,9 @@ function handleListServiceRequests() {
   if (lastRow < 2) return { ok: true, requests: [] };
 
   var C = _manualSvcCols(sh), ncol = C.header.length;
-  var cId = C.col('ID'), cOrd = C.col('ORDER NO'), cSo = C.col('SO NO'),
+  var cSr = C.col('SR NO'), cId = C.col('ID'), cOrd = C.col('ORDER NO'), cSo = C.col('SO NO'),
       cCust = C.col('CUSTOMER NAME'), cPh = C.col('CONTACT NUMBER'), cStat = C.col('STATUS'),
+      cHappy = C.col('HAPPY CODE'),
       cCr = C.col('CREATED DATE'), cRes = C.col('RESOLVED DATE'), cBy = C.col('CREATED BY'),
       cRem = C.col('REMARKS DATA');
 
@@ -2400,11 +2519,13 @@ function handleListServiceRequests() {
     if (cRem >= 0) { try { var a = JSON.parse(String(r[cRem] || '')); if (Array.isArray(a)) rem = a; } catch (e) {} }
     out.push({
       id: id,
+      srNo:     cSr   >= 0 ? String(r[cSr]   || '').trim() : '',
       no:       cOrd  >= 0 ? String(r[cOrd]  || '').trim() : '',
       soNo:     cSo   >= 0 ? String(r[cSo]   || '').trim() : '',
       customer: cCust >= 0 ? String(r[cCust] || '').trim() : '',
       phone:    cPh   >= 0 ? String(r[cPh]   || '').trim() : '',
       serviceStatus:       (cStat >= 0 ? String(r[cStat] || '').trim() : '') || 'Open',
+      serviceHappyCode:    cHappy >= 0 ? String(r[cHappy] || '').trim() : '',
       serviceRaisedDate:   ds(cCr  >= 0 ? r[cCr]  : ''),
       serviceResolvedDate: ds(cRes >= 0 ? r[cRes] : ''),
       createdBy:  cBy >= 0 ? String(r[cBy] || '').trim() : '',
@@ -2438,24 +2559,27 @@ function handleCreateServiceRequest(body) {
     var remarks = [];
     if (remark) remarks.push({ date: today, text: remark, by: by });
 
+    var srNo = _nextServiceReqNo();
     var C = _manualSvcCols(sh), ncol = C.header.length;
     var row = new Array(ncol);
     for (var k = 0; k < ncol; k++) row[k] = '';
     function put(name, val) { var ci = C.col(name); if (ci >= 0) row[ci] = val; }
+    put('SR NO', srNo);
     put('ID', id);
     put('ORDER NO', orderNo);
     put('SO NO', soNo);
     put('CUSTOMER NAME', customer);
     put('CONTACT NUMBER', phone);
     put('STATUS', 'Open');
+    put('HAPPY CODE', '');
     put('CREATED DATE', today);
     put('RESOLVED DATE', '');
     put('CREATED BY', by);
     put('REMARKS DATA', JSON.stringify(remarks));
     sh.appendRow(row);
 
-    _appendLog(by, orderNo || soNo || customer, 'CREATE_SERVICE_REQ', (customer || '') + (remark ? ' · ' + remark.slice(0, 60) : ''));
-    return { ok: true, id: id };
+    _appendLog(by, orderNo || soNo || customer, 'CREATE_SERVICE_REQ', srNo + ' · ' + (customer || '') + (remark ? ' · ' + remark.slice(0, 60) : ''));
+    return { ok: true, id: id, srNo: srNo };
   } finally {
     if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
   }
@@ -2467,17 +2591,19 @@ function handleUpdateServiceRequest(body) {
   var id = String(body.id || '').trim();
   if (!id) return { ok: false, error: 'Service request id is required.' };
   var status    = String(body.serviceStatus || '').trim();
+  var happyCode = String(body.happyCode || body.serviceHappyCode || '').trim();
   var newRemark = String(body.serviceNewRemark || body.newRemark || '').trim();
   var by        = String(body.updatedBy || '').trim();
 
   var sh;
-  try { sh = _openManualSvcSheet(false); } catch (e) { return { ok: false, error: e.message }; }
+  try { sh = _openManualSvcSheet(true); } catch (e) { return { ok: false, error: e.message }; }
   if (!sh) return { ok: false, error: 'No service requests found.' };
   var lastRow = sh.getLastRow();
   if (lastRow < 2) return { ok: false, error: 'Service request not found: ' + id };
 
   var C = _manualSvcCols(sh), ncol = C.header.length;
-  var cId = C.col('ID'), cStat = C.col('STATUS'), cRes = C.col('RESOLVED DATE'), cRem = C.col('REMARKS DATA');
+  var cId = C.col('ID'), cStat = C.col('STATUS'), cRes = C.col('RESOLVED DATE'), cRem = C.col('REMARKS DATA'),
+      cHappy = C.col('HAPPY CODE');
   var tz = _svcTz(sh);
   var today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
 
@@ -2485,6 +2611,15 @@ function handleUpdateServiceRequest(body) {
   for (var i = 0; i < data.length; i++) {
     if (cId < 0 || String(data[i][cId] || '').trim() !== id) continue;
     var rowN = i + 2;
+    // Resolving a service request requires a Happy Code — either supplied now or
+    // already stored on the row. Without it the status is NOT allowed to move to
+    // Resolved.
+    if (/resolved/i.test(status)) {
+      var existingHappy = cHappy >= 0 ? String(data[i][cHappy] || '').trim() : '';
+      var useHappy = happyCode || existingHappy;
+      if (!useHappy) return { ok: false, error: 'A Happy Code is required to resolve a service request.' };
+      if (cHappy >= 0) sh.getRange(rowN, cHappy + 1).setValue(useHappy);
+    }
     if (status && cStat >= 0) sh.getRange(rowN, cStat + 1).setValue(status);
     if (cRes >= 0 && status) {
       if (/resolved/i.test(status)) sh.getRange(rowN, cRes + 1).setValue(String(body.serviceResolvedDate || '').trim() || today);
