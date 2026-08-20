@@ -1100,6 +1100,7 @@ function handleOrders(p) {
   var cGReimb  = colOf(['GODREJ REIMBURSEMENT','REIMBURSEMENT FROM GODREJ']);
   var cGReimbDt= colOf(['GODREJ REIMBURSEMENT DATE','REIMBURSEMENT FROM GODREJ DATE']);
   var cHappy   = colOf(['HAPPY CODE','INSTALLATION HAPPY CODE','ORDER HAPPY CODE']);
+  var cHappyDt = colOf(['HAPPY CODE DATE','INSTALLATION HAPPY CODE DATE']);
   // Per-item columns
   var cICode = colOf(['ITEM CODE','CODE']);
   var cIName = colOf(['PRODUCT NAME']);
@@ -1204,6 +1205,7 @@ function handleOrders(p) {
         godrejReimbursement: cGReimb >= 0 ? Number(r[cGReimb]) || 0 : 0,
         godrejReimbursementDate: dstr(r, cGReimbDt),
         happyCode: sval(r, cHappy),
+        happyCodeDate: dstr(r, cHappyDt),
         followUp: dstr(r, cFollow),
         salesExec: sval(r, cSales),
         orderType: sval(r, cOrdType) || 'B2C',
@@ -1616,6 +1618,10 @@ var CRM_APP_COLUMNS = [
   // Installation Happy Code — required to move an order's delivery status to
   // "Installation Done" (the code the customer shares once installation is complete).
   ['HAPPY CODE', 'INSTALLATION HAPPY CODE', 'ORDER HAPPY CODE'],
+  // Date the Happy Code was recorded (order marked Installation Done). Used to
+  // credit the salesperson's automatic "happy calling" point in the league week
+  // when the happy call happened.
+  ['HAPPY CODE DATE', 'INSTALLATION HAPPY CODE DATE'],
   ['DELIVERY STATUS'],
   // Partial-delivery tracking — JSON array of the item signatures that have been
   // delivered when the delivery status is "Partial Delivery"; the rest are Pending.
@@ -2118,6 +2124,7 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     }
     // Installation Happy Code (order-level; written on every row like delivery status).
     put(['HAPPY CODE', 'INSTALLATION HAPPY CODE', 'ORDER HAPPY CODE'], o.happyCode || '');
+    put(['HAPPY CODE DATE', 'INSTALLATION HAPPY CODE DATE'], o.happyCodeDate || '');
     put(['DELIVERY STATUS'], o.deliveryStatus || 'Pending');
     put(['ORDER FORM RECEIPT NO','ORDER FORM RECEIPT NO.','ORDER FORM RECEIPT'], o.orderFormReceiptNo || '');
     put(['SI NO', 'SI NO.'], o.slNo || '');
@@ -2265,6 +2272,9 @@ function handleUpdateDelivery(body) {
   var cDelItems= colOf(['DELIVERED ITEMS DATA', 'DELIVERED ITEMS']);
   var cPlanned = colOf(['CUSTOMER DELIVERY DATE (TO BE)']);
   var cHappy   = colOf(['HAPPY CODE', 'INSTALLATION HAPPY CODE', 'ORDER HAPPY CODE']);
+  var cHappyDt = colOf(['HAPPY CODE DATE', 'INSTALLATION HAPPY CODE DATE']);
+  var _tzD = (function(){ try { return sh.getParent().getSpreadsheetTimeZone() || Session.getScriptTimeZone(); } catch (e) { return Session.getScriptTimeZone(); } })();
+  var todayD = Utilities.formatDate(new Date(), _tzD, 'yyyy-MM-dd');
   if (cDeliv < 0) return { ok: false, error: 'No "Delivery Remarks" column found in the CRM sheet.' };
 
   var lastRow = sh.getLastRow();
@@ -2296,8 +2306,11 @@ function handleUpdateDelivery(body) {
       if (cDelItems >= 0) sh.getRange(i + 2, cDelItems + 1).setValue(isPartial ? deliveredJson : '');
       // Stamp the new planned delivery date when the app sent one (reschedule).
       if (newDate && cPlanned >= 0) sh.getRange(i + 2, cPlanned + 1).setValue(newDate);
-      // Persist the Happy Code on Installation Done.
+      // Persist the Happy Code on Installation Done, and stamp the date it was
+      // recorded (only if not already set) so the league's automatic happy-calling
+      // point lands in the right week.
       if (needsHappy && cHappy >= 0) sh.getRange(i + 2, cHappy + 1).setValue(happyCode);
+      if (needsHappy && cHappyDt >= 0 && !String(data[i][cHappyDt] || '').trim()) sh.getRange(i + 2, cHappyDt + 1).setValue(todayD);
       updated++;
     }
   }

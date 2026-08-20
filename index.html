@@ -1581,7 +1581,8 @@ const BLANK_ORDER = () => ({
   // the order value. godrejReimbursement holds that reimbursed amount + its date.
   godrejReimbursement:'', godrejReimbursementDate:'',
   // Installation Happy Code — required to move the order to "Installation Done".
-  happyCode:'',
+  // happyCodeDate stamps when it was recorded (drives the league happy-calling point).
+  happyCode:'', happyCodeDate:'',
   // SI No — the order-form serial the salesperson enters (printed as the "Sl"
   // part of the PDF's "Order No. (Sl / Receipt)" field).
   slNo:'',
@@ -2738,9 +2739,10 @@ const LEAGUE_TEAMS = [
 ];
 // Point weights straight off the league rulebook.
 const LEAGUE_PTS = { salesConv:1, review:1, happyCalling:1, teleConv:4, teleConvReview:6, followupMissed:-1, timingPenalty:-1, dressCode:-1 };
+// Happy calling is NOT here: it is now awarded automatically from orders that carry
+// a Happy Code (see leagueAuto), so it is no longer entered by hand.
 const LEAGUE_MANUAL_FIELDS = [
   { key:'reviews',        label:'Reviews',            pts:'+1',  tone:'good' },
-  { key:'happyCalling',   label:'Happy calling',      pts:'+1',  tone:'good' },
   { key:'teleConv',       label:'Tele conv.',         pts:'+4',  tone:'good' },
   { key:'teleConvReview', label:'Tele conv.+review',  pts:'+6',  tone:'good' },
   { key:'followupMissed', label:'Missed follow-ups',  pts:'−1',  tone:'bad' },
@@ -2764,22 +2766,32 @@ function _daysInMonth(y,m){ return new Date(y,m+1,0).getDate(); }
 // excluded ENTIRELY (neither counted nor valued); the 4S sales channel is also
 // stripped out of the value so only the net-basic franchise sale counts.
 function leagueAuto(orders, matchKey, startISO, endISO){
-  let orderCount=0, basic=0;
+  let orderCount=0, basic=0, happyCalls=0;
   (orders||[]).forEach(o=>{
     if(!o || o.status==='draft') return;
+    if(!String(o.salesExec||'').toLowerCase().includes(matchKey)) return;
+    // Happy calling: every order that has a Happy Code earns its salesperson +1,
+    // credited to the week the code was recorded (falls back to the booking date
+    // for older orders with no recorded happy-code date). Counted for any order
+    // type — including B2B — since a happy call can follow any installation.
+    if(String(o.happyCode||'').trim()){
+      // happyCodeDate is stored as yyyy-mm-dd (compare directly); fall back to the
+      // booking date (dd.mm.yy → _toISO) for older orders with no recorded date.
+      const hd=(/^\d{4}-\d{2}-\d{2}/.test(String(o.happyCodeDate||''))?String(o.happyCodeDate).slice(0,10):'')||_toISO(o.date);
+      if(hd && (!startISO||hd>=startISO) && (!endISO||hd<=endISO)) happyCalls++;
+    }
     if(String(o.orderType||'').toUpperCase()==='B2B') return;         // B2B excluded from count AND value
     const iso=_toISO(o.date); if(!iso) return;
     if(startISO && iso<startISO) return;
     if(endISO   && iso>endISO)   return;
-    if(!String(o.salesExec||'').toLowerCase().includes(matchKey)) return;
     orderCount++;                                                     // orders booked (excl. B2B)
     basic += _channelSplit(o).franchise;                             // net basic (excl. 4S channel)
   });
-  return { orderCount, basic };
+  return { orderCount, basic, happyCalls };
 }
 // Manual scores for one player, summed across the period.
 function leagueManualSum(scores, playerName, startISO, endISO){
-  const acc={reviews:0,happyCalling:0,followupMissed:0,timingPenalty:0,dressCode:0,teleConv:0,teleConvReview:0};
+  const acc={reviews:0,followupMissed:0,timingPenalty:0,dressCode:0,teleConv:0,teleConvReview:0};
   (scores||[]).forEach(s=>{
     if(String(s.player||'').trim().toLowerCase()!==playerName.toLowerCase()) return;
     const d=String(s.date||'').slice(0,10);
@@ -2807,7 +2819,7 @@ function computeLeague(orders, league, wk){
       const man  = leagueManualSum(scores, pl.name, wk.startISO, wk.endISO);
       const pts = auto.orderCount*LEAGUE_PTS.salesConv
         + man.reviews*LEAGUE_PTS.review
-        + man.happyCalling*LEAGUE_PTS.happyCalling
+        + auto.happyCalls*LEAGUE_PTS.happyCalling   // happy calling is now automatic (orders with a Happy Code)
         + man.teleConv*LEAGUE_PTS.teleConv
         + man.teleConvReview*LEAGUE_PTS.teleConvReview
         + man.followupMissed*LEAGUE_PTS.followupMissed
@@ -2876,11 +2888,11 @@ function LeagueTeamCard({team, isLeader, decided}) {
       </div>
       {/* Batting-card style player rows */}
       <div>
-        <div style={{display:'grid',gridTemplateColumns:'1.5fr repeat(3,1fr) auto',gap:4,padding:'7px 12px',fontSize:9,fontWeight:800,letterSpacing:.4,color:T.ink4,borderBottom:`1px solid ${T.line}`,textTransform:'uppercase'}}>
-          <span>Batter</span><span style={{textAlign:'center'}}>Ord</span><span style={{textAlign:'center'}}>Rev</span><span style={{textAlign:'center'}}>Tele</span><span style={{textAlign:'right'}}>Pts</span>
+        <div style={{display:'grid',gridTemplateColumns:'1.5fr repeat(4,1fr) auto',gap:4,padding:'7px 12px',fontSize:9,fontWeight:800,letterSpacing:.4,color:T.ink4,borderBottom:`1px solid ${T.line}`,textTransform:'uppercase'}}>
+          <span>Batter</span><span style={{textAlign:'center'}}>Ord</span><span style={{textAlign:'center'}} title="Happy calling — orders with a Happy Code (auto)">Hpy</span><span style={{textAlign:'center'}}>Rev</span><span style={{textAlign:'center'}}>Tele</span><span style={{textAlign:'right'}}>Pts</span>
         </div>
         {team.players.map((p,i)=>(
-          <div key={p.name} style={{display:'grid',gridTemplateColumns:'1.5fr repeat(3,1fr) auto',gap:4,padding:'9px 12px',alignItems:'center',borderBottom:i<team.players.length-1?`1px solid ${T.line}`:'none'}}>
+          <div key={p.name} style={{display:'grid',gridTemplateColumns:'1.5fr repeat(4,1fr) auto',gap:4,padding:'9px 12px',alignItems:'center',borderBottom:i<team.players.length-1?`1px solid ${T.line}`:'none'}}>
             <div style={{display:'flex',alignItems:'center',gap:8,minWidth:0}}>
               <LeagueAvatar name={p.name} team={team} size={30} captain={p.captain}/>
               <div style={{minWidth:0}}>
@@ -2889,6 +2901,7 @@ function LeagueTeamCard({team, isLeader, decided}) {
               </div>
             </div>
             <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.auto.orderCount}</span>
+            <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.auto.happyCalls}</span>
             <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.man.reviews}</span>
             <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.man.teleConv+p.man.teleConvReview}</span>
             <span style={{textAlign:'right',fontFamily:T.mono,fontSize:14,fontWeight:900,color:team.accent}}>{p.pts}</span>
@@ -2952,7 +2965,7 @@ function LeagueScreen({ctx}) {
   // Counter step: +1 / −1 a manual criterion, clamped at 0 (never negative counts).
   function setDraftDelta(player,key,delta){ setDraftRows(p=>{ const cur=Number((p[player]||{})[key])||0; const next=Math.max(0,cur+delta); return {...p,[player]:{...(p[player]||{}),[key]:String(next)}}; }); }
   // Live points from the current (unsaved) draft, so the admin sees the tally build.
-  function draftManualPts(player){ const dr=draftRows[player]||{}; return (Number(dr.reviews)||0)*LEAGUE_PTS.review + (Number(dr.happyCalling)||0)*LEAGUE_PTS.happyCalling + (Number(dr.teleConv)||0)*LEAGUE_PTS.teleConv + (Number(dr.teleConvReview)||0)*LEAGUE_PTS.teleConvReview + (Number(dr.followupMissed)||0)*LEAGUE_PTS.followupMissed + (Number(dr.timingPenalty)||0)*LEAGUE_PTS.timingPenalty + (Number(dr.dressCode)||0)*LEAGUE_PTS.dressCode; }
+  function draftManualPts(player){ const dr=draftRows[player]||{}; return (Number(dr.reviews)||0)*LEAGUE_PTS.review + (Number(dr.teleConv)||0)*LEAGUE_PTS.teleConv + (Number(dr.teleConvReview)||0)*LEAGUE_PTS.teleConvReview + (Number(dr.followupMissed)||0)*LEAGUE_PTS.followupMissed + (Number(dr.timingPenalty)||0)*LEAGUE_PTS.timingPenalty + (Number(dr.dressCode)||0)*LEAGUE_PTS.dressCode; }
 
   const inputStyle={width:'100%',height:32,border:`1px solid ${T.line}`,borderRadius:6,textAlign:'center',fontFamily:T.mono,fontSize:13,fontWeight:700,color:T.ink};
 
@@ -3050,7 +3063,7 @@ function LeagueScreen({ctx}) {
                 ['Each review','+1 point'],
                 ['Total sales value (basic) %','team score = % of target achieved (100% → 100 pts)'],
                 ['Negative points','−1 each for missed follow-ups, timings, dress code / presentation'],
-                ['Happy calling','+1 point per customer'],
+                ['Happy calling','+1 point per order with a Happy Code (auto)'],
                 ['Tele-calling / leads follow-up + conversion','+4 bonus points'],
                 ['Tele-calling + conversion + review','+6 bonus points'],
               ].map((r,i)=>(
@@ -4185,7 +4198,9 @@ function OrderFormScreen({ctx}) {
   }
   async function confirmInstallHappy(code){
     setHappyPrompt(false);
-    setOrder(prev=>({...prev,deliveryStatus:'Installation Done',happyCode:code}));
+    // Stamp the happy-code date (unless already set) so the league happy-calling
+    // point lands in the current week.
+    setOrder(prev=>({...prev,deliveryStatus:'Installation Done',happyCode:code,happyCodeDate:prev.happyCodeDate||new Date().toISOString().slice(0,10)}));
     // Persist immediately if the order already exists so the gate is enforced server-side too.
     if(order.no){ const ok = await doUpdateDelivery(order.no, order.internalNo, 'Installation Done', null, null, code); return ok; }
     return true;
