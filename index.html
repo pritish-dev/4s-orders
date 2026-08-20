@@ -5729,6 +5729,9 @@ function HistoryScreen({ctx}) {
   const [financeView,setFinanceView] = useState(false);    // false=ledger · true=Finance Scheme Orders (Bajaj / Pine Labs)
   const [dateFrom,setDateFrom] = useState('');             // ISO yyyy-mm-dd range start for the by-date view
   const [dateTo,setDateTo]     = useState('');             // ISO yyyy-mm-dd range end for the by-date view
+  const [financeFrom,setFinanceFrom] = useState('');       // ISO yyyy-mm-dd range start for Finance Scheme Orders ('' = no lower bound)
+  const [financeTo,setFinanceTo]     = useState('');       // ISO yyyy-mm-dd range end for Finance Scheme Orders ('' = no upper bound)
+  const [financeScheme,setFinanceScheme] = useState('');   // financier filter for Finance Scheme Orders ('' = both, else 'Bajaj Finance' | 'Pine Labs')
   useEffect(()=>{ loadOrders(); loadMis({silent:true}); },[]);
   // Delivery-status category helpers. "rescheduled for delivery" also contains
   // "scheduled", so anchor both with ^ to keep the two buckets separate.
@@ -5769,7 +5772,24 @@ function HistoryScreen({ctx}) {
   // with its order value WITHOUT GST (order value ÷ 1.18). Search + salesperson
   // filters from the ledger still apply.
   const financeExGst = o => Math.round((Number(o.amt)||0)/(1+GST_RATE));
-  const financeOrders = orders.filter(isFinanceScheme).filter(matchesQuery).filter(matchesSales);
+  // Optional from–to booking-date range. Empty bounds ⇒ no filtering (all orders).
+  // A set bound excludes orders with no booking date, matching the by-date view.
+  const financeInRange = o => {
+    if(!financeFrom && !financeTo) return true;
+    const iso = _toISO(o.date);
+    if(!iso) return false;
+    if(financeFrom && iso < financeFrom) return false;
+    if(financeTo   && iso > financeTo)   return false;
+    return true;
+  };
+  // Financier filter. '' shows both; otherwise only that financier's orders.
+  // financeBase is everything matching the search / salesperson / date filters;
+  // per-financier counts come off it so the Bajaj / Pine Labs chips stay accurate.
+  const financeSchemeMatch = o => !financeScheme || financeSchemeOf(o.paymentMode)===financeScheme;
+  const financeBase = orders.filter(isFinanceScheme).filter(matchesQuery).filter(matchesSales).filter(financeInRange);
+  const financeBajajCount = financeBase.filter(o=>financeSchemeOf(o.paymentMode)==='Bajaj Finance').length;
+  const financePineCount  = financeBase.filter(o=>financeSchemeOf(o.paymentMode)==='Pine Labs').length;
+  const financeOrders = financeBase.filter(financeSchemeMatch);
   const financeCount = orders.filter(isFinanceScheme).length;
   const financeTotalExGst = financeOrders.reduce((s,o)=>s+financeExGst(o),0);
 
@@ -6361,6 +6381,8 @@ function HistoryScreen({ctx}) {
   // Orders" box on the ledger. Salesperson + search filters still apply here.
   if (financeView) {
     const money = n => '₹'+Math.round(n||0).toLocaleString('en-IN');
+    const finInp = {padding:'8px 10px',borderRadius:8,border:`1px solid ${T.line}`,background:'#fff',color:T.ink,fontSize:13,fontFamily:T.mono,width:'100%',WebkitAppearance:'none',appearance:'none'};
+    const finLbl = {fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:.5,marginBottom:4};
     return (
       <div className="screen">
         <div style={{flexShrink:0}}>
@@ -6372,11 +6394,26 @@ function HistoryScreen({ctx}) {
             </div>
           </div>
           <div style={{fontSize:12,color:T.ink4,padding:'0 18px 8px'}}>Bajaj Finance / Pine Labs EMI bookings. Order value shown <b>without GST</b>.</div>
+          {/* From–to booking-date range. Empty by default ⇒ all finance-scheme orders. */}
+          <div style={{padding:'0 18px 10px'}}>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr auto',gap:8,alignItems:'end'}}>
+              <div><div style={finLbl}>FROM</div><input type="date" value={financeFrom} max={financeTo||undefined} onChange={e=>setFinanceFrom(e.target.value)} style={finInp}/></div>
+              <div><div style={finLbl}>TO</div><input type="date" value={financeTo} min={financeFrom||undefined} onChange={e=>setFinanceTo(e.target.value)} style={finInp}/></div>
+              <button onClick={()=>{setFinanceFrom('');setFinanceTo('');}} disabled={!financeFrom&&!financeTo} style={{padding:'8px 12px',borderRadius:8,border:`1px solid ${T.line}`,background:(!financeFrom&&!financeTo)?T.paper2:'#fff',color:(!financeFrom&&!financeTo)?T.ink4:T.ink2,fontSize:12,fontWeight:600,cursor:(!financeFrom&&!financeTo)?'default':'pointer'}}>Clear</button>
+            </div>
+          </div>
           <div style={{padding:'0 18px 10px'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'12px 14px',background:T.ink,color:'#fff',borderRadius:10}}>
-              <div><div style={{fontSize:11,opacity:.7}}>{financeOrders.length} order{financeOrders.length===1?'':'s'} · value excl. GST</div><div style={{fontSize:20,fontWeight:800,fontFamily:T.mono,marginTop:2}}>{money(financeTotalExGst)}</div></div>
+              <div><div style={{fontSize:11,opacity:.7}}>{financeOrders.length} order{financeOrders.length===1?'':'s'}{(financeFrom||financeTo)?' in range':''} · value excl. GST</div><div style={{fontSize:20,fontWeight:800,fontFamily:T.mono,marginTop:2}}>{money(financeTotalExGst)}</div></div>
               <div style={{fontSize:26}}>💳</div>
             </div>
+          </div>
+          {/* Financier filter — separate Bajaj Finance from Pine Labs (All shows both). */}
+          <div style={{padding:'0 18px 8px',display:'flex',gap:6,overflowX:'auto',alignItems:'center'}}>
+            <span style={{fontSize:11,color:T.ink4,fontWeight:700,flexShrink:0}}>SCHEME</span>
+            <span onClick={()=>setFinanceScheme('')} style={{padding:'5px 10px',borderRadius:99,background:!financeScheme?T.ink:'#fff',color:!financeScheme?'#fff':T.ink2,border:`1px solid ${!financeScheme?T.ink:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0}}>All ({financeBajajCount+financePineCount})</span>
+            <span onClick={()=>setFinanceScheme('Bajaj Finance')} style={{padding:'5px 10px',borderRadius:99,background:financeScheme==='Bajaj Finance'?T.ink:'#fff',color:financeScheme==='Bajaj Finance'?'#fff':T.ink2,border:`1px solid ${financeScheme==='Bajaj Finance'?T.ink:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>Bajaj Finance ({financeBajajCount})</span>
+            <span onClick={()=>setFinanceScheme('Pine Labs')} style={{padding:'5px 10px',borderRadius:99,background:financeScheme==='Pine Labs'?T.ink:'#fff',color:financeScheme==='Pine Labs'?'#fff':T.ink2,border:`1px solid ${financeScheme==='Pine Labs'?T.ink:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>Pine Labs ({financePineCount})</span>
           </div>
           <div style={{padding:'0 18px 8px',display:'flex',gap:6,overflowX:'auto',alignItems:'center'}}>
             <span style={{fontSize:11,color:T.ink4,fontWeight:700,flexShrink:0}}>SALES</span>
@@ -6412,7 +6449,7 @@ function HistoryScreen({ctx}) {
             <div style={{padding:'48px 24px',textAlign:'center'}}>
               <div style={{width:52,height:52,borderRadius:14,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12,fontSize:24}}>💳</div>
               <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No finance-scheme orders</div>
-              <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>{(query||salesFilter)?'None match the current search / salesperson filter.':'Orders booked with Bajaj Finance or Pine Labs EMI appear here.'}</div>
+              <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>{financeScheme?`No ${financeScheme} orders match the current filters.`:(financeFrom||financeTo)?'None booked in this date range — try widening or clearing it.':(query||salesFilter)?'None match the current search / salesperson filter.':'Orders booked with Bajaj Finance or Pine Labs EMI appear here.'}</div>
             </div>
           )}
           <div style={{height:24}}/>
