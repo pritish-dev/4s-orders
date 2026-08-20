@@ -2535,7 +2535,7 @@ function App() {
       }
     } catch(e) { /* keep cached list */ }
   }
-  // Create a manual service request. `data` = { orderNo, soNo, customer, phone, remark }.
+  // Create a manual service request. `data` = { srNo, orderNo, soNo, customer, phone, remark }.
   async function doCreateServiceRequest(data) {
     setLoading(true);
     try {
@@ -5623,6 +5623,7 @@ function ServiceRemarks({remarks, newRemark, setNewRemark}){
 function ServiceRequestModal({order, ctx, onClose}){
   const {doUpdateService} = ctx;
   const today = new Date().toISOString().slice(0,10);
+  const [reqNo,setReqNo]       = useState(order.serviceReqNo||'');
   const [issue,setIssue]       = useState(order.serviceIssue||'');
   const [raised,setRaised]     = useState(order.serviceRaisedDate||today);
   const [assignee,setAssignee] = useState(order.serviceAssignee||'');
@@ -5633,12 +5634,15 @@ function ServiceRequestModal({order, ctx, onClose}){
   const [busy,setBusy]         = useState(false);
   const flagged = !!order.serviceFlag;
   async function save(flagOn){
+    // Raising a request requires the service request number.
+    if(flagOn && !reqNo.trim()){ ctx.showToast('Enter the Service Request Number','bad'); return; }
     if(flagOn && !issue.trim()){ ctx.showToast('Describe the issue first','bad'); return; }
     // Resolving a service request requires a Happy Code.
     if(flagOn && status==='Resolved' && !happyCode.trim()){ ctx.showToast('Enter the Happy Code to resolve this request','bad'); return; }
     setBusy(true);
     const ok = await doUpdateService(order.no, order.internalNo, {
       serviceFlag: flagOn,
+      serviceReqNo: flagOn ? reqNo.trim() : '',
       serviceIssue: issue.trim(),
       serviceRaisedDate: raised,
       serviceAssignee: assignee.trim(),
@@ -5661,7 +5665,7 @@ function ServiceRequestModal({order, ctx, onClose}){
           <span onClick={onClose} style={{cursor:'pointer'}}>{Icon.close(T.ink4)}</span>
         </div>
         <div>
-          {order.serviceReqNo && <div style={{padding:'9px 14px',borderBottom:`1px solid ${T.line}`,background:T.paper}}><div style={{fontSize:10,color:T.ink4,letterSpacing:0.6,textTransform:'uppercase'}}>Service Request No</div><div style={{fontSize:15,fontWeight:700,fontFamily:T.mono}}>{order.serviceReqNo}</div></div>}
+          <Field label="Service Request No" value={reqNo} onChange={setReqNo} mono required hint="Mandatory to raise — the service request number (e.g. from the Godrej after-sales portal)"/>
           <Field label="Issue / complaint" value={issue} onChange={setIssue} multiline required hint="e.g. Wardrobe shutter found damaged at installation; customer raised a complaint"/>
           <Field label="Issue raised on" value={raised} onChange={setRaised} type="date" mono/>
           <Field label="Handled by" value={assignee} onChange={setAssignee} hint="Who is taking care of this issue"/>
@@ -5692,6 +5696,7 @@ function ManualServiceModal({req, ctx, onClose}){
   const {doCreateServiceRequest, doUpdateServiceRequest} = ctx;
   const isNew = !req || !req.id;
   const today = new Date().toISOString().slice(0,10);
+  const [srNo,setSrNo]         = useState(req?.srNo||'');
   const [orderNo,setOrderNo]   = useState(req?.no||'');
   const [soNo,setSoNo]         = useState(req?.soNo||'');
   const [customer,setCustomer] = useState(req?.customer||'');
@@ -5703,9 +5708,11 @@ function ManualServiceModal({req, ctx, onClose}){
   const [newRemark,setNewRemark] = useState('');
   const [busy,setBusy]         = useState(false);
   async function create(){
+    // Raising a request requires the service request number.
+    if(!srNo.trim()){ ctx.showToast('Enter the Service Request Number','bad'); return; }
     if(!orderNo.trim() && !soNo.trim() && !customer.trim() && !phone.trim()){ ctx.showToast('Enter an order no, SO no, customer or contact','bad'); return; }
     setBusy(true);
-    const ok = await doCreateServiceRequest({ orderNo:orderNo.trim(), soNo:soNo.trim(), customer:customer.trim(), phone:phone.trim(), remark:remark0.trim() });
+    const ok = await doCreateServiceRequest({ srNo:srNo.trim(), orderNo:orderNo.trim(), soNo:soNo.trim(), customer:customer.trim(), phone:phone.trim(), remark:remark0.trim() });
     setBusy(false);
     if(ok) onClose();
   }
@@ -5734,6 +5741,7 @@ function ManualServiceModal({req, ctx, onClose}){
         </div>
         {isNew ? (
           <div>
+            <Field label="Service Request No" value={srNo} onChange={setSrNo} mono required hint="Mandatory to raise — the service request number (e.g. from the Godrej after-sales portal)"/>
             <Field label="Order no" value={orderNo} onChange={setOrderNo} hint="From the paper order form (if any)"/>
             <Field label="Godrej SO no" value={soNo} onChange={setSoNo} hint="SO / WON number (if any)"/>
             <Field label="Customer name" value={customer} onChange={setCustomer}/>
