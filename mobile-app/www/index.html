@@ -1824,6 +1824,14 @@ function isFourSOrder(o) {
   const its = (o && o.items) || [];
   return its.length > 0 && its.every(it => _isFourS(it && it.whTag));
 }
+// An order still "awaiting its Godrej SO No / WON" — a Pending Won. A SO No is
+// generated ONLY for the franchise channel (placed in Salesforce), so a pure
+// 4Sinteriors order — every line delivered from the 4S warehouse — never needs
+// one and must never be treated as Pending Won or prompted for a SO No. Drafts
+// are excluded too: they aren't booked yet.
+function isPendingWon(o) {
+  return !!o && !o.won && o.status !== 'draft' && !isFourSOrder(o);
+}
 // Urgency colour for an order by its delivery progress. The same colour is used
 // on every screen so an order reads the same everywhere until it moves on:
 //   • Red    — overdue: the scheduled delivery date has passed and the order is
@@ -3444,7 +3452,7 @@ function HomeScreen({ctx}) {
   const {user,orders,syncedAt,priceItems,priceSyncError,nav,loadOrders,syncPriceList,loading,unreadCount,loadMis} = ctx;
   const isAdmin = normRole(user?.role) === 'admin';
   const todayOrders = orders.filter(o=>o.date===istToday({day:'2-digit',month:'2-digit',year:'2-digit'}).replace(/\//g,'.'));
-  const pendingWON  = orders.filter(o=>!o.won&&o.status!=='draft').length;
+  const pendingWON  = orders.filter(isPendingWon).length;
   const mtd         = orders.reduce((s,o)=>s+o.amt,0);
   useEffect(()=>{ loadOrders(); loadMis({silent:true}); requestNotifPermission(); },[]);
   return (
@@ -5612,7 +5620,7 @@ function HistoryScreen({ctx}) {
   // An order still awaiting its WON / SO number (a "Pending Won"). Such an order
   // is bucketed under Pending Won ONLY — it is excluded from the plain Pending
   // bucket below so a single order is never counted in both.
-  const isPendWon = o => !o.won && o.status!=='draft';
+  const isPendWon = o => isPendingWon(o);
   // The order-status categories (shared by the Order Status drill-down grid and the
   // ledger tab strip). Each has an accent colour for its count box.
   // Committed in MIS and still needing a delivery action → "Ready for Delivery".
@@ -6387,10 +6395,18 @@ function WONUpdateScreen({ctx,orderOverride,onClose}) {
   const {nav,doUpdateWON} = ctx;
   const [won,setWon] = useState('');
   const items = o.items || [];
-  // Pre-select the items that don't yet carry a SO/WON.
-  const [sel,setSel] = useState(()=>items.map(it=>!String(it.won||'').trim()));
-  const toggle = i => setSel(prev=>prev.map((v,j)=>j===i?!v:v));
+  // Items delivered from the 4S warehouse never get a Godrej SO No — an SO is
+  // generated only for the franchise channel — so they are never selectable here.
+  const is4S = it => _isFourS(it && it.whTag);
+  // Pre-select the franchise items that don't yet carry a SO/WON. 4S items are
+  // left out entirely.
+  const [sel,setSel] = useState(()=>items.map(it=>!is4S(it) && !String(it.won||'').trim()));
+  const toggle = i => { if(is4S(items[i])) return; setSel(prev=>prev.map((v,j)=>j===i?!v:v)); };
   const anySel = sel.some(Boolean);
+  // Franchise items only — the "Select all" toggle and the empty-selection guard
+  // ignore 4S lines completely.
+  const franchiseIdx = items.map((it,i)=>is4S(it)?-1:i).filter(i=>i>=0);
+  const allFranchiseSel = franchiseIdx.length>0 && franchiseIdx.every(i=>sel[i]);
 
   async function submit() {
     if(!won||won.length<6) return ctx.showToast('Enter a valid SO / WON number','bad');
@@ -6427,19 +6443,22 @@ function WONUpdateScreen({ctx,orderOverride,onClose}) {
           <>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:8}}>
               <span style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1}}>APPLY TO ITEMS</span>
-              <span onClick={()=>setSel(items.map(()=>!sel.every(Boolean)))} style={{fontSize:11,color:T.green,fontWeight:700,cursor:'pointer'}}>{sel.every(Boolean)?'Clear all':'Select all'}</span>
+              <span onClick={()=>setSel(items.map(it=>!is4S(it) && !allFranchiseSel))} style={{fontSize:11,color:T.green,fontWeight:700,cursor:'pointer'}}>{allFranchiseSel?'Clear all':'Select all'}</span>
             </div>
             <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,overflow:'hidden',marginBottom:16}}>
-              {items.map((it,i)=>(
-                <label key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 12px',borderBottom:i<items.length-1?`1px solid ${T.line}`:'none',cursor:'pointer'}}>
-                  <input type="checkbox" checked={!!sel[i]} onChange={()=>toggle(i)} style={{width:16,height:16,accentColor:T.green,cursor:'pointer'}}/>
+              {items.map((it,i)=>{
+                const it4S = is4S(it);
+                return (
+                <label key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 12px',borderBottom:i<items.length-1?`1px solid ${T.line}`:'none',cursor:it4S?'default':'pointer',opacity:it4S?0.55:1}}>
+                  <input type="checkbox" checked={!!sel[i]} disabled={it4S} onChange={()=>toggle(i)} style={{width:16,height:16,accentColor:T.green,cursor:it4S?'not-allowed':'pointer'}}/>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:13,fontWeight:600,color:T.ink}}>{it.name||it.code||('Item '+(i+1))}</div>
                     <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:1}}>{it.code} · ×{it.qty}{it.won?' · SO '+it.won:''}</div>
                   </div>
-                  {it.won?<Pill tone="ok" mono size="sm">{it.won}</Pill>:null}
+                  {it4S?<Pill tone="warn" size="sm">4S · no SO</Pill>:(it.won?<Pill tone="ok" mono size="sm">{it.won}</Pill>:null)}
                 </label>
-              ))}
+                );
+              })}
             </div>
           </>
         )}
