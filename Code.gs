@@ -2391,8 +2391,11 @@ function handleUpdateService(body) {
     if (!existingReqNo && cReqNo >= 0 && String(data[s][cReqNo] || '').trim()) existingReqNo = String(data[s][cReqNo]).trim();
     if (!existingHappy && cHappy >= 0 && String(data[s][cHappy] || '').trim()) existingHappy = String(data[s][cHappy]).trim();
   }
-  // Assign a service-request number the first time a request is raised on the order.
-  var reqNo = existingReqNo;
+  // Service-request number. Raising a request requires one — the number entered in
+  // the app (e.g. from the Godrej after-sales portal) is used; an already-stored
+  // number is kept, and a running SR-000X is auto-issued only as a fallback.
+  var suppliedReqNo = String(body.serviceReqNo || '').trim();
+  var reqNo = flagOn ? (suppliedReqNo || existingReqNo) : '';
   if (flagOn && !reqNo) reqNo = _nextServiceReqNo();
   if (!flagOn) reqNo = '';   // clearing the request wipes its number too
   // Resolving requires a Happy Code (supplied now or already stored).
@@ -2582,7 +2585,9 @@ function handleCreateServiceRequest(body) {
     var remarks = [];
     if (remark) remarks.push({ date: today, text: remark, by: by });
 
-    var srNo = _nextServiceReqNo();
+    // The service request number entered in the app (e.g. from the Godrej after-sales
+    // portal) is used; a running SR-000X is auto-issued only as a fallback.
+    var srNo = String(body.srNo || body.serviceReqNo || '').trim() || _nextServiceReqNo();
     var C = _manualSvcCols(sh), ncol = C.header.length;
     var row = new Array(ncol);
     for (var k = 0; k < ncol; k++) row[k] = '';
