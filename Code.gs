@@ -1099,6 +1099,8 @@ function handleOrders(p) {
   // Finance-scheme reimbursement + installation happy code (order-level).
   var cGReimb  = colOf(['GODREJ REIMBURSEMENT','REIMBURSEMENT FROM GODREJ']);
   var cGReimbDt= colOf(['GODREJ REIMBURSEMENT DATE','REIMBURSEMENT FROM GODREJ DATE']);
+  // Pine Labs card detail(s) + Bajaj Finance EMI — stored as one JSON blob column.
+  var cFinJson = colOf(['FINANCE PAYMENT DATA','FINANCE SCHEME DATA','PAYMENT DETAILS JSON']);
   var cHappy   = colOf(['HAPPY CODE','INSTALLATION HAPPY CODE','ORDER HAPPY CODE']);
   var cHappyDt = colOf(['HAPPY CODE DATE','INSTALLATION HAPPY CODE DATE']);
   // Per-item columns
@@ -1204,6 +1206,9 @@ function handleOrders(p) {
         // Finance-scheme (Bajaj / Pine Labs EMI) Godrej reimbursement + installation happy code.
         godrejReimbursement: cGReimb >= 0 ? Number(r[cGReimb]) || 0 : 0,
         godrejReimbursementDate: dstr(r, cGReimbDt),
+        // Pine Labs card detail(s) + Bajaj Finance EMI (parsed from the JSON blob).
+        pineLabsCards: (function () { if (cFinJson < 0) return []; try { var d = JSON.parse(sval(r, cFinJson) || '{}'); return Array.isArray(d.pineLabsCards) ? d.pineLabsCards : []; } catch (e) { return []; } })(),
+        bajajEmi: (function () { if (cFinJson < 0) return ''; try { var d = JSON.parse(sval(r, cFinJson) || '{}'); return d.bajajEmi || ''; } catch (e) { return ''; } })(),
         happyCode: sval(r, cHappy),
         happyCodeDate: dstr(r, cHappyDt),
         followUp: dstr(r, cFollow),
@@ -2121,6 +2126,11 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     if (i === 0) {
       put(['GODREJ REIMBURSEMENT', 'REIMBURSEMENT FROM GODREJ'], Number(o.godrejReimbursement) || 0);
       put(['GODREJ REIMBURSEMENT DATE', 'REIMBURSEMENT FROM GODREJ DATE'], o.godrejReimbursementDate || '');
+      // Pine Labs card detail(s) + Bajaj Finance EMI as one JSON blob.
+      put(['FINANCE PAYMENT DATA', 'FINANCE SCHEME DATA', 'PAYMENT DETAILS JSON'], JSON.stringify({
+        pineLabsCards: Array.isArray(o.pineLabsCards) ? o.pineLabsCards : [],
+        bajajEmi: o.bajajEmi || ''
+      }));
     }
     // Installation Happy Code (order-level; written on every row like delivery status).
     put(['HAPPY CODE', 'INSTALLATION HAPPY CODE', 'ORDER HAPPY CODE'], o.happyCode || '');

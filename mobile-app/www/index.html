@@ -575,6 +575,11 @@ function orderTotals(o) {
 // total − earnest, exactly the booking-time figure the PDF still prints.
 function orderReceived(o) {
   const { total } = orderTotals(o);
+  // Bajaj Finance funds the whole order — there are no money-receipt / reimbursement
+  // amounts to enter, so the showroom is paid in full at booking.
+  if (financeSchemeOf(o && o.paymentMode) === 'Bajaj Finance') {
+    return { total, received: total, balance: 0 };
+  }
   const later   = (o.moneyReceipts || []).slice(1).reduce((s, mr) => s + (Number(mr && mr.amt) || 0), 0);
   // Finance-scheme orders: the Godrej reimbursement is part of the money paid for
   // the order (financier advance + Godrej reimbursement = order value), so count it.
@@ -1483,22 +1488,26 @@ function generatePDF(order, copyType) {
     });
     y += tsH;
 
-    const receipts = (order.moneyReceipts && order.moneyReceipts.length)
-      ? order.moneyReceipts : [{no:order.receiptNo||'',date:''}];
-    const rcH=8;
-    for(let r=0;r<3;r++){
-      const mr = receipts[r] || {no:'',date:'',amt:''};
-      brd(ml,y,cw/2,rcH); brd(ml+cw/2,y,cw/2,rcH);
-      lbl(ml+2,y+5,'Money Receipt No & Dt :');
-      const mrTxt = [mr.no,mr.date].filter(Boolean).join('  ·  ');
-      if(mrTxt) val(ml+40,y+5, fit1(mrTxt,cw/2-42,7.5), 7.5);
-      lbl(ml+cw/2+2,y+5,'Amount Received :');
-      // Each money receipt shows the amount collected against it: receipt 1 is the
-      // booking advance (the `earnest` field), receipts 2 & 3 their own `amt`. The
-      // three add up to the total received printed in the "Earnest Amt." row above.
-      const rcptAmt = r===0 ? (Number(order.earnest)||0) : (Number(mr.amt)||0);
-      if(rcptAmt) val(ml+cw/2+32,y+5, fit1(inr(rcptAmt),cw/2-34,7.5), 7.5);
-      y += rcH;
+    // Finance-scheme (Pine Labs / Bajaj Finance) bookings carry no money-receipt
+    // details — the financier funds the order — so the receipt rows are omitted.
+    if (!isFinanceScheme(order)) {
+      const receipts = (order.moneyReceipts && order.moneyReceipts.length)
+        ? order.moneyReceipts : [{no:order.receiptNo||'',date:''}];
+      const rcH=8;
+      for(let r=0;r<3;r++){
+        const mr = receipts[r] || {no:'',date:'',amt:''};
+        brd(ml,y,cw/2,rcH); brd(ml+cw/2,y,cw/2,rcH);
+        lbl(ml+2,y+5,'Money Receipt No & Dt :');
+        const mrTxt = [mr.no,mr.date].filter(Boolean).join('  ·  ');
+        if(mrTxt) val(ml+40,y+5, fit1(mrTxt,cw/2-42,7.5), 7.5);
+        lbl(ml+cw/2+2,y+5,'Amount Received :');
+        // Each money receipt shows the amount collected against it: receipt 1 is the
+        // booking advance (the `earnest` field), receipts 2 & 3 their own `amt`. The
+        // three add up to the total received printed in the "Earnest Amt." row above.
+        const rcptAmt = r===0 ? (Number(order.earnest)||0) : (Number(mr.amt)||0);
+        if(rcptAmt) val(ml+cw/2+32,y+5, fit1(inr(rcptAmt),cw/2-34,7.5), 7.5);
+        y += rcH;
+      }
     }
 
     const sigH=18, sigW=cw/3;
@@ -1615,6 +1624,12 @@ const BLANK_ORDER = () => ({
   // booking advance (earnest) and Godrej reimburses the rest — together they equal
   // the order value. godrejReimbursement holds that reimbursed amount + its date.
   godrejReimbursement:'', godrejReimbursementDate:'',
+  // Pine Labs card payment detail(s) — one block per card the customer paid with
+  // (up to two). Each block: { payee, emi, cardName, cardNameOther }. cardName is a
+  // preset choice; when it is "Other" the free-typed cardNameOther is the real name.
+  pineLabsCards:[{payee:'',emi:'No EMI',cardName:'',cardNameOther:''}],
+  // Bajaj Finance EMI scheme (one of the BAJAJ_EMI_OPTS values, e.g. "0/6").
+  bajajEmi:'',
   // Installation Happy Code — required to move the order to "Installation Done".
   // happyCodeDate stamps when it was recorded (drives the league happy-calling point).
   happyCode:'', happyCodeDate:'',
@@ -1679,6 +1694,117 @@ function financeSchemeOf(paymentMode) {
   return '';
 }
 function isFinanceScheme(o) { return !!financeSchemeOf(o && o.paymentMode); }
+// ── Pine Labs / Bajaj Finance option lists ──────────────────────────────────
+// Pine Labs card blocks carry an EMI tenure + the card used; Bajaj Finance carries
+// only its EMI scheme.
+const PINE_EMI_OPTS  = ['No EMI', '3', '6', '9', '12'];
+const PINE_CARD_OPTS = ['HDFC CREDIT CARD', 'HDFC DEBIT CARD', 'IDFC FIRST BANK', 'AXIS CREDIT CARD', 'SBI CREDIT CARD', 'Other'];
+const BAJAJ_EMI_OPTS = ['0/6', '8/2', '12/4'];
+const BLANK_PINE_CARD = () => ({ payee:'', emi:'No EMI', cardName:'', cardNameOther:'' });
+// Effective card name — the free-typed text when "Other" is chosen, else the preset.
+function pineCardName(c) {
+  if (!c) return '';
+  return (c.cardName === 'Other') ? String(c.cardNameOther || '').trim() : String(c.cardName || '').trim();
+}
+// Normalise an order's Pine Labs card list to a non-empty array of blocks.
+function pineLabsCardsOf(o) {
+  const arr = (o && Array.isArray(o.pineLabsCards) && o.pineLabsCards.length) ? o.pineLabsCards : [BLANK_PINE_CARD()];
+  return arr.map(c => ({ ...BLANK_PINE_CARD(), ...c }));
+}
+
+// Finance-scheme (Pine Labs / Bajaj Finance) payment fields — shared by the full
+// admin edit form and the sales-team restricted edit form. Pine Labs keeps the
+// Pine Labs amount + date, the Godrej reimbursement, and one or two card blocks
+// (Name of Payee, EMI, Card Name). Bajaj Finance keeps ONLY its EMI scheme — no
+// reimbursement, no money-receipt fields.
+function FinancePaymentFields({ o, setOrder }) {
+  const fin = financeSchemeOf(o.paymentMode);
+  const setF = (k, v) => setOrder(prev => ({ ...prev, [k]: v }));
+  const selStyle = { width:'100%', border:'none', outline:'none', fontSize:15, fontFamily:T.sans, background:'transparent', padding:0, appearance:'none', WebkitAppearance:'none', cursor:'pointer' };
+  const capStyle = { fontSize:10, fontWeight:700, color:T.ink4, letterSpacing:0.8, textTransform:'uppercase', marginBottom:6 };
+
+  if (fin === 'Bajaj Finance') {
+    return (
+      <React.Fragment>
+        <div style={{padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.ink3,lineHeight:1.45}}>Financed via <b>Bajaj Finance</b>. Choose the <b>EMI</b> scheme — no reimbursement or money-receipt details are needed.</div>
+        <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+          <div style={capStyle}>EMI <span style={{color:T.bad,marginLeft:3}}>*</span></div>
+          <select value={o.bajajEmi||''} onChange={e=>setF('bajajEmi',e.target.value)} style={{...selStyle,color:o.bajajEmi?T.ink:T.ink4}}>
+            <option value="">Select EMI…</option>
+            {BAJAJ_EMI_OPTS.map(x=><option key={x}>{x}</option>)}
+          </select>
+        </div>
+      </React.Fragment>
+    );
+  }
+
+  // Pine Labs
+  const total = orderTotals(o).total;
+  const mr1 = (o.moneyReceipts && o.moneyReceipts[0]) || { no:'', date:'', amt:'' };
+  const setMR0date = v => setOrder(prev => { const arr=(prev.moneyReceipts||[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:'',amt:''}); arr[0]={...arr[0],date:v}; return {...prev,moneyReceipts:arr}; });
+  const finAmt=Number(o.earnest)||0, reimb=Number(o.godrejReimbursement)||0, paid=finAmt+reimb, roundT=Math.round(total), gap=roundT-paid;
+  const cards = pineLabsCardsOf(o);
+  const writeCards = arr => setOrder(prev => ({ ...prev, pineLabsCards: arr.length ? arr : [BLANK_PINE_CARD()] }));
+  const setCard = (idx,field,val) => writeCards(pineLabsCardsOf(o).map((c,i)=> i===idx ? {...c,[field]:val} : c));
+  const addCard = () => { const arr=pineLabsCardsOf(o); if(arr.length<2) writeCards([...arr,BLANK_PINE_CARD()]); };
+  const removeCard = idx => writeCards(pineLabsCardsOf(o).filter((_,i)=>i!==idx));
+
+  return (
+    <React.Fragment>
+      <div style={{padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.ink3,lineHeight:1.45}}>Financed via <b>Pine Labs</b>. Enter the <b>Pine Labs</b> amount &amp; date, the <b>Reimbursement from Godrej</b>, and the card payment detail(s) below — together the Pine Labs amount &amp; the reimbursement make up the order value.</div>
+      <div style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
+        <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
+          <Field label="Pine Labs Amount" value={o.earnest} onChange={v=>setF('earnest',String(v).replace(/[^\d.]/g,''))} mono type="number" error={paid>roundT?`Exceeds order total ₹${roundT.toLocaleString('en-IN')}`:undefined}/>
+        </div>
+        <div style={{flex:1}}>
+          <Field label="Date" value={mr1.date} onChange={setMR0date} mono type="date"/>
+        </div>
+      </div>
+      <div style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
+        <div style={{flex:2,borderRight:`1px solid ${T.line}`}}>
+          <Field label="Reimbursement from Godrej" value={o.godrejReimbursement} onChange={v=>setF('godrejReimbursement',String(v).replace(/[^\d.]/g,''))} mono type="number" hint="Amount Godrej reimburses"/>
+        </div>
+        <div style={{flex:1}}>
+          <Field label="Date" value={o.godrejReimbursementDate} onChange={v=>setF('godrejReimbursementDate',v)} mono type="date"/>
+        </div>
+      </div>
+      <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12,gap:8,flexWrap:'wrap'}}>
+        <span style={{color:T.ink3,fontWeight:600}}>Pine Labs <b style={{fontFamily:T.mono,color:T.ink}}>₹{finAmt.toLocaleString('en-IN')}</b> + Godrej <b style={{fontFamily:T.mono,color:T.ink}}>₹{reimb.toLocaleString('en-IN')}</b></span>
+        <span style={{color:Math.abs(gap)<=2?T.ok:(gap<0?T.bad:T.warn),fontWeight:700}}>{Math.abs(gap)<=2?'= Order value ✓':(gap<0?`Over by ₹${Math.abs(gap).toLocaleString('en-IN')}`:`₹${gap.toLocaleString('en-IN')} to reach order value`)}</span>
+      </div>
+      {cards.map((c,idx)=>(
+        <div key={idx} style={{borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'9px 14px 3px'}}>
+            <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase'}}>Card Payment{cards.length>1?' '+(idx+1):''}</div>
+            {cards.length>1 && <span onClick={()=>removeCard(idx)} style={{fontSize:11,color:T.bad,fontWeight:700,cursor:'pointer'}}>Remove</span>}
+          </div>
+          <Field label="Name of Payee" value={c.payee} onChange={v=>setCard(idx,'payee',v)}/>
+          <div style={{display:'flex'}}>
+            <div style={{flex:1,borderRight:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+              <div style={capStyle}>EMI</div>
+              <select value={c.emi||'No EMI'} onChange={e=>setCard(idx,'emi',e.target.value)} style={{...selStyle,color:T.ink}}>
+                {PINE_EMI_OPTS.map(x=><option key={x}>{x}</option>)}
+              </select>
+            </div>
+            <div style={{flex:1,borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+              <div style={capStyle}>Card Name</div>
+              <select value={c.cardName||''} onChange={e=>setCard(idx,'cardName',e.target.value)} style={{...selStyle,color:c.cardName?T.ink:T.ink4}}>
+                <option value="">Select card…</option>
+                {PINE_CARD_OPTS.map(x=><option key={x}>{x}</option>)}
+              </select>
+            </div>
+          </div>
+          {c.cardName==='Other' && <Field label="Card Name (enter manually)" value={c.cardNameOther} onChange={v=>setCard(idx,'cardNameOther',v)} hint="This becomes the Card Name value"/>}
+        </div>
+      ))}
+      {cards.length<2 && (
+        <div style={{padding:'10px 14px',background:'#fff',borderBottom:`1px solid ${T.line}`}}>
+          <span onClick={addCard} style={{fontSize:13,color:T.green,fontWeight:700,cursor:'pointer'}}>+ Add another card payment</span>
+        </div>
+      )}
+    </React.Fragment>
+  );
+}
 // Godrej modular product families. On the CUSTOMER copy of the PDF, every item
 // belonging to one family is collapsed into a single line (family name + the
 // summed line total). The SALES copy stays fully itemised.
@@ -4501,7 +4627,9 @@ function OrderFormScreen({ctx}) {
     if(!isExistingOrder && (!o.slNo||!String(o.slNo).trim())) add('internal','SI No is required');
     if(!isExistingOrder && o.manualOrder && (!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim())) add('internal','Receipt No is required for a manual order');
     if(!o.paymentMode||!String(o.paymentMode).trim()) add('payment','Select the Payment Mode');
-    if(!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim()) add('payment','Money Receipt No is required');
+    // Finance-scheme (Pine Labs / Bajaj Finance) bookings don't use money receipts.
+    if(!isFinanceScheme(o) && (!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim())) add('payment','Money Receipt No is required');
+    if(financeSchemeOf(o.paymentMode)==='Bajaj Finance' && !String(o.bajajEmi||'').trim()) add('payment','Select the Bajaj Finance EMI scheme');
     return e;
   }
 
@@ -4580,8 +4708,10 @@ function OrderFormScreen({ctx}) {
           </div>
           <SectionHead n="01" label="Godrej SO / WON"/>
           <Field label="WON (Godrej SO No)" value={o.won} onChange={v=>setF('won',v)} mono hint="Godrej SO / WON number — add or update it here"/>
-          <SectionHead n="02" label="Money Receipt"/>
-          {[0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:'',amt:''}; return (
+          <SectionHead n="02" label={financeSchemeOf(o.paymentMode)?'Finance Payment':'Money Receipt'}/>
+          {financeSchemeOf(o.paymentMode)
+            ? <FinancePaymentFields o={o} setOrder={setOrder}/>
+            : [0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:'',amt:''}; return (
             <div key={i} style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
               <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
                 <Field label={`Money Receipt No ${i+1}`} value={mr.no} onChange={v=>setMRestricted(i,'no',v)} mono/>
@@ -4594,16 +4724,6 @@ function OrderFormScreen({ctx}) {
               </div>
             </div>
           );})}
-          {financeSchemeOf(o.paymentMode) && (
-            <div style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
-              <div style={{flex:2,borderRight:`1px solid ${T.line}`}}>
-                <Field label="Reimbursement from Godrej" value={o.godrejReimbursement} onChange={v=>setF('godrejReimbursement',String(v).replace(/[^\d.]/g,''))} mono type="number" hint={`${financeSchemeOf(o.paymentMode)} amount + this = order value`}/>
-              </div>
-              <div style={{flex:1}}>
-                <Field label="Date" value={o.godrejReimbursementDate} onChange={v=>setF('godrejReimbursementDate',v)} mono type="date"/>
-              </div>
-            </div>
-          )}
           {(()=>{ const {received,balance}=orderReceived(o); return (
             <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12}}>
               <span style={{color:T.ink3,fontWeight:600}}>Received so far <b style={{fontFamily:T.mono,color:T.ink}}>₹{received.toLocaleString('en-IN')}</b></span>
@@ -5012,42 +5132,9 @@ function OrderFormScreen({ctx}) {
           const setMR=(i,field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:'',amt:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; });
           const fin=financeSchemeOf(o.paymentMode);
           if(fin){
-            const mr1=(o.moneyReceipts&&o.moneyReceipts[0])||{no:'',date:'',amt:''};
-            const finAmt=Number(o.earnest)||0, reimb=Number(o.godrejReimbursement)||0, paid=finAmt+reimb, roundT=Math.round(total), gap=roundT-paid;
-            return (<React.Fragment>
-              <div style={{padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.ink3,lineHeight:1.45}}>Financed via <b>{fin}</b>. Enter the <b>{fin}</b> amount &amp; date, plus the <b>Reimbursement from Godrej</b> — together they make up the order value.</div>
-              <div style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
-                <div style={{flex:1,borderRight:`1px solid ${T.line}`,padding:'11px 14px'}}>
-                  <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:3}}>Money Receipt 1</div>
-                  <div style={{fontSize:15,fontWeight:700,color:T.ink}}>{fin}</div>
-                </div>
-                <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
-                  <Field label="Date" value={mr1.date} onChange={v=>setMR(0,'date',v)} mono type="date"/>
-                </div>
-                <div style={{flex:1}}>
-                  <Field label={fin+' Amount'} value={o.earnest} onChange={v=>setF('earnest',v)} mono type="number" error={paid>roundT?`Exceeds order total ₹${roundT.toLocaleString('en-IN')}`:undefined}/>
-                </div>
-              </div>
-              <div style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
-                <div style={{flex:2,borderRight:`1px solid ${T.line}`}}>
-                  <Field label="Reimbursement from Godrej" value={o.godrejReimbursement} onChange={v=>setF('godrejReimbursement',v.replace(/[^\d.]/g,''))} mono type="number" hint="Amount Godrej reimburses"/>
-                </div>
-                <div style={{flex:1}}>
-                  <Field label="Date" value={o.godrejReimbursementDate} onChange={v=>setF('godrejReimbursementDate',v)} mono type="date"/>
-                </div>
-              </div>
-              <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12,gap:8,flexWrap:'wrap'}}>
-                <span style={{color:T.ink3,fontWeight:600}}>{fin} <b style={{fontFamily:T.mono,color:T.ink}}>₹{finAmt.toLocaleString('en-IN')}</b> + Godrej <b style={{fontFamily:T.mono,color:T.ink}}>₹{reimb.toLocaleString('en-IN')}</b></span>
-                <span style={{color:Math.abs(gap)<=2?T.ok:(gap<0?T.bad:T.warn),fontWeight:700}}>{Math.abs(gap)<=2?'= Order value ✓':(gap<0?`Over by ₹${Math.abs(gap).toLocaleString('en-IN')}`:`₹${gap.toLocaleString('en-IN')} to reach order value`)}</span>
-              </div>
-              {[1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:'',amt:''}; return (
-                <div key={i} style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
-                  <div style={{flex:1,borderRight:`1px solid ${T.line}`}}><Field label={`Money Receipt No ${i+1}`} value={mr.no} onChange={v=>setMR(i,'no',v)} mono/></div>
-                  <div style={{flex:1,borderRight:`1px solid ${T.line}`}}><Field label={`Date ${i+1}`} value={mr.date} onChange={v=>setMR(i,'date',v)} mono type="date"/></div>
-                  <div style={{flex:1}}><Field label={`Amount ${i+1}`} value={mr.amt} onChange={v=>setMR(i,'amt',v)} mono type="number" hint="Later payment"/></div>
-                </div>
-              );})}
-            </React.Fragment>);
+            // Pine Labs / Bajaj Finance capture their own payment detail — no plain
+            // money-receipt rows are kept for a finance-scheme booking.
+            return <FinancePaymentFields o={o} setOrder={setOrder}/>;
           }
           return [0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:'',amt:''};
             // Receipt 1's amount is the booking advance kept in `earnest`; receipts 2 & 3
@@ -5262,6 +5349,73 @@ async function shareOrderPDF(o, copyType, showToast) {
   try { doc.save(fname); } catch(e) {}
   const phone = (o.phone||'').replace(/\D/g,'');
   window.open('https://wa.me/'+(phone?'91'+phone:'')+'?text='+encodeURIComponent(text), '_blank');
+  if (showToast) showToast('PDF saved — attach it in the WhatsApp chat','ok');
+}
+
+// The order-form "Order No. (Sl / Receipt)" reference, exactly as printed on the PDF.
+function orderFormRef(o){
+  const slNo = (o && (o.slNo || o.internalNo)) || '—';
+  const rcpt = (o && (o.orderFormReceiptNo || o.internalNo)) || '—';
+  return slNo + ' / ' + rcpt;
+}
+
+// Build a plain white A4 PDF of the Pine Labs reimbursement details for an order,
+// left-aligned from the top. One block per card the customer paid with.
+function generatePineLabsReimbursementPDF(o){
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:'mm', format:'a4' });
+  const inrAmt = n => 'Rs. ' + (Math.round(Number(n)||0)).toLocaleString('en-IN');
+  const payISO = (()=>{ const pd=String((o.moneyReceipts&&o.moneyReceipts[0]&&o.moneyReceipts[0].date)||'').trim(); return /^\d{4}-\d{2}-\d{2}$/.test(pd)?pd:''; })();
+  const dateTxt = payISO ? prettyDate(payISO) : '';
+  const cards = pineLabsCardsOf(o);
+  const ref = orderFormRef(o);
+  const amt = inrAmt(o.earnest);
+  const ml = 18; let y = 24; const lh = 9;
+  doc.setTextColor(0,0,0);
+  cards.forEach((c, idx) => {
+    if (idx>0) y += 6;   // blank gap between two cards
+    const rows = [
+      ['Name of Customer', c.payee||''],
+      ['Date', dateTxt],
+      ['Tenure', c.emi||''],
+      ['Card Name', pineCardName(c)],
+      ['Transaction Amount', amt],
+      ['Order No', ref],
+    ];
+    rows.forEach(([k,v])=>{
+      doc.setFont('helvetica','bold'); doc.setFontSize(13);
+      const label = k + ': ';
+      doc.text(label, ml, y);
+      const lw = doc.getTextWidth(label);
+      doc.setFont('helvetica','normal'); doc.setTextColor(0,0,0);
+      doc.text(String(v||''), ml + lw, y);
+      y += lh;
+    });
+  });
+  return doc;
+}
+
+// Share the Pine Labs reimbursement PDF through the device share sheet (WhatsApp,
+// …) — mirrors shareOrderPDF's native → web-share → download+chat fallback chain.
+async function sharePineLabsReimbursement(o, showToast){
+  let doc;
+  try { doc = generatePineLabsReimbursementPDF(o); }
+  catch(e){ if(showToast) showToast('Could not build the PDF','bad'); return; }
+  const safeNo = (o.no||'order').replace('/','‑');
+  const fname = 'PineLabs-Reimbursement-'+safeNo+'.pdf';
+  const text = 'Pine Labs reimbursement — '+(o.customer||'')+' ('+orderFormRef(o)+')';
+  try { if (await nativeSharePDF(doc, fname, text)) return; }
+  catch(e){ if(showToast) showToast('Share failed: '+_errMsg(e),'bad'); return; }
+  try {
+    const file = new File([doc.output('blob')], fname, {type:'application/pdf'});
+    if (navigator.canShare && navigator.canShare({files:[file]})) {
+      await navigator.share({files:[file], text});
+      return;
+    }
+  } catch(e){ if (e && e.name==='AbortError') return; }
+  try { doc.save(fname); } catch(e){}
+  const phone = (o.phone||'').replace(/\D/g,'');
+  window.open('https://wa.me/'+(phone?'91'+phone:'')+'?text='+encodeURIComponent(text),'_blank');
   if (showToast) showToast('PDF saved — attach it in the WhatsApp chat','ok');
 }
 
@@ -5807,12 +5961,21 @@ function HistoryScreen({ctx}) {
   // Every order booked with a finance scheme (Bajaj Finance / Pine Labs EMI), shown
   // with its order value WITHOUT GST (order value ÷ 1.18). Search + salesperson
   // filters from the ledger still apply.
-  const financeExGst = o => Math.round((Number(o.amt)||0)/(1+GST_RATE));
-  // Optional from–to booking-date range. Empty bounds ⇒ no filtering (all orders).
-  // A set bound excludes orders with no booking date, matching the by-date view.
+  // Exact order value (GST-inclusive) — the amount the customer actually pays.
+  const financeOrderValue = o => Math.round(Number(o.amt)||0);
+  // Payment date (ISO yyyy-mm-dd) an order's finance filter runs on: the financier
+  // payment date (Money Receipt 1 date, entered from the date picker) when present,
+  // else the booking date. The date filter applies on THIS, not the order date.
+  const financePaymentISO = o => {
+    const pd = String((o.moneyReceipts && o.moneyReceipts[0] && o.moneyReceipts[0].date) || '').trim();
+    if(/^\d{4}-\d{2}-\d{2}$/.test(pd)) return pd;
+    return _toISO(o.date);
+  };
+  // Optional from–to payment-date range. Empty bounds ⇒ no filtering (all orders).
+  // A set bound excludes orders with no payment date.
   const financeInRange = o => {
     if(!financeFrom && !financeTo) return true;
-    const iso = _toISO(o.date);
+    const iso = financePaymentISO(o);
     if(!iso) return false;
     if(financeFrom && iso < financeFrom) return false;
     if(financeTo   && iso > financeTo)   return false;
@@ -5827,7 +5990,7 @@ function HistoryScreen({ctx}) {
   const financePineCount  = financeBase.filter(o=>financeSchemeOf(o.paymentMode)==='Pine Labs').length;
   const financeOrders = financeBase.filter(financeSchemeMatch);
   const financeCount = orders.filter(isFinanceScheme).length;
-  const financeTotalExGst = financeOrders.reduce((s,o)=>s+financeExGst(o),0);
+  const financeTotalValue = financeOrders.reduce((s,o)=>s+financeOrderValue(o),0);
 
   // ── Delivery Watch data ────────────────────────────────────────────────────
   // Orders whose delivery is due tomorrow, due today, or already overdue AND that
@@ -6429,8 +6592,8 @@ function HistoryScreen({ctx}) {
               <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Finance Scheme Orders</div>
             </div>
           </div>
-          <div style={{fontSize:12,color:T.ink4,padding:'0 18px 8px'}}>Bajaj Finance / Pine Labs EMI bookings. Order value shown <b>without GST</b>.</div>
-          {/* From–to booking-date range. Empty by default ⇒ all finance-scheme orders. */}
+          <div style={{fontSize:12,color:T.ink4,padding:'0 18px 8px'}}>Bajaj Finance / Pine Labs EMI bookings. <b>Exact order value</b> (incl. GST). Date range filters on the <b>payment date</b>.</div>
+          {/* From–to payment-date range. Empty by default ⇒ all finance-scheme orders. */}
           <div style={{padding:'0 18px 10px'}}>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr auto',gap:8,alignItems:'end'}}>
               <div><div style={finLbl}>FROM</div><input type="date" value={financeFrom} max={financeTo||undefined} onChange={e=>setFinanceFrom(e.target.value)} style={finInp}/></div>
@@ -6440,7 +6603,7 @@ function HistoryScreen({ctx}) {
           </div>
           <div style={{padding:'0 18px 10px'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'12px 14px',background:T.ink,color:'#fff',borderRadius:10}}>
-              <div><div style={{fontSize:11,opacity:.7}}>{financeOrders.length} order{financeOrders.length===1?'':'s'}{(financeFrom||financeTo)?' in range':''} · value excl. GST</div><div style={{fontSize:20,fontWeight:800,fontFamily:T.mono,marginTop:2}}>{money(financeTotalExGst)}</div></div>
+              <div><div style={{fontSize:11,opacity:.7}}>{financeOrders.length} order{financeOrders.length===1?'':'s'}{(financeFrom||financeTo)?' in range':''} · order value (incl. GST)</div><div style={{fontSize:20,fontWeight:800,fontFamily:T.mono,marginTop:2}}>{money(financeTotalValue)}</div></div>
               <div style={{fontSize:26}}>💳</div>
             </div>
           </div>
@@ -6472,11 +6635,15 @@ function HistoryScreen({ctx}) {
                   </div>
                   <div style={{fontSize:14,fontWeight:700,color:T.ink}}>{o.customer}</div>
                   <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.salesExec}</div>
+                  {fin==='Pine Labs' && (
+                    <div style={{marginTop:8}}>
+                      <span title="Share Pine Labs reimbursement PDF on WhatsApp" onClick={e=>{e.stopPropagation();sharePineLabsReimbursement(o,ctx.showToast);}} style={{display:'inline-flex',alignItems:'center',gap:6,padding:'6px 10px',borderRadius:6,background:'#25d36622',color:'#128C4B',fontSize:12,fontWeight:700,cursor:'pointer'}}>{Icon.whatsapp('#25d366',15)} Reimbursement PDF</span>
+                    </div>
+                  )}
                 </div>
                 <div style={{textAlign:'right'}}>
-                  <div style={{fontSize:16,fontFamily:T.mono,fontWeight:700,color:T.ink,letterSpacing:-0.4}}>{money(financeExGst(o))}</div>
-                  <div style={{fontSize:10,color:T.ink4,marginTop:2}}>excl. GST</div>
-                  <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:1}}>incl. GST {money(o.amt)}</div>
+                  <div style={{fontSize:16,fontFamily:T.mono,fontWeight:700,color:T.ink,letterSpacing:-0.4}}>{money(financeOrderValue(o))}</div>
+                  <div style={{fontSize:10,color:T.ink4,marginTop:2}}>order value</div>
                 </div>
               </div>
             );
