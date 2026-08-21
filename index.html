@@ -546,14 +546,13 @@ function orderReceived(o) {
     return { total, received: total, balance: 0 };
   }
   const later   = (o.moneyReceipts || []).slice(1).reduce((s, mr) => s + (Number(mr && mr.amt) || 0), 0);
-  // Finance-scheme orders: the Godrej reimbursement is part of the money paid for
-  // the order (financier advance + Godrej reimbursement = order value), so count it.
-  const reimb   = Number(o.godrejReimbursement) || 0;
-  // Pine Labs split across two cards: the 2nd card onward carries its own amount +
-  // Godrej reimbursement, so add those to what has been received too.
-  const extraCards = (Array.isArray(o.pineLabsCards) ? o.pineLabsCards : []).slice(1)
-    .reduce((s, c) => s + (Number(c && c.amount) || 0) + (Number(c && c.reimbursement) || 0), 0);
-  let received  = (Number(o.earnest) || 0) + later + reimb + extraCards;
+  // The Godrej reimbursement is informational only — it is NOT counted as money
+  // received against the order, and is never added to or deducted from the total.
+  // Only the amounts actually swiped on the card(s) count: earnest is the first card,
+  // and the 2nd card onward carries its own amount.
+  const extraCardAmt = (Array.isArray(o.pineLabsCards) ? o.pineLabsCards : []).slice(1)
+    .reduce((s, c) => s + (Number(c && c.amount) || 0), 0);
+  let received  = (Number(o.earnest) || 0) + later + extraCardAmt;
   if (received > total) received = total;            // never record more than the bill
   let balance = total - received;
   const roundBudget = 2 + 10 * ((o.items || []).length);   // per-line GST rounding tolerance
@@ -1589,9 +1588,9 @@ const BLANK_ORDER = () => ({
   customerCode:'', poRef:'', source:'',
   orderDiscount:'', plannedDly:'', installNote:'',
   paymentMode:'', earnest:'',
-  // Finance-scheme (Bajaj Finance / Pine Labs EMI) bookings: the financier funds the
-  // booking advance (earnest) and Godrej reimburses the rest — together they equal
-  // the order value. godrejReimbursement holds that reimbursed amount + its date.
+  // Finance-scheme (Bajaj Finance / Pine Labs EMI) bookings. godrejReimbursement holds
+  // the amount Godrej reimburses the showroom + its date. It is recorded for
+  // information only — it is never added to or deducted from any payment total.
   godrejReimbursement:'', godrejReimbursementDate:'',
   // Pine Labs card payment detail(s) — one block per card the customer paid with
   // (up to two). Each block: { payee, emi, cardName, cardNameOther, amount,
@@ -1720,12 +1719,14 @@ function FinancePaymentFields({ o, setOrder }) {
   const mr1 = (o.moneyReceipts && o.moneyReceipts[0]) || { no:'', date:'', amt:'' };
   const setMR0date = v => setOrder(prev => { const arr=(prev.moneyReceipts||[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:'',amt:''}); arr[0]={...arr[0],date:v}; return {...prev,moneyReceipts:arr}; });
   const cards = pineLabsCardsOf(o);
-  // From the 2nd card onward each card carries its own amount + Godrej reimbursement
-  // (the first card's live in earnest / godrejReimbursement above). Sum the extras in.
+  // Only the amounts swiped on the card(s) make up the order value. The Godrej
+  // reimbursement (top-level + per-card) is informational only — never summed into
+  // the paid total or the gap check.
   const extraAmt   = cards.slice(1).reduce((s,c)=>s+(Number(c.amount)||0),0);
   const extraReimb = cards.slice(1).reduce((s,c)=>s+(Number(c.reimbursement)||0),0);
   const finAmt=Number(o.earnest)||0, reimb=Number(o.godrejReimbursement)||0;
-  const paid=finAmt+reimb+extraAmt+extraReimb, roundT=Math.round(total), gap=roundT-paid;
+  const reimbTotal=reimb+extraReimb;
+  const paid=finAmt+extraAmt, roundT=Math.round(total), gap=roundT-paid;
   const writeCards = arr => setOrder(prev => ({ ...prev, pineLabsCards: arr.length ? arr : [BLANK_PINE_CARD()] }));
   const setCard = (idx,field,val) => writeCards(pineLabsCardsOf(o).map((c,i)=> i===idx ? {...c,[field]:val} : c));
   const addCard = () => { const arr=pineLabsCardsOf(o); if(arr.length<2) writeCards([...arr,BLANK_PINE_CARD()]); };
@@ -1733,7 +1734,7 @@ function FinancePaymentFields({ o, setOrder }) {
 
   return (
     <React.Fragment>
-      <div style={{padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.ink3,lineHeight:1.45}}>Financed via <b>Pine Labs</b>. Enter the <b>Pine Labs</b> amount &amp; date, the <b>Reimbursement from Godrej</b>, and the card payment detail(s) below — together the Pine Labs amount &amp; the reimbursement make up the order value.</div>
+      <div style={{padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.ink3,lineHeight:1.45}}>Financed via <b>Pine Labs</b>. Enter the <b>Pine Labs</b> amount &amp; date and the card payment detail(s) below — the card amount(s) make up the order value. The <b>Reimbursement from Godrej</b> is recorded for information only and is not added to or deducted from any total.</div>
       <div style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
         <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
           <Field label="Pine Labs Amount" value={o.earnest} onChange={v=>setF('earnest',String(v).replace(/[^\d.]/g,''))} mono type="number" error={paid>roundT?`Exceeds order total ₹${roundT.toLocaleString('en-IN')}`:undefined}/>
@@ -1744,14 +1745,14 @@ function FinancePaymentFields({ o, setOrder }) {
       </div>
       <div style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
         <div style={{flex:2,borderRight:`1px solid ${T.line}`}}>
-          <Field label="Reimbursement from Godrej" value={o.godrejReimbursement} onChange={v=>setF('godrejReimbursement',String(v).replace(/[^\d.]/g,''))} mono type="number" hint="Amount Godrej reimburses"/>
+          <Field label="Reimbursement from Godrej" value={o.godrejReimbursement} onChange={v=>setF('godrejReimbursement',String(v).replace(/[^\d.]/g,''))} mono type="number" hint="Info only — not added to any total"/>
         </div>
         <div style={{flex:1}}>
           <Field label="Date" value={o.godrejReimbursementDate} onChange={v=>setF('godrejReimbursementDate',v)} mono type="date"/>
         </div>
       </div>
       <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12,gap:8,flexWrap:'wrap'}}>
-        <span style={{color:T.ink3,fontWeight:600}}>Cards <b style={{fontFamily:T.mono,color:T.ink}}>₹{(finAmt+extraAmt).toLocaleString('en-IN')}</b> + Godrej <b style={{fontFamily:T.mono,color:T.ink}}>₹{(reimb+extraReimb).toLocaleString('en-IN')}</b></span>
+        <span style={{color:T.ink3,fontWeight:600}}>Cards <b style={{fontFamily:T.mono,color:T.ink}}>₹{(finAmt+extraAmt).toLocaleString('en-IN')}</b>{reimbTotal>0 && <span style={{color:T.ink4,fontWeight:500}}> · Godrej reimb ₹{reimbTotal.toLocaleString('en-IN')} (info only)</span>}</span>
         <span style={{color:Math.abs(gap)<=2?T.ok:(gap<0?T.bad:T.warn),fontWeight:700}}>{Math.abs(gap)<=2?'= Order value ✓':(gap<0?`Over by ₹${Math.abs(gap).toLocaleString('en-IN')}`:`₹${gap.toLocaleString('en-IN')} to reach order value`)}</span>
       </div>
       {cards.map((c,idx)=>(
@@ -1783,7 +1784,7 @@ function FinancePaymentFields({ o, setOrder }) {
                 <Field label="Amount Paid by this Card" value={c.amount} onChange={v=>setCard(idx,'amount',String(v).replace(/[^\d.]/g,''))} mono type="number" hint="Amount swiped on this card"/>
               </div>
               <div style={{flex:1}}>
-                <Field label="Reimbursement from Godrej" value={c.reimbursement} onChange={v=>setCard(idx,'reimbursement',String(v).replace(/[^\d.]/g,''))} mono type="number" hint="Godrej reimbursement for this card"/>
+                <Field label="Reimbursement from Godrej" value={c.reimbursement} onChange={v=>setCard(idx,'reimbursement',String(v).replace(/[^\d.]/g,''))} mono type="number" hint="Info only — not added to any total"/>
               </div>
             </div>
           )}
