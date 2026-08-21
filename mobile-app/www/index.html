@@ -5918,6 +5918,8 @@ function HistoryScreen({ctx}) {
   const [wonOrder,setWonOrder] = useState(null);
   const [query,setQuery] = useState('');
   const [salesFilter,setSalesFilter] = useState('');
+  const [manageView,setManageView] = useState(null);       // null=ledger · 'edit'=Edit Order (admin) · 'delete'=Delete Order (admin)
+  const [manageQuery,setManageQuery] = useState('');       // search inside the admin Edit/Delete Order sections
   const [partialOrder,setPartialOrder] = useState(null);   // order awaiting the partial-delivery picker
   const [rescheduleOrder,setRescheduleOrder] = useState(null); // order awaiting the reschedule date picker
   const [serviceOrder,setServiceOrder] = useState(null);   // order whose service request is being raised/edited
@@ -5966,7 +5968,23 @@ function HistoryScreen({ctx}) {
   // Distinct salespersons for the filter dropdown
   const salespeople = [...new Set(orders.map(o=>(o.salesExec||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
   const q = query.trim().toLowerCase();
-  const matchesQuery = o => !q || String(o.no||'').toLowerCase().includes(q) || String(o.won||'').toLowerCase().includes(q);
+  // Match the search box against Order ID, SO No (WON), customer name and any of
+  // the order's phone numbers (main / alt / delivery contact). Phone matching is
+  // digit-only so "98765" finds "+91 98765 43210".
+  const orderMatchesText = (o, text) => {
+    const t = String(text||'').trim().toLowerCase();
+    if(!t) return true;
+    if(String(o.no||'').toLowerCase().includes(t)) return true;
+    if(String(o.won||'').toLowerCase().includes(t)) return true;
+    if(String(o.customer||'').toLowerCase().includes(t)) return true;
+    const digits = t.replace(/\D/g,'');
+    if(digits){
+      const phones = [o.phone,o.alt,o.contactNumber].map(p=>String(p||'').replace(/\D/g,''));
+      if(phones.some(p=>p && p.includes(digits))) return true;
+    }
+    return false;
+  };
+  const matchesQuery = o => orderMatchesText(o, q);
   const matchesSales = o => !salesFilter || (o.salesExec||'').trim().toLowerCase()===salesFilter.toLowerCase();
   const shown = orders.filter(active.filter).filter(matchesQuery).filter(matchesSales);
 
@@ -6070,7 +6088,8 @@ function HistoryScreen({ctx}) {
     const svc = serviceUrgency(o);
     const edge = (svc && svc.key==='open') ? svc.color : urg.color;
     return (
-          <div key={o.no} style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`,borderLeft:`4px solid ${edge}`,padding:'12px 18px 12px 14px',display:'grid',gridTemplateColumns:'1fr auto',gap:10,cursor:'pointer'}} onClick={()=>openOrder(o)}>
+          <div key={o.no} style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`,borderLeft:`4px solid ${edge}`,padding:'12px 18px 12px 14px',cursor:'pointer'}} onClick={()=>openOrder(o)}>
+            <div style={{display:'grid',gridTemplateColumns:'1fr auto',gap:10}}>
             <div style={{minWidth:0}}>
               <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3,flexWrap:'wrap'}}>
                 <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
@@ -6100,20 +6119,23 @@ function HistoryScreen({ctx}) {
                 );
               })()}
             </div>
-            <div style={{textAlign:'right'}}>
+            <div style={{textAlign:'right',flexShrink:0}}>
               <div style={{fontSize:16,fontFamily:T.mono,fontWeight:700,color:T.ink,letterSpacing:-0.4}}>₹{(o.amt||0).toLocaleString('en-IN')}</div>
-              <div style={{display:'flex',gap:6,marginTop:6,justifyContent:'flex-end',alignItems:'center'}}>
-                <select value={o.deliveryStatus||'Pending'} onClick={e=>e.stopPropagation()} onChange={e=>{e.stopPropagation();changeDelivery(o,e.target.value);}}
-                  style={{padding:'4px 6px',borderRadius:4,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:11,fontWeight:600,cursor:'pointer',WebkitAppearance:'none',appearance:'none',maxWidth:130}}>
-                  {DELIVERY_STATUSES.map(s=><option key={s} value={s}>{s}</option>)}
-                </select>
-                <span title="Edit order" onClick={e=>{e.stopPropagation();openOrder(o);}} style={{width:32,height:28,borderRadius:5,background:T.greenSoft,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.edit(T.green,14)}</span>
-                <span title="Order PDF" onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)});nav('pdf');}} style={{width:32,height:28,borderRadius:5,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,14)}</span>
-                <span title={o.serviceFlag?'Service request':'Flag a service request'} onClick={e=>{e.stopPropagation();setServiceOrder(o);}} style={{width:32,height:28,borderRadius:5,background:o.serviceFlag?(/resolved/i.test(o.serviceStatus||'')?T.greenSoft:(T.badSoft||'#fdecec')):T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:14,fontWeight:700,color:o.serviceFlag?(/resolved/i.test(o.serviceStatus||'')?T.green:T.bad):T.ink3}}>⚠</span>
-                <span title="Share PDF on WhatsApp" onClick={e=>{e.stopPropagation();shareOrderPDF(o,'customer',ctx.showToast);}} style={{width:32,height:28,borderRadius:5,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',14)}</span>
-                {isPendWon(o)&&<span title="Send to sales team on WhatsApp — request they place the order in Salesforce and share the SO No" onClick={e=>{e.stopPropagation();shareOrderToSalesTeam(o,ctx.showToast);}} style={{display:'inline-flex',alignItems:'center',gap:4,height:28,padding:'0 8px',borderRadius:5,background:'#0b7dc422',color:'#0b6ba8',border:'1px solid #9fd0ea',fontSize:10,fontWeight:800,letterSpacing:0.3,cursor:'pointer'}}>{Icon.whatsapp('#0b6ba8',13)}SO</span>}
-                {isAdmin&&<span title="Delete order (admin)" onClick={e=>{e.stopPropagation();deleteOrder(o);}} style={{width:32,height:28,borderRadius:5,background:T.badSoft||'#fdecec',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.trash(T.bad,14)}</span>}
-              </div>
+            </div>
+            </div>
+            {/* Order actions — kept as boxes that wrap onto multiple lines so they
+                never overflow the row or squeeze the customer name on a phone.
+                Editing and deleting an order live in the admin-only Edit Order /
+                Delete Order sections, so those buttons are intentionally absent here. */}
+            <div style={{display:'flex',gap:6,marginTop:10,flexWrap:'wrap',alignItems:'center'}}>
+              <select value={o.deliveryStatus||'Pending'} onClick={e=>e.stopPropagation()} onChange={e=>{e.stopPropagation();changeDelivery(o,e.target.value);}}
+                style={{padding:'6px 8px',borderRadius:6,border:`1px solid ${T.line}`,background:'#fff',color:T.ink2,fontSize:12,fontWeight:600,cursor:'pointer',WebkitAppearance:'none',appearance:'none',maxWidth:150}}>
+                {DELIVERY_STATUSES.map(s=><option key={s} value={s}>{s}</option>)}
+              </select>
+              <span title="Order PDF" onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)});nav('pdf');}} style={{width:36,height:32,borderRadius:6,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,15)}</span>
+              <span title={o.serviceFlag?'Service request':'Flag a service request'} onClick={e=>{e.stopPropagation();setServiceOrder(o);}} style={{width:36,height:32,borderRadius:6,background:o.serviceFlag?(/resolved/i.test(o.serviceStatus||'')?T.greenSoft:(T.badSoft||'#fdecec')):T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:15,fontWeight:700,color:o.serviceFlag?(/resolved/i.test(o.serviceStatus||'')?T.green:T.bad):T.ink3}}>⚠</span>
+              <span title="Share PDF on WhatsApp" onClick={e=>{e.stopPropagation();shareOrderPDF(o,'customer',ctx.showToast);}} style={{width:36,height:32,borderRadius:6,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',15)}</span>
+              {isPendWon(o)&&<span title="Send to sales team on WhatsApp — request they place the order in Salesforce and share the SO No" onClick={e=>{e.stopPropagation();shareOrderToSalesTeam(o,ctx.showToast);}} style={{display:'inline-flex',alignItems:'center',gap:4,height:32,padding:'0 10px',borderRadius:6,background:'#0b7dc422',color:'#0b6ba8',border:'1px solid #9fd0ea',fontSize:11,fontWeight:800,letterSpacing:0.3,cursor:'pointer'}}>{Icon.whatsapp('#0b6ba8',14)}SO</span>}
             </div>
           </div>
     );
@@ -6753,6 +6775,83 @@ function HistoryScreen({ctx}) {
     );
   }
 
+  // ── Edit Order / Delete Order (admin only) ─────────────────────────────────
+  // Two dedicated admin sections reached from the ledger. The owner searches an
+  // order (by customer, contact number, Order ID or SO No), then edits or
+  // deletes just that one — keeping edit/delete off the everyday order cards.
+  if (isAdmin && manageView) {
+    const del = manageView === 'delete';
+    const mq = manageQuery.trim().toLowerCase();
+    const results = mq ? orders.filter(o=>orderMatchesText(o, mq)) : [];
+    const manageRow = o => {
+      const bal = Math.round(orderReceived(o).balance);
+      return (
+        <div key={o.no} style={{background:'#fff',border:`1px solid ${T.line}`,borderLeft:`4px solid ${del?T.bad:T.green}`,borderRadius:10,padding:'12px 14px',marginBottom:8,display:'grid',gridTemplateColumns:'1fr auto',gap:10,alignItems:'center'}}>
+          <div style={{minWidth:0}}>
+            <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',marginBottom:2}}>
+              <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
+              {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:null}
+            </div>
+            <div style={{fontSize:15,fontWeight:700,color:T.ink}}>{o.customer}</div>
+            <div style={{fontSize:11,color:T.ink4,marginTop:2}}>{[o.salesExec,o.phone].filter(Boolean).join(' · ')}</div>
+            <div style={{fontSize:11,marginTop:2}}>₹{(o.amt||0).toLocaleString('en-IN')} · Balance: <span style={{fontFamily:T.mono,fontWeight:700,color:bal>0?T.bad:T.ok}}>{bal>0?'₹'+bal.toLocaleString('en-IN'):'Fully Paid'}</span></div>
+          </div>
+          <button onClick={()=>{ if(del){ deleteOrder(o); } else { openOrder(o); } }}
+            style={{display:'inline-flex',alignItems:'center',gap:5,height:34,padding:'0 12px',borderRadius:8,background:del?(T.badSoft||'#fdecec'):T.greenSoft,border:`1px solid ${del?T.bad:T.green}`,color:del?T.bad:T.green,fontSize:12,fontWeight:800,cursor:'pointer',flexShrink:0}}>
+            {del?Icon.trash(T.bad,14):Icon.edit(T.green,14)}{del?'Delete':'Edit'}
+          </button>
+        </div>
+      );
+    };
+    return (
+      <div className="screen">
+        <div style={{flexShrink:0}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 10px'}}>
+            <button onClick={()=>{setManageView(null);setManageQuery('');}} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>ORDERS · ADMIN</div>
+              <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>{del?'Delete Order':'Edit Order'}</div>
+            </div>
+          </div>
+          <div style={{padding:'2px 14px 10px'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,background:'#fff',border:`1px solid ${del?T.bad:T.line}`,borderRadius:8,padding:'8px 12px'}}>
+              {Icon.search(T.ink4,16)}
+              <input value={manageQuery} onChange={e=>setManageQuery(e.target.value)} autoFocus placeholder="Search by customer, contact no, Order ID or SO No" style={{flex:1,border:'none',outline:'none',fontSize:14,fontFamily:T.sans,color:T.ink,background:'transparent'}}/>
+              {manageQuery&&<span onClick={()=>setManageQuery('')} style={{cursor:'pointer'}}>{Icon.close(T.ink4,14)}</span>}
+            </div>
+            <div style={{fontSize:11,color:T.ink4,marginTop:6,padding:'0 2px'}}>
+              {del?'Search the order you want to delete, then tap Delete. This permanently removes it from the CRM sheet.':'Search the order you want to edit, then tap Edit to open its form.'}
+            </div>
+          </div>
+        </div>
+        <div className="scroll" style={{padding:'6px 14px 20px'}}>
+          {!mq && (
+            <div style={{padding:'44px 24px',textAlign:'center'}}>
+              <div style={{width:52,height:52,borderRadius:14,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12}}>{Icon.search(T.ink4,24)}</div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>Search for an order</div>
+              <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>Type a customer name, contact number, Order ID or SO No to find the order to {del?'delete':'edit'}.</div>
+            </div>
+          )}
+          {mq && results.length===0 && (
+            <div style={{padding:'44px 24px',textAlign:'center'}}>
+              <div style={{width:52,height:52,borderRadius:14,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12}}>{Icon.doc(T.ink4,24)}</div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No matching order</div>
+              <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>Try a different name, number or Order ID.</div>
+            </div>
+          )}
+          {mq && results.length>0 && (
+            <>
+              <div style={{fontSize:11,color:T.ink4,fontWeight:700,letterSpacing:.6,margin:'2px 2px 8px'}}>{results.length} match{results.length===1?'':'es'}</div>
+              {results.map(manageRow)}
+            </>
+          )}
+          <div style={{height:24}}/>
+        </div>
+        <BottomNav screen="history" nav={nav}/>
+      </div>
+    );
+  }
+
   return (
     <div className="screen">
       <div style={{flexShrink:0}}>
@@ -6814,11 +6913,25 @@ function HistoryScreen({ctx}) {
               : <span style={{fontSize:18,opacity:.8}}>›</span>}
           </div>
         </div>
-        {/* Search by Order ID or SO No (WON) */}
+        {/* Edit Order / Delete Order entries — admin only. Search an order, then
+            edit or delete just that one. Kept off the everyday order cards. */}
+        {isAdmin && (
+          <div style={{padding:'2px 18px 8px',display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+            <div onClick={()=>{setManageQuery('');setManageView('edit');}} style={{display:'flex',alignItems:'center',gap:10,padding:'14px 16px',background:T.ink,color:'#fff',borderRadius:10,cursor:'pointer'}}>
+              <div style={{width:34,height:34,borderRadius:8,background:'rgba(255,255,255,.14)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>✏️</div>
+              <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>Edit Order</div><div style={{fontSize:11,opacity:.7}}>Search &amp; edit an order</div></div>
+            </div>
+            <div onClick={()=>{setManageQuery('');setManageView('delete');}} style={{display:'flex',alignItems:'center',gap:10,padding:'14px 16px',background:T.bad,color:'#fff',borderRadius:10,cursor:'pointer'}}>
+              <div style={{width:34,height:34,borderRadius:8,background:'rgba(255,255,255,.18)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>🗑️</div>
+              <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>Delete Order</div><div style={{fontSize:11,opacity:.85}}>Search &amp; delete an order</div></div>
+            </div>
+          </div>
+        )}
+        {/* Search by customer, contact no, Order ID or SO No (WON) */}
         <div style={{padding:'2px 18px 8px'}}>
           <div style={{display:'flex',alignItems:'center',gap:8,background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'8px 12px'}}>
             {Icon.search(T.ink4,16)}
-            <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search by Order ID or SO No (WON)" style={{flex:1,border:'none',outline:'none',fontSize:14,fontFamily:T.sans,color:T.ink,background:'transparent'}}/>
+            <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search by customer, contact no, Order ID or SO No" style={{flex:1,border:'none',outline:'none',fontSize:14,fontFamily:T.sans,color:T.ink,background:'transparent'}}/>
             {query&&<span onClick={()=>setQuery('')} style={{cursor:'pointer'}}>{Icon.close(T.ink4,14)}</span>}
           </div>
         </div>
