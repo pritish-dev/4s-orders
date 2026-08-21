@@ -584,7 +584,11 @@ function orderReceived(o) {
   // Finance-scheme orders: the Godrej reimbursement is part of the money paid for
   // the order (financier advance + Godrej reimbursement = order value), so count it.
   const reimb   = Number(o.godrejReimbursement) || 0;
-  let received  = (Number(o.earnest) || 0) + later + reimb;
+  // Pine Labs split across two cards: the 2nd card onward carries its own amount +
+  // Godrej reimbursement, so add those to what has been received too.
+  const extraCards = (Array.isArray(o.pineLabsCards) ? o.pineLabsCards : []).slice(1)
+    .reduce((s, c) => s + (Number(c && c.amount) || 0) + (Number(c && c.reimbursement) || 0), 0);
+  let received  = (Number(o.earnest) || 0) + later + reimb + extraCards;
   if (received > total) received = total;            // never record more than the bill
   let balance = total - received;
   const roundBudget = 2 + 10 * ((o.items || []).length);   // per-line GST rounding tolerance
@@ -1625,9 +1629,12 @@ const BLANK_ORDER = () => ({
   // the order value. godrejReimbursement holds that reimbursed amount + its date.
   godrejReimbursement:'', godrejReimbursementDate:'',
   // Pine Labs card payment detail(s) — one block per card the customer paid with
-  // (up to two). Each block: { payee, emi, cardName, cardNameOther }. cardName is a
-  // preset choice; when it is "Other" the free-typed cardNameOther is the real name.
-  pineLabsCards:[{payee:'',emi:'No EMI',cardName:'',cardNameOther:''}],
+  // (up to two). Each block: { payee, emi, cardName, cardNameOther, amount,
+  // reimbursement }. cardName is a preset choice; when it is "Other" the free-typed
+  // cardNameOther is the real name. amount/reimbursement hold the money paid on this
+  // card and the Godrej reimbursement for it (used from the 2nd card onward — the
+  // first card's amount & reimbursement stay in earnest / godrejReimbursement).
+  pineLabsCards:[{payee:'',emi:'No EMI',cardName:'',cardNameOther:'',amount:'',reimbursement:''}],
   // Bajaj Finance EMI scheme (one of the BAJAJ_EMI_OPTS values, e.g. "0/6").
   bajajEmi:'',
   // Installation Happy Code — required to move the order to "Installation Done".
@@ -1700,7 +1707,7 @@ function isFinanceScheme(o) { return !!financeSchemeOf(o && o.paymentMode); }
 const PINE_EMI_OPTS  = ['No EMI', '3', '6', '9', '12'];
 const PINE_CARD_OPTS = ['HDFC CREDIT CARD', 'HDFC DEBIT CARD', 'IDFC FIRST BANK', 'AXIS CREDIT CARD', 'SBI CREDIT CARD', 'Other'];
 const BAJAJ_EMI_OPTS = ['0/6', '8/2', '12/4'];
-const BLANK_PINE_CARD = () => ({ payee:'', emi:'No EMI', cardName:'', cardNameOther:'' });
+const BLANK_PINE_CARD = () => ({ payee:'', emi:'No EMI', cardName:'', cardNameOther:'', amount:'', reimbursement:'' });
 // Effective card name — the free-typed text when "Other" is chosen, else the preset.
 function pineCardName(c) {
   if (!c) return '';
@@ -1747,8 +1754,13 @@ function FinancePaymentFields({ o, setOrder }) {
   const total = orderTotals(o).total;
   const mr1 = (o.moneyReceipts && o.moneyReceipts[0]) || { no:'', date:'', amt:'' };
   const setMR0date = v => setOrder(prev => { const arr=(prev.moneyReceipts||[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:'',amt:''}); arr[0]={...arr[0],date:v}; return {...prev,moneyReceipts:arr}; });
-  const finAmt=Number(o.earnest)||0, reimb=Number(o.godrejReimbursement)||0, paid=finAmt+reimb, roundT=Math.round(total), gap=roundT-paid;
   const cards = pineLabsCardsOf(o);
+  // From the 2nd card onward each card carries its own amount + Godrej reimbursement
+  // (the first card's live in earnest / godrejReimbursement above). Sum the extras in.
+  const extraAmt   = cards.slice(1).reduce((s,c)=>s+(Number(c.amount)||0),0);
+  const extraReimb = cards.slice(1).reduce((s,c)=>s+(Number(c.reimbursement)||0),0);
+  const finAmt=Number(o.earnest)||0, reimb=Number(o.godrejReimbursement)||0;
+  const paid=finAmt+reimb+extraAmt+extraReimb, roundT=Math.round(total), gap=roundT-paid;
   const writeCards = arr => setOrder(prev => ({ ...prev, pineLabsCards: arr.length ? arr : [BLANK_PINE_CARD()] }));
   const setCard = (idx,field,val) => writeCards(pineLabsCardsOf(o).map((c,i)=> i===idx ? {...c,[field]:val} : c));
   const addCard = () => { const arr=pineLabsCardsOf(o); if(arr.length<2) writeCards([...arr,BLANK_PINE_CARD()]); };
@@ -1774,7 +1786,7 @@ function FinancePaymentFields({ o, setOrder }) {
         </div>
       </div>
       <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12,gap:8,flexWrap:'wrap'}}>
-        <span style={{color:T.ink3,fontWeight:600}}>Pine Labs <b style={{fontFamily:T.mono,color:T.ink}}>₹{finAmt.toLocaleString('en-IN')}</b> + Godrej <b style={{fontFamily:T.mono,color:T.ink}}>₹{reimb.toLocaleString('en-IN')}</b></span>
+        <span style={{color:T.ink3,fontWeight:600}}>Cards <b style={{fontFamily:T.mono,color:T.ink}}>₹{(finAmt+extraAmt).toLocaleString('en-IN')}</b> + Godrej <b style={{fontFamily:T.mono,color:T.ink}}>₹{(reimb+extraReimb).toLocaleString('en-IN')}</b></span>
         <span style={{color:Math.abs(gap)<=2?T.ok:(gap<0?T.bad:T.warn),fontWeight:700}}>{Math.abs(gap)<=2?'= Order value ✓':(gap<0?`Over by ₹${Math.abs(gap).toLocaleString('en-IN')}`:`₹${gap.toLocaleString('en-IN')} to reach order value`)}</span>
       </div>
       {cards.map((c,idx)=>(
@@ -1800,6 +1812,16 @@ function FinancePaymentFields({ o, setOrder }) {
             </div>
           </div>
           {c.cardName==='Other' && <Field label="Card Name (enter manually)" value={c.cardNameOther} onChange={v=>setCard(idx,'cardNameOther',v)} hint="This becomes the Card Name value"/>}
+          {idx>0 && (
+            <div style={{display:'flex'}}>
+              <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
+                <Field label="Amount Paid by this Card" value={c.amount} onChange={v=>setCard(idx,'amount',String(v).replace(/[^\d.]/g,''))} mono type="number" hint="Amount swiped on this card"/>
+              </div>
+              <div style={{flex:1}}>
+                <Field label="Reimbursement from Godrej" value={c.reimbursement} onChange={v=>setCard(idx,'reimbursement',String(v).replace(/[^\d.]/g,''))} mono type="number" hint="Godrej reimbursement for this card"/>
+              </div>
+            </div>
+          )}
         </div>
       ))}
       {cards.length<2 && (
@@ -5374,17 +5396,18 @@ function generatePineLabsReimbursementPDF(o){
   const dateTxt = payISO ? prettyDate(payISO) : '';
   const cards = pineLabsCardsOf(o);
   const ref = orderFormRef(o);
-  const amt = inrAmt(o.earnest);
   const ml = 18; let y = 24; const lh = 9;
   doc.setTextColor(0,0,0);
   cards.forEach((c, idx) => {
     if (idx>0) y += 6;   // blank gap between two cards
+    // The first card's amount lives in earnest; the 2nd card onward carries its own.
+    const cardAmt = inrAmt(idx===0 ? o.earnest : c.amount);
     const rows = [
       ['Name of Customer', c.payee||''],
       ['Date', dateTxt],
       ['Tenure', c.emi||''],
       ['Card Name', pineCardName(c)],
-      ['Transaction Amount', amt],
+      ['Transaction Amount', cardAmt],
       ['Order No', ref],
     ];
     rows.forEach(([k,v])=>{
