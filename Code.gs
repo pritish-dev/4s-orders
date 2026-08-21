@@ -1620,6 +1620,11 @@ var CRM_APP_COLUMNS = [
   // reimburses the rest. Together they equal the order value (total paid by customer).
   ['GODREJ REIMBURSEMENT', 'REIMBURSEMENT FROM GODREJ'],
   ['GODREJ REIMBURSEMENT DATE', 'REIMBURSEMENT FROM GODREJ DATE'],
+  // Finance-scheme payment detail as one JSON blob: the Pine Labs card block(s)
+  // (payee, EMI tenure, card name, per-card amount & reimbursement) and the Bajaj
+  // Finance EMI. Without this column the whole Pine Labs section is silently
+  // dropped on save (colOf returns -1), so it MUST be ensured on the sheet.
+  ['FINANCE PAYMENT DATA', 'FINANCE SCHEME DATA', 'PAYMENT DETAILS JSON'],
   // Installation Happy Code — required to move an order's delivery status to
   // "Installation Done" (the code the customer shares once installation is complete).
   ['HAPPY CODE', 'INSTALLATION HAPPY CODE', 'ORDER HAPPY CODE'],
@@ -1922,7 +1927,14 @@ function _writeOrderToCRM(o) {
   var now          = new Date();
   var todayStr     = now.toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'2-digit' }).replace(/\//g,'.');
   var orderDateStr = String(o.date || '') || existingDate || todayStr;   // keep original date on re-save
-  var wonToWrite   = String(o.won || '').trim() || existingWon || '';    // preserve a WON already on the sheet
+  // WON (Godrej SO No): the client's order-level value is authoritative on every
+  // save — an empty string means the user CLEARED it, so it must be blanked, not
+  // silently restored from the sheet. Only fall back to the existing WON when the
+  // field was genuinely not sent at all (undefined/null), so a save that doesn't
+  // carry the field can't wipe a WON already on record.
+  var wonToWrite   = (o.won === undefined || o.won === null)
+                       ? (existingWon || '')
+                       : String(o.won).trim();
 
   // Draft / Submitted lifecycle: honour what the client sends, but never silently
   // downgrade an order that is already SUBMITTED back to a draft — once its PDF has
