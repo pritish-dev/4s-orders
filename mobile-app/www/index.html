@@ -108,6 +108,19 @@
 })();
 </script>
 
+<!-- Capacitor runtime. The installed app loads this page from a remote URL
+     (capacitor.config.json → server.url), and Capacitor only auto-injects its
+     native bridge into locally-served assets — never into a remotely-loaded
+     page. Without window.Capacitor the native PdfSaver plugin is unreachable and
+     the "download/share PDF" buttons silently fall back to jsPDF's blob download,
+     which the Android WebView drops — so nothing happens in the APK. Loading the
+     standalone core here defines window.Capacitor and wires it to the native
+     androidBridge interface, so PdfSaver works. In a plain browser (the web app)
+     there is no androidBridge, so this reports platform "web", isNativePlatform()
+     is false, and nativePdfSaver() returns null — the browser download is used,
+     exactly as before. Must load before the app code below. -->
+<script src="vendor/capacitor.js"></script>
+
 <!-- Vendored dependencies (bundled in the APK — no network needed, faster boot) -->
 <script src="vendor/react.production.min.js"></script>
 <script src="vendor/react-dom.production.min.js"></script>
