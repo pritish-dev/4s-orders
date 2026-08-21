@@ -88,7 +88,29 @@ jobs:
           path: mobile-app/4S-Orders.apk
           if-no-files-found: error
 
-      - name: Publish APK to a GitHub Release
+      # Auto-publish an always-fresh, installable APK on every master build, plus
+      # a versioned release on demand. The rolling "apk-latest" release keeps a
+      # stable install link that always points at the newest build, so nothing
+      # here needs a manual workflow run:
+      #   https://github.com/pritish-dev/4s-orders/releases/tag/apk-latest
+      - name: Publish rolling latest APK release (auto, on master)
+        if: github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-latest
+          name: 4S Orders (latest)
+          make_latest: true
+          files: mobile-app/4S-Orders.apk
+          body: |
+            Latest installable Android build of the 4S Orders app
+            (auto-published from `master`, build ${{ github.run_number }}).
+
+            **To install:** download `4S-Orders.apk` on an Android phone, open it,
+            and allow "install from unknown sources" if prompted. Installing this
+            build carries the native PDF save/share support, so the Download and
+            Share PDF buttons work inside the app.
+
+      - name: Publish a versioned APK release (manual dispatch only)
         if: github.event_name == 'workflow_dispatch' && inputs.release
         uses: softprops/action-gh-release@v2
         with:

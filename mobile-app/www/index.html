@@ -108,6 +108,19 @@
 })();
 </script>
 
+<!-- Capacitor runtime. The installed app loads this page from a remote URL
+     (capacitor.config.json → server.url), and Capacitor only auto-injects its
+     native bridge into locally-served assets — never into a remotely-loaded
+     page. Without window.Capacitor the native PdfSaver plugin is unreachable and
+     the "download/share PDF" buttons silently fall back to jsPDF's blob download,
+     which the Android WebView drops — so nothing happens in the APK. Loading the
+     standalone core here defines window.Capacitor and wires it to the native
+     androidBridge interface, so PdfSaver works. In a plain browser (the web app)
+     there is no androidBridge, so this reports platform "web", isNativePlatform()
+     is false, and nativePdfSaver() returns null — the browser download is used,
+     exactly as before. Must load before the app code below. -->
+<script src="vendor/capacitor.js"></script>
+
 <!-- Vendored dependencies (bundled in the APK — no network needed, faster boot) -->
 <script src="vendor/react.production.min.js"></script>
 <script src="vendor/react-dom.production.min.js"></script>
@@ -4426,6 +4439,17 @@ function OrderFormScreen({ctx}) {
     if(ok){ setOrder(BLANK_ORDER()); nav('history'); }
   }
   const setF = (k,v) => setOrder(prev=>({...prev,[k]:v}));
+  // Editing the order-level WON (Godrej SO No) field must keep the per-item WON in
+  // sync, otherwise a stale per-item WON (loaded from the sheet) survives the save
+  // and the number reappears. Clearing the field clears every item's WON; a single
+  // value is applied to every item. A comma-joined value (a multi-SO order) is left
+  // to the per-item WONs already on the order and only the order-level field changes.
+  const setWon = v => setOrder(prev=>{
+    const clean = String(v||'').trim();
+    const multi = clean.indexOf(',') >= 0;
+    const items = multi ? (prev.items||[]) : (prev.items||[]).map(it=>({...it,won:clean}));
+    return {...prev, won:v, items};
+  });
 
   // ── CRM autofill ──────────────────────────────────────────────────────────
   // When the mobile number of a RETURNING customer is typed on a brand-new order,
@@ -4735,7 +4759,7 @@ function OrderFormScreen({ctx}) {
             Sales access — you can update the <b>WON (Godrej SO No)</b>, <b>Money Receipt No &amp; date</b> and the <b>Delivery Status</b>. Other fields can be changed by an admin.
           </div>
           <SectionHead n="01" label="Godrej SO / WON"/>
-          <Field label="WON (Godrej SO No)" value={o.won} onChange={v=>setF('won',v)} mono hint="Godrej SO / WON number — add or update it here"/>
+          <Field label="WON (Godrej SO No)" value={o.won} onChange={setWon} mono hint="Godrej SO / WON number — add or update it here"/>
           <SectionHead n="02" label={financeSchemeOf(o.paymentMode)?'Finance Payment':'Money Receipt'}/>
           {financeSchemeOf(o.paymentMode)
             ? <FinancePaymentFields o={o} setOrder={setOrder}/>
@@ -5130,7 +5154,7 @@ function OrderFormScreen({ctx}) {
               <div style={{fontSize:14,fontFamily:T.mono,fontWeight:600,color:T.ink3}}>{(o.slNo&&String(o.slNo).trim())?String(o.slNo).trim():'SI No'} / {(o.orderFormReceiptNo&&String(o.orderFormReceiptNo).trim())?<span style={{color:T.green}}>{String(o.orderFormReceiptNo).trim()}</span>:<span style={{color:T.ink4}}>…</span>}</div>
               <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Auto-assigned as <b>SI No / Receipt No</b> — the Receipt No is the next app-booking number, taken from the sheet. Confirmed on save.</div>
             </div>}
-        <Field label="WON (Godrej SO No)" value={o.won} onChange={v=>setF('won',v)} mono hint="Godrej SO / WON number — can be added or updated any time"/>
+        <Field label="WON (Godrej SO No)" value={o.won} onChange={setWon} mono hint="Godrej SO / WON number — can be added or updated any time"/>
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setOrder(prev=>({...prev,plannedDly:v,followUp:followUpFromDelivery(v)||prev.followUp}))} mono required type="date" hint="Follow-up auto-set to 2 days before this date"/>
         <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
         <SectionHead n="06" label="Payment" id="sec-payment"/>
@@ -5396,7 +5420,6 @@ function generatePineLabsReimbursementPDF(o){
   const payISO = (()=>{ const pd=String((o.moneyReceipts&&o.moneyReceipts[0]&&o.moneyReceipts[0].date)||'').trim(); return /^\d{4}-\d{2}-\d{2}$/.test(pd)?pd:''; })();
   const dateTxt = payISO ? prettyDate(payISO) : '';
   const cards = pineLabsCardsOf(o);
-  const ref = orderFormRef(o);
   const ml = 18; let y = 24; const lh = 9;
   doc.setTextColor(0,0,0);
   cards.forEach((c, idx) => {
@@ -5409,7 +5432,6 @@ function generatePineLabsReimbursementPDF(o){
       ['Tenure', c.emi||''],
       ['Card Name', pineCardName(c)],
       ['Transaction Amount', cardAmt],
-      ['Order No', ref],
     ];
     rows.forEach(([k,v])=>{
       doc.setFont('helvetica','bold'); doc.setFontSize(13);
