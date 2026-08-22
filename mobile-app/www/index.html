@@ -2771,6 +2771,7 @@ function App() {
     home:    <HomeScreen    ctx={ctx}/>,
     search:  <SearchScreen  ctx={ctx}/>,
     order:   <OrderFormScreen ctx={ctx}/>,
+    orderview: <OrderFormScreen ctx={ctx} viewOnly/>,
     pdf:     <PDFPreviewScreen ctx={ctx}/>,
     history: <HistoryScreen ctx={ctx}/>,
     service: <ServiceScreen ctx={ctx}/>,
@@ -3766,7 +3767,7 @@ function HomeScreen({ctx}) {
       <div className="scroll">
         <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`}}>
           {orders.slice(0,5).map((o,i,arr)=>(
-            <div key={o.no} onClick={()=>{ctx.setOrder(o);nav('pdf');}} style={{display:'grid',gridTemplateColumns:'1fr auto',padding:'11px 18px',alignItems:'center',gap:10,borderBottom:i<arr.length-1?`1px solid ${T.line}`:'none',cursor:'pointer'}}>
+            <div key={o.no} onClick={()=>{ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)});nav('orderview');}} style={{display:'grid',gridTemplateColumns:'1fr auto',padding:'11px 18px',alignItems:'center',gap:10,borderBottom:i<arr.length-1?`1px solid ${T.line}`:'none',cursor:'pointer'}}>
               <div style={{minWidth:0}}>
                 <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3}}>
                   <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
@@ -4375,7 +4376,7 @@ function SearchScreen({ctx}) {
 }
 
 // ─── Order Form ──────────────────────────────────────────────
-function OrderFormScreen({ctx}) {
+function OrderFormScreen({ctx, viewOnly}) {
   const {order,setOrder,nav,back,user,doSaveOrder,doDeleteOrder,doUpdateDelivery} = ctx;
   const o = order;
   const [partialPicker,setPartialPicker] = React.useState(false);
@@ -4737,7 +4738,10 @@ function OrderFormScreen({ctx}) {
     if(saved){ setOrder(saved); ctx.showToast('Order updated ✓','ok'); nav('history'); }
   }
   const setMRestricted=(i,field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:''},{no:'',date:''},{no:'',date:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; });
-  if(restricted){
+  // View-only mode (opened from a "Recent order" tap on Home) shows the full order
+  // form as a non-editable, scrollable page — it bypasses the sales-team restricted
+  // editor below and renders the complete form with every control disabled.
+  if(restricted && !viewOnly){
     return (
       <div className="screen">
         <div style={{display:'flex',alignItems:'center',gap:8,padding:'10px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,flexShrink:0}}>
@@ -4817,27 +4821,29 @@ function OrderFormScreen({ctx}) {
           <button onClick={back} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
           <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.home(T.ink2,18)}</button>
           <div>
-            <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>{o.no?(o.manualOrder?'Edit manual order':'Edit order'):(o.manualOrder?'New manual order':'New order')}</div>
+            <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>{viewOnly?'Order':(o.no?(o.manualOrder?'Edit manual order':'Edit order'):(o.manualOrder?'New manual order':'New order'))}</div>
             <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono}}>{o.no?o.no:(o.manualOrder?'MANUAL · DRAFT':'DRAFT')}</div>
           </div>
         </div>
         <div style={{display:'flex',alignItems:'center',gap:8}}>
-          {isAdmin&&o.no&&<button onClick={handleDelete} title="Delete order (admin)" style={{display:'inline-flex',alignItems:'center',gap:5,height:30,padding:'0 10px',borderRadius:6,background:T.badSoft||'#fdecec',border:`1px solid ${T.bad}`,color:T.bad,fontSize:12,fontWeight:700,cursor:'pointer'}}>{Icon.trash(T.bad,14)}Delete</button>}
-          <Pill tone={o.no?'ok':'warn'} size="sm">{o.no?'SAVED':'UNSAVED'}</Pill>
+          {isAdmin&&o.no&&!viewOnly&&<button onClick={handleDelete} title="Delete order (admin)" style={{display:'inline-flex',alignItems:'center',gap:5,height:30,padding:'0 10px',borderRadius:6,background:T.badSoft||'#fdecec',border:`1px solid ${T.bad}`,color:T.bad,fontSize:12,fontWeight:700,cursor:'pointer'}}>{Icon.trash(T.bad,14)}Delete</button>}
+          <Pill tone={viewOnly?'neutral':(o.no?'ok':'warn')} size="sm">{viewOnly?'VIEW ONLY':(o.no?'SAVED':'UNSAVED')}</Pill>
         </div>
       </div>
       <StockRibbon syncedAt={ctx.syncedAt}/>
       {/* Step progress — a tap jumps to that section; a filled dot means every
-          required field in it is done. Purely a guide; nothing is gated on it. */}
-      <div style={{display:'flex',gap:4,padding:'7px 10px',background:'#fff',borderBottom:`1px solid ${T.line}`,overflowX:'auto',flexShrink:0}}>
+          required field in it is done. Purely a guide; nothing is gated on it.
+          Hidden in view-only mode (nothing to fill in). */}
+      {!viewOnly && <div style={{display:'flex',gap:4,padding:'7px 10px',background:'#fff',borderBottom:`1px solid ${T.line}`,overflowX:'auto',flexShrink:0}}>
         {STEPS.map(([k,label])=>{ const done=stepDone(k); return (
           <div key={k} onClick={()=>scrollToSec(k)} style={{flex:'1 0 auto',display:'flex',alignItems:'center',gap:5,padding:'4px 9px',borderRadius:99,cursor:'pointer',background:done?T.greenSoft:T.paper2,border:`1px solid ${done?T.greenLine:T.line}`,whiteSpace:'nowrap'}}>
             <span style={{width:14,height:14,borderRadius:99,flexShrink:0,display:'inline-flex',alignItems:'center',justifyContent:'center',background:done?T.green:'#fff',border:done?'none':`1.5px solid ${T.line2||T.line}`,color:'#fff',fontSize:9,fontWeight:800}}>{done?'✓':''}</span>
             <span style={{fontSize:11,fontWeight:700,color:done?T.green:T.ink3}}>{label}</span>
           </div>
         );})}
-      </div>
+      </div>}
       <div className="scroll">
+        <fieldset disabled={viewOnly} style={{border:0,margin:0,padding:0,minWidth:0,...(viewOnly?{pointerEvents:'none'}:{})}}>
         {o.manualOrder && (
           <>
             <div style={{padding:'9px 14px',background:T.ink,color:'#fff',fontSize:11,fontWeight:700,letterSpacing:0.4}}>
@@ -5253,6 +5259,7 @@ function OrderFormScreen({ctx}) {
             )}
           </div>
         </div>
+        </fieldset>
       </div>
       {/* Validation summary — appears after the first Save attempt and updates live
           as fields are filled. Each line jumps to the section that needs it. */}
@@ -5269,11 +5276,17 @@ function OrderFormScreen({ctx}) {
           </div>
         </div>
       )}
-      <div style={{display:'flex',gap:8,padding:'10px 14px',background:'#fff',borderTop:`1px solid ${T.line}`,flexShrink:0}}>
-        <Btn onClick={()=>{ if((o.items&&o.items.length)&&!window.confirm('Discard changes to this order?'))return; try{localStorage.removeItem('4s_draft');}catch{} setOrder(BLANK_ORDER()); nav('home'); }}>Discard</Btn>
-        <Btn disabled={ctx.loading} onClick={handleSaveDraft}>Save Draft</Btn>
-        <Btn primary full disabled={ctx.loading} onClick={handleSave}>Save & PDF →</Btn>
-      </div>
+      {viewOnly
+        ? <div style={{display:'flex',gap:8,padding:'10px 14px',background:'#fff',borderTop:`1px solid ${T.line}`,flexShrink:0}}>
+            <Btn onClick={back}>Back</Btn>
+            <Btn onClick={()=>nav('pdf')}>Open PDF</Btn>
+            <Btn primary full icon={Icon.whatsapp&&Icon.whatsapp()} onClick={()=>shareOrderPDF(o,'customer',ctx.showToast)}>Share PDF</Btn>
+          </div>
+        : <div style={{display:'flex',gap:8,padding:'10px 14px',background:'#fff',borderTop:`1px solid ${T.line}`,flexShrink:0}}>
+            <Btn onClick={()=>{ if((o.items&&o.items.length)&&!window.confirm('Discard changes to this order?'))return; try{localStorage.removeItem('4s_draft');}catch{} setOrder(BLANK_ORDER()); nav('home'); }}>Discard</Btn>
+            <Btn disabled={ctx.loading} onClick={handleSaveDraft}>Save Draft</Btn>
+            <Btn primary full disabled={ctx.loading} onClick={handleSave}>Save & PDF →</Btn>
+          </div>}
       {partialPicker && <PartialDeliveryModal order={o} onCancel={()=>setPartialPicker(false)} onConfirm={confirmPartialDelivery}/>}
       {happyPrompt && <HappyCodeModal title="Happy Code" subtitle={(o.no||'')+' · '+(o.customer||'')} note='A Happy Code is required to mark this order "Installation Done" (Completed).' confirmLabel="Mark Installed" onCancel={()=>setHappyPrompt(false)} onConfirm={confirmInstallHappy}/>}
     </div>
@@ -5525,19 +5538,26 @@ function PDFPreviewScreen({ctx}) {
   const {order,nav,back,showToast} = ctx;
   const o = order;
   const {itemsSubtotal, orderDiscPct, orderDiscAmt, cgst, sgst, total, earnest, balance} = orderTotals(o);
-  const qrRef = useRef(null);
-
+  // Order QR — built as a PNG data URL via the shared makeQrDataUrl helper (the
+  // same one the PDF uses) and shown as an <img>. The previous version drew the QR
+  // straight into a <div> on mount and left it BLANK whenever the QR library hadn't
+  // finished loading on the first paint — that's the "empty QR" bug. Here we retry
+  // until the library is ready, so a scannable code always appears. Scanning opens
+  // the order's page (which serves the customer's order PDF).
+  const [qrUrl,setQrUrl] = useState(null);
+  const orderUrl = 'https://4sinteriors.in/order/'+(o.no||'').replace(/\//g,'-');
   useEffect(()=>{
-    if(qrRef.current&&window.QRCode) {
-      qrRef.current.innerHTML='';
-      try {
-        new window.QRCode(qrRef.current,{
-          text:'https://4sinteriors.in/order/'+(o.no||'').replace('/','‑'),
-          width:80,height:80,colorDark:T.ink,colorLight:'#ffffff',
-          correctLevel:window.QRCode.CorrectLevel.M,
-        });
-      } catch {}
-    }
+    let cancelled=false, tries=0;
+    setQrUrl(null);
+    (function build(){
+      if(cancelled) return;
+      if(window.QRCode){
+        const u = makeQrDataUrl(orderUrl, 200);
+        if(u){ setQrUrl(u); return; }
+      }
+      if(tries++ < 25) setTimeout(build, 150);   // QR lib not ready yet — retry briefly
+    })();
+    return ()=>{ cancelled=true; };
   },[o.no]);
 
   const safeNo = (o.no||'draft').replace('/','‑');
@@ -5613,7 +5633,11 @@ function PDFPreviewScreen({ctx}) {
               </div>
             </div>
             <div style={{padding:'10px 10px',background:T.greenSoft,border:`1px solid ${T.greenLine}`,borderRadius:4,display:'flex',alignItems:'center',gap:12}}>
-              <div ref={qrRef} style={{flexShrink:0,borderRadius:4,background:'#fff',padding:3}}/>
+              <div style={{flexShrink:0,borderRadius:4,background:'#fff',padding:3,width:86,height:86,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                {qrUrl
+                  ? <img src={qrUrl} alt="Order QR code" style={{width:80,height:80,display:'block'}}/>
+                  : <span style={{fontSize:8,color:T.ink4,fontWeight:700}}>QR…</span>}
+              </div>
               <div><div style={{fontSize:8,color:T.green,fontWeight:700,letterSpacing:.5}}>CUSTOMER COPY</div><div style={{fontSize:9,color:T.ink2,marginTop:2,lineHeight:1.4}}>Scan to view your order. Valid 30 days.</div><div style={{fontFamily:T.mono,fontSize:8,color:T.ink4,marginTop:2}}>4SI.IN/O/{(o.no||'').replace('/','‑')}</div></div>
             </div>
           </div>
@@ -5976,6 +6000,7 @@ function HistoryScreen({ctx}) {
   const [reportView,setReportView] = useState(false);      // false=ledger · true=sales-team follow-up report
   const [reportSales,setReportSales] = useState('');       // salesperson filter on the report ('' = whole team)
   const [dateView,setDateView] = useState(false);          // false=ledger · true=by-date drill-down
+  const [salesTeamView,setSalesTeamView] = useState(false);// false=ledger · true=Orders by Sales team (salesperson + delivery-status filters)
   const [watchView,setWatchView] = useState(false);        // false=ledger · true=Delivery Watch (approaching/overdue)
   const [financeView,setFinanceView] = useState(false);    // false=ledger · true=Finance Scheme Orders (Bajaj / Pine Labs)
   const [dateFrom,setDateFrom] = useState('');             // ISO yyyy-mm-dd range start for the by-date view
@@ -6032,7 +6057,11 @@ function HistoryScreen({ctx}) {
   };
   const matchesQuery = o => orderMatchesText(o, q);
   const matchesSales = o => !salesFilter || (o.salesExec||'').trim().toLowerCase()===salesFilter.toLowerCase();
+  // Used by the "Orders by Sales team" drill-down (salesperson + delivery-status filters).
   const shown = orders.filter(active.filter).filter(matchesQuery).filter(matchesSales);
+  // Main Orders (ledger) screen is now search-only: nothing is listed under the
+  // search bar until the user types a query, then every matching order is shown.
+  const ledgerResults = q ? orders.filter(matchesQuery) : [];
 
   // ── Finance Scheme Orders ───────────────────────────────────────────────────
   // Every order booked with a finance scheme (Bajaj Finance / Pine Labs EMI), shown
@@ -6898,6 +6927,68 @@ function HistoryScreen({ctx}) {
     );
   }
 
+  // ── Orders by Sales team drill-down ─────────────────────────────────────────
+  // The salesperson + delivery-status filters and their order list that used to
+  // sit under the search bar on the main Orders screen now live here. Salespeople
+  // and delivery-status categories show as rectangular buttons that wrap onto
+  // multiple lines; each status button keeps its order count. Defaults to Pending,
+  // exactly as the old under-search section did.
+  if (salesTeamView) {
+    const spBtn = sel => ({padding:'8px 12px',borderRadius:8,background:sel?T.green:'#fff',color:sel?'#fff':T.ink2,border:`1px solid ${sel?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',whiteSpace:'nowrap'});
+    return (
+      <div className="screen">
+        <div style={{flexShrink:0}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 10px'}}>
+            <button onClick={()=>setSalesTeamView(false)} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>ORDERS · BY SALES TEAM</div>
+              <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>Orders by Sales team</div>
+            </div>
+          </div>
+        </div>
+        <div className="scroll">
+          {/* Salesperson — rectangular buttons, wrapping onto multiple lines */}
+          <div style={{padding:'10px 14px 4px'}}>
+            <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:.8,marginBottom:8}}>SALES TEAM</div>
+            <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
+              <div onClick={()=>setSalesFilter('')} style={spBtn(!salesFilter)}>All</div>
+              {salespeople.map(sp=>(
+                <div key={sp} onClick={()=>setSalesFilter(sp===salesFilter?'':sp)} style={spBtn(salesFilter===sp)}>{sp}</div>
+              ))}
+            </div>
+          </div>
+          {/* Delivery status — rectangular buttons, wrapping onto multiple lines; each keeps its order count */}
+          <div style={{padding:'12px 14px 6px'}}>
+            <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:.8,marginBottom:8}}>DELIVERY STATUS</div>
+            <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
+              {tabs.map(t=>{
+                const n = orders.filter(t.filter).length;
+                return <span key={t.id} onClick={()=>setTab(t.id)} style={{padding:'8px 12px',borderRadius:8,background:t.id===tab?T.ink:'#fff',color:t.id===tab?'#fff':T.ink2,border:`1px solid ${t.id===tab?T.ink:T.line}`,fontSize:12,fontWeight:600,display:'inline-flex',gap:6,alignItems:'center',cursor:'pointer'}}>{t.label}<span style={{fontFamily:T.mono,opacity:.7,fontSize:11}}>{n}</span></span>;
+              })}
+            </div>
+          </div>
+          <div style={{height:6}}/>
+          {shown.map(orderCard)}
+          {loading && orders.length===0
+            ? [0,1,2,3,4].map(i=><SkeletonOrderRow key={i}/>)
+            : shown.length===0 && (
+                <div style={{padding:'40px 24px',textAlign:'center'}}>
+                  <div style={{width:52,height:52,borderRadius:14,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12}}>{Icon.doc(T.ink4,24)}</div>
+                  <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No orders in {active.label}{salesFilter?' for '+salesFilter:''}</div>
+                  <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>Pick a different salesperson or delivery status above.</div>
+                </div>
+              )}
+          <div style={{height:24}}/>
+        </div>
+        {partialOrder && <PartialDeliveryModal order={partialOrder} onCancel={()=>setPartialOrder(null)} onConfirm={confirmPartial}/>}
+        {rescheduleOrder && <RescheduleModal order={rescheduleOrder} onCancel={()=>setRescheduleOrder(null)} onConfirm={confirmReschedule}/>}
+        {happyOrder && <HappyCodeModal title="Happy Code" subtitle={(happyOrder.no||'')+' · '+(happyOrder.customer||'')} note='A Happy Code is required to mark this order "Installation Done" (Completed).' confirmLabel="Mark Installed" onCancel={()=>setHappyOrder(null)} onConfirm={confirmHappy}/>}
+        {serviceOrder && <ServiceRequestModal order={serviceOrder} ctx={ctx} onClose={()=>setServiceOrder(null)}/>}
+        <BottomNav screen="history" nav={nav}/>
+      </div>
+    );
+  }
+
   return (
     <div className="screen">
       <div style={{flexShrink:0}}>
@@ -6911,6 +7002,18 @@ function HistoryScreen({ctx}) {
             <div style={{display:'flex',alignItems:'center',gap:10}}>
               <div style={{width:34,height:34,borderRadius:8,background:'rgba(255,255,255,.14)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>📦</div>
               <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>Order Status</div><div style={{fontSize:11,opacity:.7}}>View counts by status · tap to open</div></div>
+            </div>
+            <span style={{fontSize:18,opacity:.8}}>›</span>
+          </div>
+        </div>
+        {/* Orders by Sales team drill-down entry — the salesperson + delivery-status
+            filters and their order list that used to sit under the search bar now
+            live here. */}
+        <div style={{padding:'2px 18px 8px'}}>
+          <div onClick={()=>setSalesTeamView(true)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'14px 16px',background:T.ink,color:'#fff',borderRadius:10,cursor:'pointer'}}>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              <div style={{width:34,height:34,borderRadius:8,background:'rgba(255,255,255,.14)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>🧑‍💼</div>
+              <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>Orders by Sales team</div><div style={{fontSize:11,opacity:.7}}>Filter by salesperson &amp; delivery status · tap to open</div></div>
             </div>
             <span style={{fontSize:18,opacity:.8}}>›</span>
           </div>
@@ -6981,30 +7084,18 @@ function HistoryScreen({ctx}) {
             {query&&<span onClick={()=>setQuery('')} style={{cursor:'pointer'}}>{Icon.close(T.ink4,14)}</span>}
           </div>
         </div>
-        {/* Filter by salesperson */}
-        <div style={{padding:'0 18px 8px',display:'flex',gap:6,overflowX:'auto',alignItems:'center'}}>
-          <span style={{fontSize:11,color:T.ink4,fontWeight:700,flexShrink:0}}>SALES</span>
-          <span onClick={()=>setSalesFilter('')} style={{padding:'5px 10px',borderRadius:99,background:!salesFilter?T.green:'#fff',color:!salesFilter?'#fff':T.ink2,border:`1px solid ${!salesFilter?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0}}>All</span>
-          {salespeople.map(sp=>(
-            <span key={sp} onClick={()=>setSalesFilter(sp)} style={{padding:'5px 10px',borderRadius:99,background:salesFilter===sp?T.green:'#fff',color:salesFilter===sp?'#fff':T.ink2,border:`1px solid ${salesFilter===sp?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>{sp}</span>
-          ))}
-        </div>
-        <div style={{padding:'0 18px 10px',display:'flex',gap:6,overflowX:'auto'}}>
-          {tabs.map(t=>{
-            const n = orders.filter(t.filter).length;
-            return <span key={t.id} onClick={()=>setTab(t.id)} style={{padding:'6px 11px',borderRadius:99,background:t.id===tab?T.ink:'#fff',color:t.id===tab?'#fff':T.ink2,border:`1px solid ${t.id===tab?T.ink:T.line}`,fontSize:12,fontWeight:600,display:'inline-flex',gap:5,alignItems:'center',cursor:'pointer',flexShrink:0}}>{t.label}<span style={{fontFamily:T.mono,opacity:.7,fontSize:11}}>{n}</span></span>;
-          })}
-        </div>
+        {/* The salesperson + delivery-status filters and their order list have moved
+            into the "Orders by Sales team" section above. Nothing is shown under the
+            search bar until the user searches — the search bar is the end of the screen. */}
       </div>
       <div className="scroll">
-        {shown.map(orderCard)}
-        {loading && orders.length===0
-          ? [0,1,2,3,4].map(i=><SkeletonOrderRow key={i}/>)
-          : shown.length===0 && (
+        {q && ledgerResults.map(orderCard)}
+        {q && loading && orders.length===0 && [0,1,2,3,4].map(i=><SkeletonOrderRow key={i}/>)}
+        {q && !loading && ledgerResults.length===0 && (
               <div style={{padding:'48px 24px',textAlign:'center'}}>
                 <div style={{width:52,height:52,borderRadius:14,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12}}>{Icon.doc(T.ink4,24)}</div>
-                <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No orders here</div>
-                <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>{query||salesFilter?'Try clearing the search or the salesperson filter.':'Orders you book will appear here.'}</div>
+                <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No matching orders</div>
+                <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>Try a different name, contact number, Order ID or SO No.</div>
               </div>
             )}
         <div style={{height:24}}/>
