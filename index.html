@@ -1153,8 +1153,20 @@ function generatePDF(order, copyType) {
     val(ml+25,y+3.5, fit1(order.poRef||'',hw-27), 7.5);
     hln(ml,y+17,ml+hw);
     lbl(ml+1,y+10,'Customer Name :');
-    doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...INK);
-    doc.text(fit1(order.customer||'',hw-3,9), ml+1, y+16);
+    // Long customer names WRAP onto up to two lines (shrinking the font) instead
+    // of being truncated to one line, so large names print in full in the cell.
+    (function(){
+      const nm = String(order.customer||'');
+      doc.setFont('helvetica','bold'); doc.setTextColor(...INK);
+      doc.setFontSize(9);
+      if (doc.getTextWidth(nm) <= hw-3) {
+        doc.text(nm, ml+1, y+16);
+      } else {
+        doc.setFontSize(7.5);
+        doc.splitTextToSize(nm, hw-3).slice(0,2)
+          .forEach((ln,i)=>doc.text(ln, ml+1, y+13+i*3));
+      }
+    })();
     hln(ml,y+33,ml+hw);
     doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
     doc.splitTextToSize(order.billing||order.delivery||'',hw-3).slice(0,3).forEach((ln,i)=>doc.text(ln,ml+1,y+21+i*4));
@@ -1164,6 +1176,10 @@ function generatePDF(order, copyType) {
     lbl(ml+1,y+41,'M. :');  val(ml+9,y+41, fit1(order.alt||'',hw-11), 7.5);
     const dx = ml+hw;
     lbl(dx+1,y+3.5,'Delivery Address :');
+    // Recipient (customer) name at the top of the delivery block, so the
+    // delivery / warehouse team can see who the order is for at a glance.
+    doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...INK);
+    doc.text(fit1(order.customer||'', hw-3, 8), dx+1, y+7.5);
     doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
     const liftTypesTxt = Array.isArray(order.liftTypes) ? order.liftTypes.join(', ') : '';
     const delvText = [order.delivery||order.billing||'',
@@ -1172,7 +1188,7 @@ function generatePDF(order, copyType) {
       order.landmark ? 'Landmark: ' + order.landmark : '',
       order.liftAvailable ? 'Lift: ' + order.liftAvailable + (liftTypesTxt ? ' (' + liftTypesTxt + ')' : '') : '']
       .filter(Boolean).join('\n');
-    doc.splitTextToSize(delvText,hw-3).slice(0,6).forEach((ln,i)=>doc.text(ln,dx+1,y+8+i*4));
+    doc.splitTextToSize(delvText,hw-3).slice(0,5).forEach((ln,i)=>doc.text(ln,dx+1,y+11.5+i*3.4));
     hln(dx,y+27,dx+hw);
     lbl(dx+1,y+30.5,'E-Mail :'); val(dx+14,y+30.5, fit1(order.email||'',hw-16), 7.5);
     hln(dx,y+33,dx+hw);
@@ -1415,6 +1431,23 @@ function generatePDF(order, copyType) {
         doc.setFont('helvetica','normal'); doc.setFontSize(6); doc.setTextColor(...GR);
         doc.text('on Google — we value your feedback!', qx+qs+3, qy+qs/2+3.5);
       } catch(e) {}
+    }
+    // Order-copy QR — customer copy only. Scanning it opens the customer's own
+    // order page (which serves this order copy), mirroring the on-screen QR so
+    // the printed copy is scannable too. It regenerates automatically once the
+    // WON / order no. is filled in.
+    if (isCustomer && order.no) {
+      const orderUrl = 'https://4sinteriors.in/order/' + String(order.no).replace(/\//g,'-');
+      const oq = makeQrDataUrl(orderUrl, 220);
+      if (oq) {
+        const oqs = 22, oqx = ml+tsLW-oqs-3, oqy = y+tsH-oqs-2;
+        try {
+          doc.setFont('helvetica','bold'); doc.setFontSize(6.2); doc.setTextColor(...DRED);
+          doc.text('Scan to get your', oqx+oqs/2, oqy-4.5, {align:'center'});
+          doc.text('order copy', oqx+oqs/2, oqy-1.5, {align:'center'});
+          doc.addImage(oq,'PNG', oqx, oqy, oqs, oqs, 'ordercopyqr', 'MEDIUM');
+        } catch(e) {}
+      }
     }
     // Sales copy: the review-QR area is free, so list every scheme applied here
     // (with the scheme code spelled out when "Other" is selected).
