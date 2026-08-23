@@ -1480,23 +1480,6 @@ function generatePDF(order, copyType) {
         doc.text('on Google — we value your feedback!', qx+qs+3, qy+qs/2+3.5);
       } catch(e) {}
     }
-    // Order-copy QR — customer copy only. Scanning it opens the customer's own
-    // order page (which serves this order copy), mirroring the on-screen QR so
-    // the printed copy is scannable too. It regenerates automatically once the
-    // WON / order no. is filled in.
-    if (isCustomer && order.no) {
-      const orderUrl = 'https://4sinteriors.in/order/' + String(order.no).replace(/\//g,'-');
-      const oq = makeQrDataUrl(orderUrl, 220);
-      if (oq) {
-        const oqs = 22, oqx = ml+tsLW-oqs-3, oqy = y+tsH-oqs-2;
-        try {
-          doc.setFont('helvetica','bold'); doc.setFontSize(6.2); doc.setTextColor(...DRED);
-          doc.text('Scan to get your', oqx+oqs/2, oqy-4.5, {align:'center'});
-          doc.text('order copy', oqx+oqs/2, oqy-1.5, {align:'center'});
-          doc.addImage(oq,'PNG', oqx, oqy, oqs, oqs, 'ordercopyqr', 'MEDIUM');
-        } catch(e) {}
-      }
-    }
     // Sales copy: the review-QR area is free, so list every scheme applied here
     // (with the scheme code spelled out when "Other" is selected).
     if (!isCustomer) {
@@ -5571,24 +5554,31 @@ function PDFPreviewScreen({ctx}) {
   const {order,nav,back,showToast} = ctx;
   const o = order;
   const {itemsSubtotal, orderDiscPct, orderDiscAmt, cgst, sgst, total, earnest, balance} = orderTotals(o);
-  // Order QR — built as a PNG data URL via the shared makeQrDataUrl helper (the
-  // same one the PDF uses) and shown as an <img>. The previous version drew the QR
-  // straight into a <div> on mount and left it BLANK whenever the QR library hadn't
-  // finished loading on the first paint — that's the "empty QR" bug. Here we retry
-  // until the library is ready, so a scannable code always appears. Scanning opens
-  // the order's page (which serves the customer's order PDF).
-  const [qrUrl,setQrUrl] = useState(null);
+  // Order QR — rendered directly into a mounted node via qrcodejs (its intended
+  // usage). Earlier versions built the QR in a DETACHED div and read
+  // canvas.toDataURL(), which comes back blank in the Android WebView / some
+  // browsers — that was the "empty QR" bug. Rendering into this on-screen ref, and
+  // retrying until the QR library has loaded, makes a scannable code always appear.
+  // Scanning opens the order's page (which serves the customer's order copy).
+  const qrRef = useRef(null);
+  const [qrReady,setQrReady] = useState(false);
   const orderUrl = 'https://4sinteriors.in/order/'+(o.no||'').replace(/\//g,'-');
   useEffect(()=>{
     let cancelled=false, tries=0;
-    setQrUrl(null);
+    setQrReady(false);
     (function build(){
       if(cancelled) return;
-      if(window.QRCode){
-        const u = makeQrDataUrl(orderUrl, 200);
-        if(u){ setQrUrl(u); return; }
+      const el = qrRef.current;
+      if(el && window.QRCode){
+        try{
+          el.innerHTML='';
+          new window.QRCode(el, { text: orderUrl, width:160, height:160,
+            correctLevel: window.QRCode.CorrectLevel.M });
+          const nodes = el.querySelectorAll('canvas,img,table');
+          if(nodes.length){ nodes.forEach(n=>{ n.style.maxWidth='100%'; n.style.maxHeight='100%'; }); setQrReady(true); return; }
+        }catch(e){}
       }
-      if(tries++ < 25) setTimeout(build, 150);   // QR lib not ready yet — retry briefly
+      if(tries++ < 40) setTimeout(build, 150);   // ref not mounted / QR lib not ready — retry briefly
     })();
     return ()=>{ cancelled=true; };
   },[o.no]);
@@ -5666,10 +5656,10 @@ function PDFPreviewScreen({ctx}) {
               </div>
             </div>
             <div style={{padding:'10px 10px',background:T.greenSoft,border:`1px solid ${T.greenLine}`,borderRadius:4,display:'flex',alignItems:'center',gap:12}}>
-              <div style={{flexShrink:0,borderRadius:4,background:'#fff',padding:3,width:86,height:86,display:'flex',alignItems:'center',justifyContent:'center'}}>
-                {qrUrl
-                  ? <img src={qrUrl} alt="Order QR code" style={{width:80,height:80,display:'block'}}/>
-                  : <span style={{fontSize:8,color:T.ink4,fontWeight:700}}>QR…</span>}
+              <div style={{flexShrink:0,borderRadius:4,background:'#fff',padding:3,width:86,height:86,position:'relative',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                {/* qrcodejs fills this node imperatively — keep it free of React children */}
+                <div ref={qrRef} style={{width:80,height:80,overflow:'hidden'}}/>
+                {!qrReady && <span style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:8,color:T.ink4,fontWeight:700}}>QR…</span>}
               </div>
               <div><div style={{fontSize:8,color:T.green,fontWeight:700,letterSpacing:.5}}>CUSTOMER COPY</div><div style={{fontSize:9,color:T.ink2,marginTop:2,lineHeight:1.4}}>Scan to view your order. Valid 30 days.</div><div style={{fontFamily:T.mono,fontSize:8,color:T.ink4,marginTop:2}}>4SI.IN/O/{(o.no||'').replace('/','‑')}</div></div>
             </div>
