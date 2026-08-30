@@ -2143,6 +2143,10 @@ function App() {
   // changes, so it's served straight from cache; stock is refreshed via Sync Now;
   // orders refresh silently in the background on every open.
   const [items,         setItems]        = useState(() => { try { return JSON.parse(localStorage.getItem('4s_items')||'[]'); } catch { return []; } });
+  // 4S warehouse stock (item code → GD1/GD2/SHOWROOM availability), read from the
+  // OPS "4S STOCK" tab. Used to tell the salesperson whether a selected item can be
+  // sold from the 4S warehouse and from which location.
+  const [fourSItems,    setFourSItems]   = useState(() => { try { return JSON.parse(localStorage.getItem('4s_fours_items')||'[]'); } catch { return []; } });
   const [priceItems,    setPriceItems]   = useState(() => { try { return JSON.parse(localStorage.getItem('4s_price_items_v9')||'[]'); } catch { return []; } });
   const [orders,        setOrders]       = useState(() => { try { return normalizeSalesNames(JSON.parse(localStorage.getItem('4s_orders')||'[]')); } catch { return []; } });
   // Manual (paper-order) service requests — standalone requests for pre-app
@@ -2227,6 +2231,7 @@ function App() {
     if (!user) return;
     const cached = localStorage.getItem('4s_items');
     if (cached) try { setItems(JSON.parse(cached)); } catch {}
+    syncFourSStock();
     const cachedPL = localStorage.getItem('4s_price_items_v9');
     let hadCachedPL = false;
     if (cachedPL) try { const p = JSON.parse(cachedPL); setPriceItems(p); hadCachedPL = p.length > 0; } catch {}
@@ -2266,6 +2271,7 @@ function App() {
       if (now - last < 15000) return;   // debounce rapid focus/visibility churn
       last = now;
       syncStock({ silent: true });
+      syncFourSStock();
       loadMis({ silent: true });
       loadOrders();
       loadPriceListItems(false, true)   // skip local cache, use shared server cache
@@ -2345,6 +2351,19 @@ function App() {
     } finally {
       setLoading(false);
     }
+  }
+
+  // Pull the 4S warehouse stock ledger (OPS "4S STOCK" tab). Always silent/background:
+  // a missing tab or a slow fetch must never block the ordering flow — the app still
+  // lets the salesperson book from 4S manually, it just can't show availability.
+  async function syncFourSStock() {
+    try {
+      const res = await apiGet('fourSStock', {}, 60000, 2);
+      if (res && res.ok) {
+        setFourSItems(res.items || []);
+        localStorage.setItem('4s_fours_items', JSON.stringify(res.items || []));
+      }
+    } catch(e) { /* silent — availability is a hint, not a gate */ }
   }
 
   async function syncPriceList() {
@@ -2726,7 +2745,15 @@ function App() {
     localStorage.setItem('4s_notif_pushed', JSON.stringify([...pushedRef.current].slice(-500)));
   }, [notifications]);
 
-  const ctx = { user, items, priceItems, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, showCelebration, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doUpdateService, doLookupCustomer, doDeleteOrder, doSignOut, syncStock, syncPriceList, loadOrders, getNextReceipt,
+  // Fast item-code → 4S availability lookup for the order form. Keyed by upper-cased
+  // item code; value is the { code, name, stock:[{b,q,physical,booked}] } record.
+  const fourSByCode = React.useMemo(() => {
+    const m = {};
+    (fourSItems||[]).forEach(it => { const k = String(it.code||'').toUpperCase().trim(); if (k) m[k] = it; });
+    return m;
+  }, [fourSItems]);
+
+  const ctx = { user, items, priceItems, fourSItems, fourSByCode, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, showCelebration, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doUpdateService, doLookupCustomer, doDeleteOrder, doSignOut, syncStock, syncFourSStock, syncPriceList, loadOrders, getNextReceipt,
     svcRequests, loadServiceRequests, doCreateServiceRequest, doUpdateServiceRequest,
     mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen,
     league, leagueLoading, loadLeague, doSaveLeagueScore, doSaveLeagueConfig };
@@ -5084,23 +5111,51 @@ function OrderFormScreen({ctx, viewOnly}) {
                   </div>
                   {/* Delivery warehouse for the SALES-copy tag. Both warehouses are
                       always offered so the salesperson can pick the delivery source
-                      even when the item isn't stocked in one of them. */}
-                  {(()=>{const opts=['34S','KB','4S'];const cur=it.whTag||'34S';const isFourS=_isFourS(cur);const subOpts=['GD1','GD2','SHOWROOM'];return(
-                    <div style={{display:'flex',gap:8,marginTop:8,alignItems:'center',flexWrap:'wrap'}}>
+                      even when the item isn't stocked in one of them.
+
+                      4S availability: we look the item up by code in the "4S STOCK"
+                      ledger and show where (GD1 / GD2 / SHOWROOM) it is available and
+                      how many. If the code isn't found we say so — but every location
+                      stays selectable so a 4S booking is never blocked. */}
+                  {(()=>{const opts=['34S','KB','4S'];const cur=it.whTag||'34S';const isFourS=_isFourS(cur);const subOpts=['GD1','GD2','SHOWROOM'];
+                    const fs=ctx.fourSByCode[String(it.code||'').toUpperCase().trim()];
+                    const fsStock=fs&&Array.isArray(fs.stock)?fs.stock:[];
+                    const availAt=wh=>{const s=fsStock.find(x=>String(x.b||'').toUpperCase().trim()===wh);return s?(Number(s.q)||0):null;};
+                    const fsDefaultSub=(fsStock.filter(x=>(Number(x.q)||0)>0)[0]||{}).b||'GD1';
+                    const subLabel=s=>{const q=availAt(s);return q==null?s:`${s} (${q})`;};
+                    return(
+                    <div style={{marginTop:8}}>
+                    <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
                       <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>WAREHOUSE</span>
-                      {/* Picking 4S defaults its sub-category to GD1; leaving 4S clears it. */}
-                      <select value={cur} onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,whTag:v,whSub:_isFourS(v)?(x.whSub||'GD1'):''}:x)}));}}
+                      {/* Picking 4S defaults its sub-category to a location that has 4S
+                          stock (falling back to GD1); leaving 4S clears it. */}
+                      <select value={cur} onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,whTag:v,whSub:_isFourS(v)?(x.whSub||fsDefaultSub):''}:x)}));}}
                         style={{border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 8px',fontFamily:T.sans,fontSize:12,fontWeight:700,color:T.ink,background:'#fff',cursor:'pointer'}}>
                         {opts.map(w=><option key={w} value={w}>{w==='KB'?'KB (ZBF11T)':w==='34S'?'34S (ZBF34S)':w}</option>)}
                       </select>
                       {isFourS && <>
                         <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>SUB</span>
-                        <select value={it.whSub||'GD1'} onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,whSub:v}:x)}));}}
+                        <select value={it.whSub||fsDefaultSub} onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,whSub:v}:x)}));}}
                           style={{border:`1.5px solid ${T.warn}`,borderRadius:4,padding:'3px 8px',fontFamily:T.sans,fontSize:12,fontWeight:700,color:T.ink,background:'#fff',cursor:'pointer'}}>
-                          {subOpts.map(s=><option key={s} value={s}>{s}</option>)}
+                          {subOpts.map(s=><option key={s} value={s}>{subLabel(s)}</option>)}
                         </select>
                       </>}
                       <span style={{fontSize:9,color:T.ink4}}>{isFourS?'4S sub-category':'pick delivery warehouse'}</span>
+                    </div>
+                    {/* 4S STOCK availability line (item-code lookup). */}
+                    <div style={{marginTop:5,fontSize:10.5,display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                      {fs
+                        ? <>
+                            <span style={{color:T.green,fontWeight:700}}>✓ In 4S stock</span>
+                            {fsStock.length===0 && <span style={{color:T.ink4}}>· location not tagged</span>}
+                            {fsStock.map((s,si)=>{const q=Number(s.q)||0;return(
+                              <span key={si} style={{fontFamily:T.mono,fontWeight:700,padding:'1px 6px',borderRadius:4,background:q>0?T.greenSoft:T.paper,color:q>0?T.green:T.ink4,border:`1px solid ${T.line}`}}>
+                                {String(s.b||'').toUpperCase()} · {q}
+                              </span>
+                            );})}
+                          </>
+                        : <span style={{color:T.ink4}}>Item not found in 4S stock — you can still book it from 4S</span>}
+                    </div>
                     </div>
                   );})()}
                 </div>
@@ -7636,7 +7691,7 @@ function PartialDeliveryModal({order, onCancel, onConfirm}) {
 
 // ─── Settings ────────────────────────────────────────────────
 function SettingsScreen({ctx}) {
-  const {user,syncedAt,priceSyncedAt,priceSyncError,priceItems,nav,syncStock,syncPriceList,doSignOut,showToast,loading} = ctx;
+  const {user,syncedAt,priceSyncedAt,priceSyncError,priceItems,nav,syncStock,syncFourSStock,syncPriceList,doSignOut,showToast,loading} = ctx;
   const [apiUrl,setApiUrl]         = useState(localStorage.getItem('4s_api_url')||'');
   const [pingResult,setPingResult] = useState(null);
   const [pinging,setPinging]       = useState(false);
@@ -8003,7 +8058,7 @@ function SettingsScreen({ctx}) {
               </div>
               <Pill tone={syncedAt?'ok':'warn'} mono>{syncedAt?'FRESH':'STALE'}</Pill>
             </div>
-            <div style={{marginTop:12}}><Btn primary full icon={Icon.refresh('#fff',15)} onClick={syncStock}>Sync stock now</Btn></div>
+            <div style={{marginTop:12}}><Btn primary full icon={Icon.refresh('#fff',15)} onClick={()=>{syncStock();syncFourSStock&&syncFourSStock();}}>Sync stock now</Btn></div>
           </div>
         </div>
 

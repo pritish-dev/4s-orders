@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v52';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v53';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -102,6 +102,7 @@ function doGet(e) {
       case 'ping':           result = handlePing();             break;
       case 'login':          result = handleLogin(p);           break;
       case 'stock':          result = handleStock();            break;
+      case 'fourSStock':     result = handleFourSStock();       break;
       case 'priceList':      result = handlePriceList(p);       break;
       case 'orders':         result = handleOrders(p);          break;
       case 'mis':            result = handleMisData();          break;
@@ -426,6 +427,110 @@ function handleStock() {
       if (it._wh[wh] === undefined) { it._wh[wh] = it.stock.length; it.stock.push({ b: wh, q: qty }); }
       else { it.stock[it._wh[wh]].q += qty; }   // same warehouse listed twice → sum
     }
+  }
+
+  var items = order.map(function(code){ var it = byCode[code]; delete it._wh; return it; });
+  return { ok: true, items: items, syncedAt: syncedAt || new Date().toISOString() };
+}
+
+// ─── 4S STOCK ──────────────────────────────────────────────────────────────────
+// Reads the OPS spreadsheet → "4S STOCK" tab. This is 4Sinteriors' OWN warehouse
+// stock (physically held at GD1, GD2 or the Showroom), separate from the Godrej
+// "Stock" tab read by handleStock(). The app looks an item up here by Item code to
+// tell the salesperson whether it can be sold from the 4S warehouse and from which
+// location(s).
+//
+// Expected header row (columns auto-detected, order-independent):
+//   Date & Time | Warehouse code | Item code | Item Description |
+//   Qty Available For Commitment | PHYSICAL STOCK | BOOKING QTY | DATE OF BOOKING
+//
+// "Warehouse code" holds the 4S location — GD1, GD2 or SHOWROOM. Rows are grouped
+// by Item code; each distinct location becomes one availability chip carrying its
+// "Qty Available For Commitment" (what is still free to sell after existing
+// bookings). Unlike the Godrej Stock tab this is a LIVE ledger the app writes back
+// to on booking (see _commitFourSStock), so we do NOT filter to a latest snapshot —
+// every current row is surfaced.
+function _fourSSheet(opsSS) {
+  if (!opsSS) return null;
+  var names = ['4S STOCK', '4S Stock', '4s stock', '4S_STOCK', '4SSTOCK', 'FourS Stock', '4S STOCK '];
+  for (var i = 0; i < names.length; i++) {
+    var sh = opsSS.getSheetByName(names[i]);
+    if (sh) return sh;
+  }
+  // Last resort: case-insensitive scan across all tabs.
+  var all = opsSS.getSheets();
+  for (var j = 0; j < all.length; j++) {
+    if (String(all[j].getName() || '').replace(/\s+/g, '').toUpperCase() === '4SSTOCK') return all[j];
+  }
+  return null;
+}
+
+// Column layout of the 4S STOCK sheet, resolved from its header row. Shared by the
+// reader (handleFourSStock) and the writer (_commitFourSStock) so both agree on
+// where each field lives even if columns are reordered in the sheet.
+function _fourSCols(hdr) {
+  return {
+    time:     _hdrIdx(hdr, ['DATE & TIME', 'DATE AND TIME', 'DATE&TIME', 'TIMESTAMP', 'DATE']),
+    wh:       _hdrIdx(hdr, ['WAREHOUSE CODE', 'WAREHOUSE', 'WH CODE', 'WH', 'LOCATION']),
+    code:     _hdrIdx(hdr, ['ITEM CODE', 'CODE', 'ITEM_CODE', 'LN CODE']),
+    name:     _hdrIdx(hdr, ['ITEM DESCRIPTION', 'DESCRIPTION', 'ITEM NAME', 'NAME']),
+    avail:    _hdrIdx(hdr, ['QTY AVAILABLE FOR COMMITMENT', 'QTY AVAILABLE', 'AVAILABLE FOR COMMITMENT', 'AVAILABLE QTY', 'AVAILABLE']),
+    physical: _hdrIdx(hdr, ['PHYSICAL STOCK', 'PHYSICAL', 'PHYSICAL QTY']),
+    booking:  _hdrIdx(hdr, ['BOOKING QTY', 'BOOKED QTY', 'BOOKING QUANTITY', 'BOOKED']),
+    bookDate: _hdrIdx(hdr, ['DATE OF BOOKING', 'BOOKING DATE', 'BOOKED ON'])
+  };
+}
+
+function _toInt(v) { return parseInt(String(v != null ? v : 0).replace(/[^\d-]/g, ''), 10) || 0; }
+
+// True when a line's delivery warehouse is the 4Sinteriors ('4S') channel. Mirrors
+// the same helper in the app front-end.
+function _isFourS(whTag) { return String(whTag || '').trim().toUpperCase() === '4S'; }
+
+function handleFourSStock() {
+  var opsSS = _openOPS();
+  if (!opsSS) return { ok: false, error: 'Cannot open OPS spreadsheet (ID: ' + OPS_SHEET_ID + '). Ensure the script owner has access.' };
+
+  var sh = _fourSSheet(opsSS);
+  if (!sh) {
+    // Not an error the salesperson needs to see — the app still lets them book from
+    // 4S manually; it just can't show availability until the tab exists.
+    return { ok: true, items: [], syncedAt: new Date().toISOString(), note: 'Add a "4S STOCK" tab to the OPS spreadsheet to enable 4S availability lookup.' };
+  }
+
+  var rows = sh.getDataRange().getValues();
+  if (rows.length < 2) return { ok: true, items: [], syncedAt: new Date().toISOString() };
+
+  var hdr = rows[0].map(function(c){ return String(c || '').toUpperCase().trim(); });
+  var c   = _fourSCols(hdr);
+  // Positional fallback matching the documented column order.
+  var cTime = c.time     >= 0 ? c.time     : 0;
+  var cWh   = c.wh       >= 0 ? c.wh       : 1;
+  var cCode = c.code     >= 0 ? c.code     : 2;
+  var cName = c.name     >= 0 ? c.name     : 3;
+  var cAvl  = c.avail    >= 0 ? c.avail    : 4;
+  var cPhy  = c.physical >= 0 ? c.physical : 5;
+  var cBk   = c.booking  >= 0 ? c.booking  : 6;
+
+  var byCode = {}, order = [], syncedAt = null;
+  for (var i = 1; i < rows.length; i++) {
+    var r    = rows[i];
+    var code = String(r[cCode] || '').toUpperCase().trim();
+    if (!code) continue;
+    var wh   = String(r[cWh] || '').toUpperCase().trim();
+    var name = String(r[cName] || '').trim();
+    var avl  = _toInt(r[cAvl]);
+    var phy  = cPhy >= 0 ? _toInt(r[cPhy]) : 0;
+    var bk   = cBk  >= 0 ? _toInt(r[cBk])  : 0;
+
+    if (cTime >= 0 && !syncedAt) { var d = new Date(r[cTime]); if (!isNaN(d.getTime())) syncedAt = d.toISOString(); }
+
+    if (!byCode[code]) { byCode[code] = { code: code, name: name, stock: [], _wh: {} }; order.push(code); }
+    var it = byCode[code];
+    if (name && !it.name) it.name = name;
+    if (!wh) continue;
+    if (it._wh[wh] === undefined) { it._wh[wh] = it.stock.length; it.stock.push({ b: wh, q: avl, physical: phy, booked: bk }); }
+    else { var s = it.stock[it._wh[wh]]; s.q += avl; s.physical += phy; s.booked += bk; }   // same location listed twice → sum
   }
 
   var items = order.map(function(code){ var it = byCode[code]; delete it._wh; return it; });
@@ -1733,6 +1838,13 @@ function handleSaveOrder(o) {
   try {
     var res = _writeOrderToCRM(o);
     if (!res.ok) throw new Error(res.error || 'Could not write the order to the CRM sheet.');
+    // Commit 4S warehouse stock ONLY when this is a brand-new booking (res.isNew).
+    // A re-save / edit re-finds the order's existing rows (clientId / internal no /
+    // order no match) → isNew is false → we never decrement the same booking twice.
+    // The surrounding script lock serialises concurrent saves, so a double-click or
+    // a lost-response retry can't double-commit either. Best-effort: a stock-write
+    // failure must never block the order itself from being saved.
+    if (res.isNew) { try { _commitFourSStock(o); } catch (e) {} }
     // Audit: CREATE for a brand-new booking, EDIT when it already had an order no.
     var who = o.byName || o.by || o.salesExec || '';
     var act = (o.no || o.internalNo) ? 'EDIT_ORDER' : 'CREATE_ORDER';
@@ -1740,6 +1852,74 @@ function handleSaveOrder(o) {
     return { ok: true, orderNo: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo, crmRows: res.rows };
   } finally {
     if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
+  }
+}
+
+// ─── 4S STOCK BOOKING WRITE-BACK ────────────────────────────────────────────────
+// When a brand-new order books items out of the 4S warehouse, reflect that in the
+// live "4S STOCK" ledger: for every 4S line (whTag == '4S') matched by Item code +
+// location (whSub → GD1 / GD2 / SHOWROOM) we
+//   • add the booked quantity to  BOOKING QTY,
+//   • stamp  DATE OF BOOKING  with now, and
+//   • subtract the booked quantity from  QTY AVAILABLE FOR COMMITMENT
+//     (floored at 0 so it never goes negative).
+// Items that aren't in the 4S STOCK sheet are simply skipped — the salesperson is
+// still allowed to book them from 4S, there's just no ledger row to decrement.
+// Called only for new bookings (see handleSaveOrder) so a re-save never double-books.
+function _commitFourSStock(o) {
+  if (!o || !Array.isArray(o.items) || !o.items.length) return;
+
+  // Collect the quantity booked per (item code, location) for the 4S lines only.
+  var want = {};   // key "CODE|WH" → qty
+  var any = false;
+  for (var i = 0; i < o.items.length; i++) {
+    var it = o.items[i];
+    if (!it || !_isFourS(it.whTag)) continue;
+    var code = String(it.code || '').toUpperCase().trim();
+    var wh   = String(it.whSub || '').toUpperCase().trim();
+    var qty  = _toInt(it.qty) || 1;
+    if (!code || !wh) continue;
+    var key = code + '|' + wh;
+    want[key] = (want[key] || 0) + qty;
+    any = true;
+  }
+  if (!any) return;
+
+  var opsSS = _openOPS();
+  var sh = _fourSSheet(opsSS);
+  if (!sh) return;
+
+  var rows = sh.getDataRange().getValues();
+  if (rows.length < 2) return;
+
+  var hdr = rows[0].map(function(c){ return String(c || '').toUpperCase().trim(); });
+  var c   = _fourSCols(hdr);
+  var cWh   = c.wh       >= 0 ? c.wh       : 1;
+  var cCode = c.code     >= 0 ? c.code     : 2;
+  var cAvl  = c.avail    >= 0 ? c.avail    : 4;
+  var cBk   = c.booking;      // BOOKING QTY (optional)
+  var cBkDt = c.bookDate;     // DATE OF BOOKING (optional)
+  if (cAvl < 0) return;       // nothing to decrement without an availability column
+
+  var now = new Date();
+  // Write only the specific cells we change (per matched row), never the whole range,
+  // so any formulas the sheet keeps in other cells/columns are left untouched.
+  for (var r = 1; r < rows.length; r++) {
+    var code = String(rows[r][cCode] || '').toUpperCase().trim();
+    var wh   = String(rows[r][cWh]   || '').toUpperCase().trim();
+    if (!code || !wh) continue;
+    var key = code + '|' + wh;
+    var need = want[key];
+    if (!need) continue;
+
+    var sheetRow = r + 1;   // 1-based row index in the sheet
+    var avail = _toInt(rows[r][cAvl]);
+    sh.getRange(sheetRow, cAvl + 1).setValue(Math.max(0, avail - need));
+    if (cBk   >= 0) sh.getRange(sheetRow, cBk   + 1).setValue(_toInt(rows[r][cBk]) + need);
+    if (cBkDt >= 0) sh.getRange(sheetRow, cBkDt + 1).setValue(now);
+    // A code+location can appear on more than one row; apply the full booking to the
+    // first matching row and stop looking for that key so we don't decrement twice.
+    delete want[key];
   }
 }
 
@@ -1967,7 +2147,7 @@ function _writeOrderToCRM(o) {
       // Order now has no items — remove its rows (bottom-up) so nothing stale remains.
       var delRows = sortedIdx.map(function(x){ return x + 2; }).sort(function(a, b){ return b - a; });
       for (var d = 0; d < delRows.length; d++) sh.deleteRow(delRows[d]);
-      return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: 0 };
+      return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: 0, isNew: !isExisting };
     }
 
     var oldCount = matchRows.length, newCount = built.length;
@@ -1979,7 +2159,7 @@ function _writeOrderToCRM(o) {
     } else if (oldCount > newCount) {
       for (var dd = oldCount - 1; dd >= newCount; dd--) sh.deleteRow(firstSheetRow + dd);
     }
-    return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: newCount };
+    return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: newCount, isNew: !isExisting };
   }
 
   // New order (or non-contiguous legacy rows): delete any old rows, append at bottom.
@@ -1989,9 +2169,9 @@ function _writeOrderToCRM(o) {
   }
 
   var built = _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wonToWrite, sh.getLastRow());
-  if (!built.length) return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: 0 };
+  if (!built.length) return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: 0, isNew: !isExisting };
   sh.getRange(sh.getLastRow() + 1, 1, built.length, ncol).setValues(built);
-  return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: built.length };
+  return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: built.length, isNew: !isExisting };
 }
 
 // Builds the per-item rows for one order (values matched to columns by header).
