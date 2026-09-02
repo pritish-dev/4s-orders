@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '73';
+  var V = '74';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -2242,6 +2242,9 @@ function App() {
   // 4S Premier League — manual daily scores + config (monthly target, salesman of the month).
   const [league,        setLeague]       = useState(() => { try { return JSON.parse(localStorage.getItem('4s_league')||'{"scores":[],"monthlyTarget":0,"weeklyTarget":0,"salesmanOfMonth":""}'); } catch { return {scores:[],monthlyTarget:0,weeklyTarget:0,salesmanOfMonth:''}; } });
   const [leagueLoading, setLeagueLoading]= useState(false);
+  // Leads — per-salesperson lead register, grouped by person ({ SWATI:[…], … }).
+  const [leads,         setLeads]        = useState(() => { try { return JSON.parse(localStorage.getItem('4s_leads')||'{}'); } catch { return {}; } });
+  const [leadsLoading,  setLeadsLoading] = useState(false);
 
   const showToast = (msg,type='ok') => setToast({msg,type});
   // "New order placed" celebration overlay — set by doSaveOrder on a first-time
@@ -2330,6 +2333,7 @@ function App() {
     loadOrders({ silent: true });
     loadMis({ silent: true });
     loadLeague({ silent: true });
+    loadLeads({ silent: true });
   }, [user]);
 
   // Re-sync shared data every time the app is reopened / brought to the
@@ -2539,6 +2543,32 @@ function App() {
       const res = await apiPost({ action:'saveLeagueConfig', by:user?.username||user?.name||'', ...cfg });
       if (res && res.ok) { await loadLeague({silent:true}); showToast('Settings saved ✓'); return true; }
       showToast((res && res.error) || 'Save failed','bad'); return false;
+    } catch(e) { showToast(e.message,'bad'); return false; }
+  }
+
+  // ── Leads ──────────────────────────────────────────────────────
+  // Pull every salesperson's lead register (grouped by person) from their OPS
+  // tabs. Cached locally so the Leads screen shows instantly on open.
+  async function loadLeads(opts) {
+    const silent = opts && opts.silent;
+    if (!silent) setLeadsLoading(true);
+    try {
+      const res = await apiGet('leads', {}, 30000, 2);
+      if (res && res.ok && res.leads && typeof res.leads === 'object') {
+        setLeads(res.leads);
+        localStorage.setItem('4s_leads', JSON.stringify(res.leads));
+        return res.leads;
+      } else if (!silent) showToast((res && res.error) || 'Failed to load leads','bad');
+    } catch(e) { if (!silent) showToast('Could not reach the server','warn'); }
+    finally { if (!silent) setLeadsLoading(false); }
+    return null;
+  }
+  // Add one lead to a salesperson's register; refreshes the local cache on success.
+  async function doAddLead(entry) {
+    try {
+      const res = await apiPost({ action:'addLead', by:user?.username||user?.name||'', ...entry });
+      if (res && res.ok) { await loadLeads({silent:true}); showToast('Lead added ✓'); return true; }
+      showToast((res && res.error) || 'Could not add lead','bad'); return false;
     } catch(e) { showToast(e.message,'bad'); return false; }
   }
 
@@ -2830,7 +2860,8 @@ function App() {
   const ctx = { user, items, priceItems, fourSItems, fourSByCode, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, showCelebration, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doUpdateService, doLookupCustomer, doDeleteOrder, doSignOut, syncStock, syncFourSStock, syncPriceList, loadOrders, getNextReceipt,
     svcRequests, loadServiceRequests, doCreateServiceRequest, doUpdateServiceRequest,
     mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen,
-    league, leagueLoading, loadLeague, doSaveLeagueScore, doSaveLeagueConfig };
+    league, leagueLoading, loadLeague, doSaveLeagueScore, doSaveLeagueConfig,
+    leads, leadsLoading, loadLeads, doAddLead };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -2851,6 +2882,7 @@ function App() {
     reports: <ReportsScreen ctx={ctx}/>,
     collect: <CollectiblesScreen ctx={ctx}/>,
     league:  <LeagueScreen ctx={ctx}/>,
+    leads:   <LeadsScreen ctx={ctx}/>,
   };
 
   return (
@@ -3011,7 +3043,21 @@ const LEAGUE_TEAMS = [
     players:[ {name:'SWATI',captain:true,match:'swati'}, {name:'ADITYA',match:'aditya'}, {name:'SAROJ',match:'saroj'} ] },
 ];
 // Point weights straight off the league rulebook.
-const LEAGUE_PTS = { salesConv:1, review:1, happyCalling:1, teleConv:4, teleConvReview:6, followupMissed:-1, timingPenalty:-1, dressCode:-1 };
+const LEAGUE_PTS = { salesConv:1, review:1, happyCalling:1, teleConv:4, teleConvReview:6, leadConv:6, followupMissed:-1, timingPenalty:-1, dressCode:-1 };
+// Normalise a phone number to its last 10 digits for lead↔order matching.
+function _normPhone(v){ const d=String(v||'').replace(/\D/g,''); return d.length>10 ? d.slice(-10) : d; }
+// Build { salesperson-match-key → Set(last-10-digit contacts) } from the leads
+// register, so an order can be recognised as a converted lead for that player.
+function leadContactMap(leads){
+  const map = {};
+  Object.keys(leads||{}).forEach(person=>{
+    const key = String(person||'').trim().toLowerCase();
+    const set = new Set();
+    (leads[person]||[]).forEach(l=>{ const p=_normPhone(l&&l.contact); if(p&&p.length>=10) set.add(p); });
+    if (set.size) map[key] = set;
+  });
+  return map;
+}
 // Happy calling is NOT here: it is now awarded automatically from orders that carry
 // a Happy Code (see leagueAuto), so it is no longer entered by hand.
 const LEAGUE_MANUAL_FIELDS = [
@@ -3078,8 +3124,11 @@ function leagueTeamsFor(league, monthKey){
 // Live orders → per-player order count and net-basic value. B2B orders are
 // excluded ENTIRELY (neither counted nor valued); the 4S sales channel is also
 // stripped out of the value so only the net-basic franchise sale counts.
-function leagueAuto(orders, matchKey, startISO, endISO){
-  let orderCount=0, basic=0, happyCalls=0;
+// `leadPhones` (optional) is a Set of the player's lead contact numbers (last 10
+// digits). An order whose customer phone is in that set is a converted lead and
+// earns +6 (leadConv), credited to the week the order was booked.
+function leagueAuto(orders, matchKey, startISO, endISO, leadPhones){
+  let orderCount=0, basic=0, happyCalls=0, leadConv=0;
   (orders||[]).forEach(o=>{
     if(!o || o.status==='draft') return;
     if(!String(o.salesExec||'').toLowerCase().includes(matchKey)) return;
@@ -3099,8 +3148,10 @@ function leagueAuto(orders, matchKey, startISO, endISO){
     if(endISO   && iso>endISO)   return;
     orderCount++;                                                     // orders booked (excl. B2B)
     basic += _channelSplit(o).franchise;                             // net basic (excl. 4S channel)
+    // Converted lead: this order's customer matches one of the player's leads.
+    if(leadPhones && leadPhones.size){ const ph=_normPhone(o.phone); if(ph && ph.length>=10 && leadPhones.has(ph)) leadConv++; }
   });
-  return { orderCount, basic, happyCalls };
+  return { orderCount, basic, happyCalls, leadConv };
 }
 // Manual scores for one player, summed across the period.
 function leagueManualSum(scores, playerName, startISO, endISO){
@@ -3117,7 +3168,8 @@ function leagueManualSum(scores, playerName, startISO, endISO){
 // Full computed standings for one window (a weekly battle, or the whole month
 // for the season caps). `teams` is the resolved roster for the month. `win` is
 // a {startISO,endISO,year,month,days} window.
-function computeWeek(orders, league, teams, win){
+function computeWeek(orders, league, teams, win, leadMap){
+  leadMap = leadMap || {};
   const monthlyTarget = Number(league&&league.monthlyTarget)||0;
   const weeklyTarget  = Number(league&&league.weeklyTarget)||0;   // whole-showroom weekly target (admin-set)
   const scores = (league&&league.scores)||[];
@@ -3131,11 +3183,12 @@ function computeWeek(orders, league, teams, win){
     : (monthlyTarget>0 ? Math.round((monthlyTarget/2)*days/dim) : 0);
   const built = teams.map(team=>{
     const players = team.players.map(pl=>{
-      const auto = leagueAuto(orders, pl.match, win.startISO, win.endISO);
+      const auto = leagueAuto(orders, pl.match, win.startISO, win.endISO, leadMap[pl.match]);
       const man  = leagueManualSum(scores, pl.name, win.startISO, win.endISO);
       const pts = auto.orderCount*LEAGUE_PTS.salesConv
         + man.reviews*LEAGUE_PTS.review
         + auto.happyCalls*LEAGUE_PTS.happyCalling   // happy calling is now automatic (orders with a Happy Code)
+        + auto.leadConv*LEAGUE_PTS.leadConv         // +6 per converted lead (order matched to a lead by phone)
         + man.teleConv*LEAGUE_PTS.teleConv
         + man.teleConvReview*LEAGUE_PTS.teleConvReview
         + man.followupMissed*LEAGUE_PTS.followupMissed
@@ -3162,11 +3215,12 @@ function computeWeek(orders, league, teams, win){
 // how many weeks each team won, and crowns the month's champion (most weeks
 // won). Only weeks that have finished count towards the tally. The Orange &
 // Purple caps are decided over the ENTIRE month (the monthly run), not per week.
-function computeMonth(orders, league, mo){
+function computeMonth(orders, league, mo, leadMap){
+  leadMap = leadMap || {};
   const teams  = leagueTeamsFor(league, mo.monthKey);
   const today  = _todayISO();
   const weekResults = mo.weeks.map(wk=>{
-    const std = computeWeek(orders, league, teams, wk);
+    const std = computeWeek(orders, league, teams, wk, leadMap);
     const done    = wk.endISO   < today;   // battle finished → result locked
     const started = wk.startISO <= today;
     return { wk, std, done, started, winner: done ? std.leader : null, leader: std.leader };
@@ -3181,7 +3235,7 @@ function computeMonth(orders, league, mo){
     : (wins[0].weeks>wins[1].weeks ? wins[0].team : wins[1].team);
   // Season caps — computed across the full month window (1st → last day).
   const capStd = computeWeek(orders, league, teams,
-    { year:mo.year, month:mo.month, startISO:mo.startISO, endISO:mo.endISO, days:mo.dim });
+    { year:mo.year, month:mo.month, startISO:mo.startISO, endISO:mo.endISO, days:mo.dim }, leadMap);
   return { teams, weekResults, wins, decidedWeeks, monthOver, champion,
     orangeCap: capStd.orangeCap, purpleCap: capStd.purpleCap };
 }
@@ -3261,17 +3315,18 @@ function LeagueTeamCard({team, isLeader, decided}) {
 }
 
 function LeagueScreen({ctx}) {
-  const {user,orders,league,nav,loadLeague,leagueLoading,doSaveLeagueScore,doSaveLeagueConfig} = ctx;
+  const {user,orders,league,leads,nav,loadLeague,leagueLoading,doSaveLeagueScore,doSaveLeagueConfig} = ctx;
   const canEdit = hasManagerAccess(user);         // manager or admin
+  const leadMap = React.useMemo(()=>leadContactMap(leads),[leads]);  // player → lead phones (for +6 conversions)
   const [monthOff,setMonthOff] = useState(0);     // 0 = this month's season
   const [weekSel,setWeekSel]   = useState(null);  // selected weekly battle (idx); null → auto
   const [showRules,setShowRules] = useState(false);
   const [showAdmin,setShowAdmin] = useState(false);
-  useEffect(()=>{ loadLeague(); loadOrdersSafe(); },[]);
+  useEffect(()=>{ loadLeague(); loadOrdersSafe(); try{ctx.loadLeads&&ctx.loadLeads({silent:true});}catch(e){} },[]);
   function loadOrdersSafe(){ try{ ctx.loadOrders&&ctx.loadOrders({silent:true}); }catch(e){} }
 
   const mo    = leagueMonth(monthOff);            // the monthly season (1st → last day)
-  const mstd  = computeMonth(orders, league, mo); // weekly battles + weeks-won + season caps
+  const mstd  = computeMonth(orders, league, mo, leadMap); // weekly battles + weeks-won + season caps
   const teams = mstd.teams;                       // the resolved roster for this month
   const today = _todayISO();
   // Which weekly battle to show in detail — the admin's pick, else the live week
@@ -3285,7 +3340,7 @@ function LeagueScreen({ctx}) {
   const selIdx  = (weekSel && mo.weeks.some(w=>w.idx===weekSel)) ? weekSel : liveWeekIdx;
   useEffect(()=>{ setWeekSel(null); },[monthOff]); // reset the pick when the month changes
   const selWeek = mo.weeks.find(w=>w.idx===selIdx) || mo.weeks[0];
-  const wstd    = computeWeek(orders, league, teams, selWeek);
+  const wstd    = computeWeek(orders, league, teams, selWeek, leadMap);
   const decided = selWeek.endISO < today;          // battle is over → result locked
   const [a,b]   = wstd.teams;
   const [wa,wb] = mstd.wins;                        // weeks-won tally (per team)
@@ -3509,6 +3564,7 @@ function LeagueScreen({ctx}) {
                 ['Total sales value (basic) %','team score = % of target achieved (100% → 100 pts)'],
                 ['Negative points','−1 each for missed follow-ups, timings, dress code / presentation'],
                 ['Happy calling','+1 point per order with a Happy Code (auto)'],
+                ['Lead converted','+6 points when a lead you added books an order (auto, matched by phone)'],
                 ['Tele-calling / leads follow-up + conversion','+4 bonus points'],
                 ['Tele-calling + conversion + review','+6 bonus points'],
                 ['Orange & Purple cap','decided over the whole month — top sales value & most orders'],
@@ -3645,6 +3701,194 @@ function LeagueScreen({ctx}) {
         )}
         <div style={{height:28}}/>
       </div>
+      <BottomNav screen="home" nav={nav}/>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// LEADS — per-salesperson lead register
+// ═══════════════════════════════════════════════════════════
+// Every salesperson keeps a lead register in a tab of the OPS sheet
+// ("<NAME> LEADS"). This screen shows each salesperson's leads with all the
+// details from the sheet, lets a salesperson add a new lead (appended to their
+// own tab), and flags leads that have converted into an order (matched by phone),
+// which earn +6 points in the 4S Premier League.
+const LEADS_PEOPLE = ['SWATI','ARCHITA','ADITYA','BISWAJIT','SAROJ','PRITISH'];
+
+function AddLeadModal({person, canPickPerson, onCancel, onSave}){
+  const [p,setP]           = useState(person);
+  const [customer,setCust] = useState('');
+  const [contact,setContact] = useState('');
+  const [product,setProduct] = useState('');
+  const [amount,setAmount]   = useState('');
+  const [date,setDate]       = useState(_todayISO());
+  const [saving,setSaving]   = useState(false);
+  const fld={width:'100%',height:40,border:`1px solid ${T.line}`,borderRadius:8,padding:'0 12px',fontSize:14,color:T.ink,background:'#fff',outline:'none',boxSizing:'border-box'};
+  const lbl={fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:.6,textTransform:'uppercase',margin:'10px 0 4px'};
+  async function submit(){
+    if(!customer.trim() && !contact.trim()){ return; }
+    setSaving(true);
+    const ok=await onSave({ salesPerson:p, customer:customer.trim(), contact:contact.trim(), product:product.trim(), amount:amount.trim(), date });
+    setSaving(false);
+    if(ok!==false) onCancel();
+  }
+  return (
+    <div style={{position:'fixed',inset:0,zIndex:9999,background:'rgba(0,0,0,.45)',display:'flex',alignItems:'flex-end',justifyContent:'center'}} onClick={onCancel}>
+      <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:600,background:'#fff',borderTopLeftRadius:16,borderTopRightRadius:16,padding:'16px 18px 24px',maxHeight:'88vh',overflowY:'auto'}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6}}>
+          <div style={{fontSize:16,fontWeight:800,color:T.ink}}>Add a lead</div>
+          <button onClick={onCancel} style={{width:30,height:30,borderRadius:6,background:T.paper2||'#f2f2f4',border:`1px solid ${T.line}`,cursor:'pointer',fontSize:16,color:T.ink3}}>×</button>
+        </div>
+        <div style={{fontSize:11,color:T.ink4,marginBottom:6}}>Saved to <b>{_leadsSheetLabel(p)}</b> in the OPS sheet.</div>
+        <div style={lbl}>Sales person</div>
+        {canPickPerson ? (
+          <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+            {LEADS_PEOPLE.map(nm=>(
+              <button key={nm} onClick={()=>setP(nm)} style={{padding:'7px 12px',borderRadius:99,border:`1.5px solid ${p===nm?T.green:T.line}`,background:p===nm?T.green:'#fff',color:p===nm?'#fff':T.ink2,fontSize:12,fontWeight:700,cursor:'pointer'}}>{nm}</button>
+            ))}
+          </div>
+        ) : (
+          <div style={{...fld,display:'flex',alignItems:'center',background:T.paper2||'#f7f7f8',fontWeight:700}}>{p}</div>
+        )}
+        <div style={lbl}>Customer name</div>
+        <input value={customer} onChange={e=>setCust(e.target.value)} placeholder="e.g. Ramesh Kumar" style={fld}/>
+        <div style={lbl}>Contact no</div>
+        <input value={contact} onChange={e=>setContact(e.target.value.replace(/[^\d+ ]/g,''))} inputMode="tel" placeholder="10-digit mobile" style={fld}/>
+        <div style={lbl}>Product details</div>
+        <input value={product} onChange={e=>setProduct(e.target.value)} placeholder="e.g. 3-seater sofa, wardrobe" style={fld}/>
+        <div style={{display:'flex',gap:10}}>
+          <div style={{flex:1}}><div style={lbl}>Amount (₹)</div><input value={amount} onChange={e=>setAmount(e.target.value.replace(/[^\d.]/g,''))} inputMode="decimal" placeholder="est. value" style={fld}/></div>
+          <div style={{flex:1}}><div style={lbl}>Date</div><input type="date" value={date} onChange={e=>setDate(e.target.value)} style={fld}/></div>
+        </div>
+        <button onClick={submit} disabled={saving||(!customer.trim()&&!contact.trim())} style={{marginTop:16,width:'100%',height:46,borderRadius:10,background:(saving||(!customer.trim()&&!contact.trim()))?T.line:T.green,color:'#fff',border:'none',fontSize:15,fontWeight:800,cursor:(saving||(!customer.trim()&&!contact.trim()))?'default':'pointer'}}>{saving?'Saving…':'Add lead'}</button>
+      </div>
+    </div>
+  );
+}
+function _leadsSheetLabel(person){ return String(person||'').trim().toUpperCase()+' LEADS'; }
+
+function LeadsScreen({ctx}){
+  const {user,orders,leads,leadsLoading,nav,loadLeads,doAddLead} = ctx;
+  const isManager = hasManagerAccess(user);
+  const myName = String(user?.name||'').trim().toUpperCase();
+  const me = LEADS_PEOPLE.find(p=>myName.includes(p)) || (LEADS_PEOPLE.indexOf(myName)>=0?myName:'');
+  const [sel,setSel]   = useState(me || LEADS_PEOPLE[0]);
+  const [showAdd,setShowAdd] = useState(false);
+  useEffect(()=>{ loadLeads(); },[]);
+
+  const rows = (leads&&leads[sel])||[];
+  // Phones this salesperson has booked orders for → used to flag converted leads.
+  const convertedSet = React.useMemo(()=>{
+    const key=String(sel||'').toLowerCase(); const s=new Set();
+    (orders||[]).forEach(o=>{ if(o&&o.status!=='draft'&&String(o.salesExec||'').toLowerCase().includes(key)){ const ph=_normPhone(o.phone); if(ph&&ph.length>=10) s.add(ph); } });
+    return s;
+  },[orders,sel]);
+  const isConverted = l => { const ph=_normPhone(l&&l.contact); return ph&&ph.length>=10&&convertedSet.has(ph); };
+  const convCount = rows.filter(isConverted).length;
+
+  // A regular salesperson may only add to their own register; a manager/admin to any.
+  const canAdd = isManager || !!me;
+
+  return (
+    <div className="screen">
+      {/* Header */}
+      <div style={{flexShrink:0,background:'linear-gradient(120deg,#0b6b3a 0%,#0e5c4f 100%)',color:'#fff',padding:'12px 16px 14px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.home('#fff',18)}</button>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,opacity:.85}}>🎯 LEAD REGISTER</div>
+            <div style={{fontSize:20,fontWeight:900,letterSpacing:-0.5}}>Leads</div>
+          </div>
+          <button onClick={()=>loadLeads()} title="Refresh" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.refresh('#fff',15)}</button>
+        </div>
+        {/* Salesperson selector */}
+        <div style={{display:'flex',gap:6,overflowX:'auto',marginTop:12,paddingBottom:2}}>
+          {LEADS_PEOPLE.map(nm=>{
+            const n=((leads&&leads[nm])||[]).length;
+            const active=sel===nm;
+            return (
+              <button key={nm} onClick={()=>setSel(nm)} style={{flexShrink:0,padding:'7px 12px',borderRadius:99,border:`1.5px solid ${active?'#fff':'rgba(255,255,255,.3)'}`,background:active?'#fff':'rgba(255,255,255,.08)',color:active?'#0e5c4f':'#fff',fontSize:12,fontWeight:800,cursor:'pointer',display:'flex',alignItems:'center',gap:6}}>
+                {nm}{me===nm?' ·you':''}<span style={{fontFamily:T.mono,fontSize:10,fontWeight:800,background:active?'rgba(14,92,79,.12)':'rgba(255,255,255,.18)',borderRadius:99,padding:'1px 6px'}}>{n}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="scroll" style={{background:T.paper}}>
+        {/* Summary strip for the selected salesperson */}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,padding:'12px 16px 4px'}}>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TOTAL LEADS</div>
+            <div style={{fontSize:24,fontWeight:800,color:T.ink,lineHeight:1.1,marginTop:2}}>{rows.length}</div>
+          </div>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>CONVERTED</div>
+            <div style={{fontSize:24,fontWeight:800,color:convCount>0?T.green:T.ink,lineHeight:1.1,marginTop:2}}>{convCount}<span style={{fontSize:11,fontWeight:700,color:T.ink4}}> · +{convCount*6} pts</span></div>
+          </div>
+        </div>
+
+        {/* Add-lead button */}
+        {canAdd && (
+          <div style={{padding:'8px 16px 4px'}}>
+            <button onClick={()=>setShowAdd(true)} style={{width:'100%',height:44,borderRadius:10,background:T.green,color:'#fff',border:'none',fontSize:14,fontWeight:800,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>{Icon.plus('#fff',18)} Add a lead{(!isManager&&me)?' for '+me:''}</button>
+          </div>
+        )}
+        {!canAdd && (
+          <div style={{margin:'8px 16px 4px',padding:'10px 12px',background:T.warnSoft,border:'1px solid #e6cc95',borderRadius:8,fontSize:12,color:T.warn}}>Your login isn't linked to a lead register, so you can view leads but not add them.</div>
+        )}
+
+        {/* Lead list */}
+        <div style={{padding:'8px 16px 4px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+          <div style={{fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:1,textTransform:'uppercase'}}>{sel} · Leads</div>
+          {leadsLoading && <Spinner size={14}/>}
+        </div>
+        <div style={{padding:'0 16px 20px'}}>
+          {rows.length===0 ? (
+            <div style={{background:'#fff',border:`1px dashed ${T.line}`,borderRadius:10,padding:'28px 16px',textAlign:'center'}}>
+              <div style={{fontSize:30,marginBottom:6}}>🗒️</div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2}}>No leads for {sel}</div>
+              <div style={{fontSize:12,color:T.ink4,marginTop:3}}>{canAdd?'Tap "Add a lead" to record the first one.':'Nothing recorded in their sheet yet.'}</div>
+            </div>
+          ) : (
+            <div style={{display:'flex',flexDirection:'column',gap:8}}>
+              {rows.map((l,i)=>{
+                const conv=isConverted(l);
+                return (
+                <div key={i} style={{background:'#fff',border:`1px solid ${conv?T.green:T.line}`,borderRadius:10,padding:'11px 13px',position:'relative',overflow:'hidden'}}>
+                  {conv && <div style={{position:'absolute',left:0,top:0,bottom:0,width:3,background:T.green}}/>}
+                  <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:10}}>
+                    <div style={{minWidth:0,flex:1}}>
+                      <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                        <span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:700}}>#{l.slNo||(i+1)}</span>
+                        <span style={{fontSize:14,fontWeight:800,color:T.ink}}>{l.customer||'—'}</span>
+                        {conv && <span style={{fontSize:9,fontWeight:900,letterSpacing:.4,color:'#fff',background:T.green,padding:'2px 7px',borderRadius:99,textTransform:'uppercase'}}>Converted · +6</span>}
+                      </div>
+                      {l.product && <div style={{fontSize:12,color:T.ink2,marginTop:3}}>{l.product}</div>}
+                      <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:3}}>{l.date||'—'}{l.contact?' · '+l.contact:''}</div>
+                    </div>
+                    <div style={{textAlign:'right',flexShrink:0}}>
+                      {l.amount?<div style={{fontSize:14,fontFamily:T.mono,fontWeight:800,color:T.ink}}>₹{(Number(String(l.amount).replace(/[^\d.]/g,''))||0).toLocaleString('en-IN')}</div>:<div style={{fontSize:11,color:T.ink4}}>—</div>}
+                      {l.contact && <a href={'https://wa.me/91'+_normPhone(l.contact)} target="_blank" rel="noopener" onClick={e=>e.stopPropagation()} style={{display:'inline-block',marginTop:6,fontSize:11,fontWeight:700,color:T.green,textDecoration:'none'}}>WhatsApp ↗</a>}
+                    </div>
+                  </div>
+                </div>
+              );})}
+            </div>
+          )}
+        </div>
+        <div style={{height:28}}/>
+      </div>
+
+      {showAdd && (
+        <AddLeadModal
+          person={(!isManager&&me)?me:sel}
+          canPickPerson={isManager}
+          onCancel={()=>setShowAdd(false)}
+          onSave={doAddLead}
+        />
+      )}
       <BottomNav screen="home" nav={nav}/>
     </div>
   );
@@ -4029,6 +4273,18 @@ function HomeScreen({ctx}) {
             <div><div style={{fontSize:11,fontWeight:700,opacity:.8,letterSpacing:1,textTransform:'uppercase'}}>🏏 LIVE SCOREBOARD</div><div style={{fontSize:18,fontWeight:800,letterSpacing:-0.3,marginTop:2}}>4S Premier League</div><div style={{fontSize:11,opacity:.75,marginTop:1}}>Strikers vs Titans · monthly season, weekly battles</div></div>
             <div style={{fontSize:26}}>🏆</div>
           </button>
+        </div>
+        {/* Leads — per-salesperson lead register (view + add) */}
+        <div style={{padding:'0 18px 12px'}}>
+          {(()=>{ const total=Object.keys(ctx.leads||{}).reduce((s,k)=>s+((ctx.leads[k]||[]).length),0); return (
+          <button onClick={()=>nav('leads')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 18px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,cursor:'pointer',textAlign:'left'}}>
+            <div style={{display:'flex',alignItems:'center',gap:12}}>
+              <div style={{width:38,height:38,borderRadius:99,background:T.greenSoft,display:'flex',alignItems:'center',justifyContent:'center',fontSize:18}}>🎯</div>
+              <div><div style={{fontSize:14,fontWeight:700,color:T.ink,letterSpacing:-0.2}}>Leads</div><div style={{fontSize:11,color:T.ink4}}>Track leads · add new · +6 pts on convert</div></div>
+            </div>
+            <div style={{textAlign:'right'}}><div style={{fontSize:15,fontWeight:800,fontFamily:T.mono,color:T.ink}}>{total}</div><div style={{fontSize:10,color:T.ink4}}>{total===1?'lead':'leads'}</div></div>
+          </button>
+          );})()}
         </div>
         {/* Outstanding payments — live total still to collect across all booked orders */}
         <div style={{padding:'0 18px 12px'}}>
