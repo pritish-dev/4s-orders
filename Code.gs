@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v54';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v55';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -103,6 +103,7 @@ function doGet(e) {
       case 'login':          result = handleLogin(p);           break;
       case 'stock':          result = handleStock();            break;
       case 'fourSStock':     result = handleFourSStock();       break;
+      case 'gifts':          result = handleGifts();            break;
       case 'priceList':      result = handlePriceList(p);       break;
       case 'orders':         result = handleOrders(p);          break;
       case 'mis':            result = handleMisData();          break;
@@ -537,6 +538,76 @@ function handleFourSStock() {
 
   var items = order.map(function(code){ var it = byCode[code]; delete it._wh; return it; });
   return { ok: true, items: items, syncedAt: syncedAt || new Date().toISOString() };
+}
+
+// ─── 4S GIFTS ───────────────────────────────────────────────────────────────────
+// Reads the OPS spreadsheet → "4s Gifts" tab. This is the showroom's stock of
+// complimentary gift items that can be given away with an order. It is a LIVE
+// ledger the app writes back to when a gift is given (see _commitGifts): the given
+// quantity is subtracted from QUANTITY, and a row is appended to the "Gifts Given"
+// log tying the gift to the order/customer.
+//
+// Expected header row (columns auto-detected, order-independent):
+//   ITEM | QUANTITY | PRICE
+function _giftsSheet(opsSS) {
+  if (!opsSS) return null;
+  var names = ['4s Gifts', '4S Gifts', '4S GIFTS', '4s gifts', '4S_GIFTS', '4SGIFTS',
+               'Gifts', 'GIFTS', '4s Gift', '4S Gift'];
+  for (var i = 0; i < names.length; i++) {
+    var sh = opsSS.getSheetByName(names[i]);
+    if (sh) return sh;
+  }
+  // Last resort: case-insensitive scan across all tabs (ignoring spaces).
+  var all = opsSS.getSheets();
+  for (var j = 0; j < all.length; j++) {
+    var n = String(all[j].getName() || '').replace(/\s+/g, '').toUpperCase();
+    if (n === '4SGIFTS' || n === 'GIFTS') return all[j];
+  }
+  return null;
+}
+
+// Column layout of the "4s Gifts" sheet, resolved from its header row. Shared by the
+// reader (handleGifts) and the writer (_commitGifts) so both agree on where each
+// field lives even if columns are reordered in the sheet.
+function _giftCols(hdr) {
+  return {
+    item:  _hdrIdx(hdr, ['ITEM', 'GIFT', 'GIFT ITEM', 'ITEM NAME', 'NAME', 'DESCRIPTION']),
+    qty:   _hdrIdx(hdr, ['QUANTITY', 'QTY', 'STOCK', 'AVAILABLE', 'AVAILABLE QTY', 'IN STOCK']),
+    price: _hdrIdx(hdr, ['PRICE', 'RATE', 'COST', 'MRP', 'VALUE'])
+  };
+}
+
+function handleGifts() {
+  var opsSS = _openOPS();
+  if (!opsSS) return { ok: false, error: 'Cannot open OPS spreadsheet (ID: ' + OPS_SHEET_ID + '). Ensure the script owner has access.' };
+
+  var sh = _giftsSheet(opsSS);
+  if (!sh) {
+    // Not a hard error — the app still works, it just can't show gift stock until
+    // the tab exists.
+    return { ok: true, items: [], syncedAt: new Date().toISOString(), note: 'Add a "4s Gifts" tab (headers: ITEM | QUANTITY | PRICE) to the OPS spreadsheet to enable gift selection.' };
+  }
+
+  var rows = sh.getDataRange().getValues();
+  if (rows.length < 2) return { ok: true, items: [], syncedAt: new Date().toISOString() };
+
+  var hdr = rows[0].map(function(c){ return String(c || '').toUpperCase().trim(); });
+  var c   = _giftCols(hdr);
+  // Positional fallback matching the documented column order (ITEM | QUANTITY | PRICE).
+  var cItem = c.item  >= 0 ? c.item  : 0;
+  var cQty  = c.qty   >= 0 ? c.qty   : 1;
+  var cPrc  = c.price >= 0 ? c.price : 2;
+
+  var items = [];
+  for (var i = 1; i < rows.length; i++) {
+    var r    = rows[i];
+    var name = String(r[cItem] || '').trim();
+    if (!name) continue;
+    var qty  = _toInt(r[cQty]);
+    var price= _toInt(r[cPrc]);
+    items.push({ item: name, qty: qty, price: price });
+  }
+  return { ok: true, items: items, syncedAt: new Date().toISOString() };
 }
 
 // ─── PRICE LIST ───────────────────────────────────────────────────────────────
@@ -1210,6 +1281,8 @@ function handleOrders(p) {
   var cFinJson = colOf(['FINANCE PAYMENT DATA','FINANCE SCHEME DATA','PAYMENT DETAILS JSON']);
   var cHappy   = colOf(['HAPPY CODE','INSTALLATION HAPPY CODE','ORDER HAPPY CODE']);
   var cHappyDt = colOf(['HAPPY CODE DATE','INSTALLATION HAPPY CODE DATE']);
+  // Complimentary gift(s) given with the order — JSON array of { item, qty, price }.
+  var cGifts   = colOf(['GIFTS GIVEN','GIFT ITEMS','GIFTS']);
   // Per-item columns
   var cICode = colOf(['ITEM CODE','CODE']);
   var cIName = colOf(['PRODUCT NAME']);
@@ -1318,6 +1391,13 @@ function handleOrders(p) {
         bajajEmi: (function () { if (cFinJson < 0) return ''; try { var d = JSON.parse(sval(r, cFinJson) || '{}'); return d.bajajEmi || ''; } catch (e) { return ''; } })(),
         happyCode: sval(r, cHappy),
         happyCodeDate: dstr(r, cHappyDt),
+        // Complimentary gift(s) given with the order (parsed from the JSON blob).
+        gifts: (function () {
+          if (cGifts < 0) return [];
+          var raw = sval(r, cGifts);
+          if (!raw) return [];
+          try { var a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+        })(),
         followUp: dstr(r, cFollow),
         salesExec: sval(r, cSales),
         orderType: sval(r, cOrdType) || 'B2C',
@@ -1776,6 +1856,11 @@ var CRM_APP_COLUMNS = [
   // { date, text, by } entries, appended each time a remark is added, so the
   // full history of updates is preserved (order-level, repeated on every row).
   ['SERVICE REMARKS DATA', 'SERVICE REMARKS'],
+  // Complimentary gift(s) given with the order — a JSON array of
+  // { item, qty, price } entries (order-level, first row only). Lets the app show
+  // the gift again on reopen; the authoritative stock deduction + per-order record
+  // live in the "4s Gifts" and "Gifts Given" tabs (see _commitGifts).
+  ['GIFTS GIVEN', 'GIFT ITEMS', 'GIFTS'],
 ];
 
 // Appends any missing CRM columns (by header name) to the end of the header row
@@ -1847,6 +1932,10 @@ function handleSaveOrder(o) {
     // a lost-response retry can't double-commit either. Best-effort: a stock-write
     // failure must never block the order itself from being saved.
     if (res.isNew) { try { _commitFourSStock(o); } catch (e) {} }
+    // Deduct any complimentary gifts given with this order from the "4s Gifts" stock
+    // and log them against the order. Only on a brand-new booking (res.isNew) so a
+    // re-save / edit never deducts the same gift twice — mirrors the 4S stock commit.
+    if (res.isNew) { try { _commitGifts(o, res.orderNo, res.internalNo); } catch (e) {} }
     // Audit: CREATE for a brand-new booking, EDIT when it already had an order no.
     var who = o.byName || o.by || o.salesExec || '';
     var act = (o.no || o.internalNo) ? 'EDIT_ORDER' : 'CREATE_ORDER';
@@ -1923,6 +2012,90 @@ function _commitFourSStock(o) {
     // first matching row and stop looking for that key so we don't decrement twice.
     delete want[key];
   }
+}
+
+// ─── 4S GIFTS BOOKING WRITE-BACK ────────────────────────────────────────────────
+// When a new order records complimentary gift(s) (o.gifts = [{item, qty, price}]):
+//   • subtract the given quantity from QUANTITY in the "4s Gifts" stock ledger
+//     (matched by ITEM name, floored at 0 so it never goes negative), and
+//   • append one row per gift to the "Gifts Given" log tying the gift to the order
+//     (date, order no, customer, phone, sales person, item, qty, price) so the
+//     showroom has a record of which gift went to which customer for which order.
+// Gifts whose ITEM isn't found in the "4s Gifts" tab are still logged (so the record
+// is complete) — only the stock decrement is skipped for them.
+// Called only for new bookings (see handleSaveOrder) so a re-save never double-books.
+function _commitGifts(o, orderNo, internalNo) {
+  if (!o || !Array.isArray(o.gifts) || !o.gifts.length) return;
+
+  // Collect the quantity given per gift item (case-insensitively), summing repeats.
+  var want = {}, any = false;
+  for (var i = 0; i < o.gifts.length; i++) {
+    var g    = o.gifts[i];
+    if (!g) continue;
+    var name = String(g.item || '').trim();
+    var qty  = _toInt(g.qty) || 0;
+    if (!name || qty <= 0) continue;
+    var key = name.toUpperCase();
+    want[key]  = (want[key] || 0) + qty;
+    any = true;
+  }
+  if (!any) return;
+
+  var opsSS = _openOPS();
+  if (!opsSS) return;
+
+  // 1) Decrement the live "4s Gifts" stock ledger (best-effort; a missing tab or
+  //    unmatched item just skips the decrement — the gift is still logged below).
+  var prices = {};   // key → unit price read from the ledger (fallback for the log)
+  var sh = _giftsSheet(opsSS);
+  if (sh) {
+    var rows = sh.getDataRange().getValues();
+    if (rows.length >= 2) {
+      var hdr  = rows[0].map(function(c){ return String(c || '').toUpperCase().trim(); });
+      var c    = _giftCols(hdr);
+      var cItem = c.item  >= 0 ? c.item  : 0;
+      var cQty  = c.qty   >= 0 ? c.qty   : 1;
+      var cPrc  = c.price >= 0 ? c.price : 2;
+      for (var r = 1; r < rows.length; r++) {
+        var nm = String(rows[r][cItem] || '').trim().toUpperCase();
+        if (!nm) continue;
+        prices[nm] = _toInt(rows[r][cPrc]);
+        var need = want[nm];
+        if (!need) continue;
+        var have = _toInt(rows[r][cQty]);
+        sh.getRange(r + 1, cQty + 1).setValue(Math.max(0, have - need));
+        // Applied to the first matching row; stop looking for this item.
+        delete want[nm];
+      }
+    }
+  }
+
+  // 2) Append a row per gift to the "Gifts Given" log (created on first use).
+  var log = opsSS.getSheetByName('Gifts Given');
+  if (!log) {
+    log = opsSS.insertSheet('Gifts Given');
+    log.getRange(1, 1, 1, 9).setValues([[
+      'DATE & TIME', 'ORDER NO', 'INTERNAL NO', 'CUSTOMER', 'CONTACT NUMBER',
+      'SALES PERSON', 'ITEM', 'QUANTITY', 'PRICE'
+    ]]);
+    try { log.getRange(1, 1, 1, 9).setFontWeight('bold'); } catch (e) {}
+  }
+  var now = new Date();
+  var out = [];
+  for (var j = 0; j < o.gifts.length; j++) {
+    var gg   = o.gifts[j];
+    if (!gg) continue;
+    var gname= String(gg.item || '').trim();
+    var gqty = _toInt(gg.qty) || 0;
+    if (!gname || gqty <= 0) continue;
+    var gprc = (gg.price !== undefined && gg.price !== '' && gg.price !== null)
+                 ? _toInt(gg.price)
+                 : (prices[gname.toUpperCase()] || 0);
+    out.push([ now, String(orderNo || ''), Number(internalNo) || '',
+               String(o.customer || ''), String(o.phone || ''),
+               String(o.salesExec || ''), gname, gqty, gprc ]);
+  }
+  if (out.length) log.getRange(log.getLastRow() + 1, 1, out.length, 9).setValues(out);
 }
 
 // ─── APP-ORDER SERIAL COUNTER ─────────────────────────────────────────────────
@@ -2325,6 +2498,14 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
         pineLabsCards: Array.isArray(o.pineLabsCards) ? o.pineLabsCards : [],
         bajajEmi: o.bajajEmi || ''
       }));
+      // Complimentary gift(s) given with the order — stored as JSON so they show
+      // again on reopen. The stock deduction + per-order log are handled separately
+      // (see _commitGifts); this column is display-only round-trip data.
+      var giftsArr = Array.isArray(o.gifts)
+        ? o.gifts.filter(function(g){ return g && String(g.item || '').trim() && (_toInt(g.qty) > 0); })
+                 .map(function(g){ return { item: String(g.item).trim(), qty: _toInt(g.qty), price: _toInt(g.price) }; })
+        : [];
+      put(['GIFTS GIVEN', 'GIFT ITEMS', 'GIFTS'], giftsArr.length ? JSON.stringify(giftsArr) : '');
     }
     // Installation Happy Code (order-level; written on every row like delivery status).
     put(['HAPPY CODE', 'INSTALLATION HAPPY CODE', 'ORDER HAPPY CODE'], o.happyCode || '');

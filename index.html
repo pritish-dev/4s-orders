@@ -1712,6 +1712,10 @@ const BLANK_ORDER = () => ({
   // status is 'Open' until the issue is resolved, then 'Resolved'.
   serviceFlag:false, serviceReqNo:'', serviceIssue:'', serviceRaisedDate:'', serviceAssignee:'', serviceResolvedDate:'', serviceStatus:'', serviceHappyCode:'',
   followUp:'', salesExec:'', won:'',
+  // Complimentary gift(s) given with the order — [{ item, qty, price }]. On the
+  // first save these are deducted from the "4s Gifts" stock and logged against the
+  // order in the backend (see _commitGifts); kept here so they round-trip on reopen.
+  gifts:[],
   orderType:'B2C', items:[],
   // Customer profiling (saved to sheet, not on PDF). DOB & anniversary optional.
   dob:'', anniversary:'', awareness:'', purchasePattern:[], purchasingFor:'',
@@ -2221,6 +2225,10 @@ function App() {
   // OPS "4S STOCK" tab. Used to tell the salesperson whether a selected item can be
   // sold from the 4S warehouse and from which location.
   const [fourSItems,    setFourSItems]   = useState(() => { try { return JSON.parse(localStorage.getItem('4s_fours_items')||'[]'); } catch { return []; } });
+  // Gift stock (item → available quantity + price), read from the OPS "4s Gifts"
+  // tab. Lets the salesperson pick a complimentary gift for an order and see how
+  // many are left; the given quantity is deducted from the sheet on save.
+  const [gifts,         setGifts]        = useState(() => { try { return JSON.parse(localStorage.getItem('4s_gift_items')||'[]'); } catch { return []; } });
   const [priceItems,    setPriceItems]   = useState(() => { try { const c = JSON.parse(localStorage.getItem('4s_price_items_v10')||'[]'); if (c && c.length) return c; } catch {} try { return buildEmbeddedPriceItems(); } catch { return []; } });
   const [orders,        setOrders]       = useState(() => { try { return normalizeSalesNames(JSON.parse(localStorage.getItem('4s_orders')||'[]')); } catch { return []; } });
   // Manual (paper-order) service requests — standalone requests for pre-app
@@ -2309,6 +2317,7 @@ function App() {
     const cached = localStorage.getItem('4s_items');
     if (cached) try { setItems(JSON.parse(cached)); } catch {}
     syncFourSStock();
+    syncGifts();
     const cachedPL = localStorage.getItem('4s_price_items_v10');
     let hadCachedPL = false;
     if (cachedPL) try { const p = JSON.parse(cachedPL); setPriceItems(p); hadCachedPL = p.length > 0; } catch {}
@@ -2350,6 +2359,7 @@ function App() {
       last = now;
       syncStock({ silent: true });
       syncFourSStock();
+      syncGifts();
       loadMis({ silent: true });
       loadOrders();
       loadPriceListItems(false, true)   // skip local cache, use shared server cache
@@ -2442,6 +2452,18 @@ function App() {
         localStorage.setItem('4s_fours_items', JSON.stringify(res.items || []));
       }
     } catch(e) { /* silent — availability is a hint, not a gate */ }
+  }
+
+  // Pull the gift stock ledger (OPS "4s Gifts" tab). Always silent/background: a
+  // missing tab or slow fetch must never block ordering — gifts are optional.
+  async function syncGifts() {
+    try {
+      const res = await apiGet('gifts', {}, 60000, 2);
+      if (res && res.ok) {
+        setGifts(res.items || []);
+        localStorage.setItem('4s_gift_items', JSON.stringify(res.items || []));
+      }
+    } catch(e) { /* silent — gift stock is a hint, not a gate */ }
   }
 
   async function syncPriceList() {
@@ -2857,7 +2879,7 @@ function App() {
     return m;
   }, [fourSItems]);
 
-  const ctx = { user, items, priceItems, fourSItems, fourSByCode, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, showCelebration, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doUpdateService, doLookupCustomer, doDeleteOrder, doSignOut, syncStock, syncFourSStock, syncPriceList, loadOrders, getNextReceipt,
+  const ctx = { user, items, priceItems, fourSItems, fourSByCode, gifts, orders, syncedAt, priceSyncedAt, priceSyncError, order, setOrder, selOrder, setSelOrder, loading, showToast, showCelebration, nav, back, doLogin, doSaveOrder, doUpdateWON, doUpdateDelivery, doUpdateService, doLookupCustomer, doDeleteOrder, doSignOut, syncStock, syncFourSStock, syncGifts, syncPriceList, loadOrders, getNextReceipt,
     svcRequests, loadServiceRequests, doCreateServiceRequest, doUpdateServiceRequest,
     mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen,
     league, leagueLoading, loadLeague, doSaveLeagueScore, doSaveLeagueConfig,
@@ -5816,6 +5838,74 @@ function OrderFormScreen({ctx, viewOnly}) {
             {Icon.search(T.green,16)}<span style={{fontSize:13}}>Search & add item</span>
           </div>
         </div>
+        {/* ── Gift (optional) ──────────────────────────────────────────────
+            A complimentary gift given to the customer with this order. The
+            gift list + live stock come from the OPS "4s Gifts" tab (ctx.gifts).
+            On the first save the chosen quantity is deducted from that stock and
+            a row is recorded in the "Gifts Given" log tying the gift to this
+            order/customer (see _commitGifts in Code.gs). The + stepper is capped
+            at the available quantity so stock can't be over-committed. */}
+        <SectionHead n="04b" label={`Gift${(o.gifts||[]).length?` · ${(o.gifts||[]).length}`:''}`} id="sec-gift"/>
+        {(()=>{
+          const giftStock = ctx.gifts||[];
+          const findGift  = name => giftStock.find(x=>String(x.item||'').trim().toUpperCase()===String(name||'').trim().toUpperCase());
+          const stockOf   = name => { const g=findGift(name); return g?(Number(g.qty)||0):null; };   // null = not in list
+          const priceOf   = name => { const g=findGift(name); return g?(Number(g.price)||0):0; };
+          const rows      = o.gifts||[];
+          const addGift    = ()=>setOrder(prev=>({...prev,gifts:[...(prev.gifts||[]),{item:'',qty:1,price:''}]}));
+          const removeGift = i=>setOrder(prev=>({...prev,gifts:(prev.gifts||[]).filter((_,j)=>j!==i)}));
+          const setGiftItem= (i,name)=>setOrder(prev=>({...prev,gifts:(prev.gifts||[]).map((g,j)=>j===i?{...g,item:name,price:priceOf(name)}:g)}));
+          const setGiftQty = (i,delta)=>setOrder(prev=>({...prev,gifts:(prev.gifts||[]).map((g,j)=>{
+            if(j!==i) return g;
+            const av=stockOf(g.item); let q=(Number(g.qty)||1)+delta;
+            if(q<1) q=1;
+            if(av!=null && av>0 && q>av) q=av;   // cap at available stock so it can't be over-committed
+            return {...g,qty:q};
+          })}));
+          const stepBtn={width:24,height:24,borderRadius:4,border:`1px solid ${T.line}`,background:'#fff',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,color:T.ink};
+          return (
+          <div style={{background:'#fff'}}>
+            <div style={{padding:'8px 14px 4px',fontSize:11,color:T.ink4,lineHeight:1.5}}>
+              Giving a complimentary gift with this order? Add it here — the quantity is deducted from gift stock and recorded against this order when you save.
+            </div>
+            {rows.length===0 && <div style={{padding:'2px 14px 10px',fontSize:12,color:T.ink3}}>No gift added.</div>}
+            {rows.map((g,i)=>{
+              const avail=stockOf(g.item); const qty=Number(g.qty)||1; const over=avail!=null && avail>0 && qty>avail; const none=avail===0;
+              return (
+              <div key={i} style={{padding:'11px 14px',borderTop:`1px solid ${T.line}`}}>
+                <div style={{display:'flex',gap:8,alignItems:'flex-start'}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <select value={g.item||''} onChange={e=>setGiftItem(i,e.target.value)}
+                      style={{width:'100%',border:`1.5px solid ${T.green}`,borderRadius:4,padding:'6px 8px',fontFamily:T.sans,fontSize:13,fontWeight:600,color:T.ink,background:'#fff',cursor:'pointer'}}>
+                      <option value="">Select gift…</option>
+                      {giftStock.map((gs,gi)=>(<option key={gi} value={gs.item}>{gs.item} ({Number(gs.qty)||0} left{Number(gs.price)>0?` · ₹${Number(gs.price).toLocaleString('en-IN')}`:''})</option>))}
+                      {g.item && !findGift(g.item) && <option value={g.item}>{g.item}</option>}
+                    </select>
+                    <div style={{display:'flex',gap:8,marginTop:8,alignItems:'center',flexWrap:'wrap'}}>
+                      <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>QTY</span>
+                      <button type="button" onClick={()=>setGiftQty(i,-1)} style={stepBtn}>−</button>
+                      <span style={{fontFamily:T.mono,fontSize:14,fontWeight:700,minWidth:20,textAlign:'center'}}>{qty}</span>
+                      <button type="button" onClick={()=>setGiftQty(i,1)} style={stepBtn}>+</button>
+                      {avail!=null && <span style={{fontSize:10.5,fontFamily:T.mono,fontWeight:700,color:(over||none)?T.bad:T.ink3}}>{avail} in stock</span>}
+                      {avail==null && g.item && <span style={{fontSize:10,color:T.ink4}}>not in gift stock list</span>}
+                    </div>
+                    {over && <div style={{fontSize:10.5,color:T.bad,fontWeight:700,marginTop:5}}>Only {avail} in stock — quantity capped.</div>}
+                    {none && <div style={{fontSize:10.5,color:T.bad,fontWeight:700,marginTop:5}}>Out of stock — none left to give.</div>}
+                  </div>
+                  <div style={{textAlign:'right',flexShrink:0}}>
+                    {Number(g.price)>0 && <><div style={{fontFamily:T.mono,fontSize:13,fontWeight:700}}>₹{(Number(g.price)*qty).toLocaleString('en-IN')}</div><div style={{fontSize:9,color:T.ink4,marginTop:1}}>gift value</div></>}
+                    <button type="button" onClick={()=>removeGift(i)} style={{marginTop:8,fontSize:11,color:T.bad,background:'none',border:'none',cursor:'pointer',fontWeight:600}}>REMOVE</button>
+                  </div>
+                </div>
+              </div>
+              );
+            })}
+            <div onClick={addGift} style={{padding:14,display:'flex',alignItems:'center',gap:10,background:T.greenSoft,color:T.green,fontWeight:700,cursor:'pointer',borderTop:`1px solid ${T.line}`}}>
+              <span style={{fontSize:18,lineHeight:1}}>＋</span><span style={{fontSize:13}}>Add gift</span>
+            </div>
+          </div>
+          );
+        })()}
         <SectionHead n="05" label="Commercials" id="sec-commercial"/>
         <Field label="Additional Order Discount %" value={o.orderDiscount} onChange={v=>setF('orderDiscount',v.replace(/[^\d.]/g,''))} mono type="number" hint="Extra discount on the whole order (on top of per-item discounts). Shown on the PDF."/>
         <Field label="SI No" value={o.slNo} onChange={v=>setF('slNo',v)} mono required hint="Mandatory · the order-form SI number · printed as the Sl part of the PDF's Order No. (Sl / Receipt)"/>
@@ -8335,7 +8425,7 @@ function PartialDeliveryModal({order, onCancel, onConfirm}) {
 
 // ─── Settings ────────────────────────────────────────────────
 function SettingsScreen({ctx}) {
-  const {user,syncedAt,priceSyncedAt,priceSyncError,priceItems,nav,syncStock,syncFourSStock,syncPriceList,doSignOut,showToast,loading} = ctx;
+  const {user,syncedAt,priceSyncedAt,priceSyncError,priceItems,nav,syncStock,syncFourSStock,syncGifts,syncPriceList,doSignOut,showToast,loading} = ctx;
   const [apiUrl,setApiUrl]         = useState(localStorage.getItem('4s_api_url')||'');
   const [pingResult,setPingResult] = useState(null);
   const [pinging,setPinging]       = useState(false);
@@ -8703,7 +8793,7 @@ function SettingsScreen({ctx}) {
               </div>
               <Pill tone={syncedAt?'ok':'warn'} mono>{syncedAt?'FRESH':'STALE'}</Pill>
             </div>
-            <div style={{marginTop:12}}><Btn primary full icon={Icon.refresh('#fff',15)} onClick={()=>{syncStock();syncFourSStock&&syncFourSStock();}}>Sync stock now</Btn></div>
+            <div style={{marginTop:12}}><Btn primary full icon={Icon.refresh('#fff',15)} onClick={()=>{syncStock();syncFourSStock&&syncFourSStock();syncGifts&&syncGifts();}}>Sync stock now</Btn></div>
           </div>
         </div>
 

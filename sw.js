@@ -4,7 +4,7 @@
 // Apps Script API calls are never proxied — they go straight to the network.
 // ============================================================
 
-const CACHE  = '4s-orders-f4d0e2a';
+const CACHE  = '4s-orders-gift902';
 const SHELL  = [
   '/4s-orders/',
   '/4s-orders/index.html',
