@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v53';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v54';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -112,6 +112,7 @@ function doGet(e) {
       case 'leagueScores':   result = handleLeagueGet(p);       break;
       case 'lookupCustomer': result = handleLookupCustomer(p);  break;
       case 'serviceRequests':result = handleListServiceRequests(); break;
+      case 'leads':          result = handleLeads(p);           break;
       case 'debugPriceList': result = handleDebugPriceList();   break;
       default:               result = { ok: false, error: 'Unknown action: ' + (p.action || '(none)') };
     }
@@ -138,6 +139,7 @@ function doPost(e) {
       case 'setAppSerial':    result = handleSetAppSerial(body);      break;
       case 'saveLeagueScore': result = handleLeagueSaveScore(body);   break;
       case 'saveLeagueConfig':result = handleLeagueSaveConfig(body);  break;
+      case 'addLead':         result = handleAddLead(body);           break;
       default:                result = { ok: false, error: 'Unknown action: ' + body.action };
     }
   } catch(err) {
@@ -3160,6 +3162,150 @@ function handleAuditLog(p) {
     }).reverse();   // newest first
     return { ok: true, entries: entries, scriptVersion: SCRIPT_VERSION };
   } catch(e) { return { ok: false, error: e.message }; }
+}
+
+// ─── LEADS ────────────────────────────────────────────────────────────────────
+// Every salesperson keeps a lead register in the OPS spreadsheet, one tab per
+// person named "<NAME> LEADS" (e.g. "SWATI LEADS"). Each tab shares the header:
+//   SL NO | DATE | CUSTOMER NAME | CONTACT NO | PRODUCT DETAILS | AMOUNT
+// The app reads every salesperson's leads (grouped by person) and lets a
+// salesperson add a new lead, which is appended to their own tab. A lead that
+// later converts into an order is matched by contact number on the client and
+// earns +6 league points (see leagueAuto in the app).
+var LEADS_PEOPLE  = ['SWATI', 'ARCHITA', 'ADITYA', 'BISWAJIT', 'SAROJ', 'PRITISH'];
+var LEADS_HEADERS = ['SL NO', 'DATE', 'CUSTOMER NAME', 'CONTACT NO', 'PRODUCT DETAILS', 'AMOUNT'];
+
+function _leadsSheetName(person) { return String(person || '').trim().toUpperCase() + ' LEADS'; }
+
+// Open one salesperson's leads tab in the OPS sheet; create it (with headers)
+// when `create` is true and it doesn't exist yet.
+function _leadsSheet(person, create) {
+  var ss = _openOPS();
+  if (!ss) return null;
+  var name = _leadsSheetName(person);
+  var sh = ss.getSheetByName(name);
+  if (!sh && create) {
+    sh = ss.insertSheet(name);
+    sh.appendRow(LEADS_HEADERS);
+    try { sh.setFrozenRows(1); } catch (e) {}
+  }
+  return sh;
+}
+
+// Map a leads-tab header row to column indexes, tolerant of minor header wording
+// differences ("CONTACT NO"/"CONTACT NUMBER", "PRODUCT DETAILS"/"PRODUCT", etc.).
+// Falls back to the fixed LEADS_HEADERS order when a column isn't found.
+function _leadCols(sh) {
+  var last = sh.getLastColumn();
+  var hdr  = last >= 1 ? sh.getRange(1, 1, 1, last).getValues()[0] : [];
+  var norm = hdr.map(function (h) { return String(h || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); });
+  function find(test, fallback) {
+    for (var i = 0; i < norm.length; i++) { if (norm[i] && test(norm[i])) return i; }
+    return fallback;
+  }
+  return {
+    ncol:     Math.max(last, LEADS_HEADERS.length),
+    sl:       find(function (s) { return s.indexOf('sl') === 0 || s.indexOf('sr') === 0; }, 0),
+    date:     find(function (s) { return s.indexOf('date') >= 0; }, 1),
+    customer: find(function (s) { return s.indexOf('customer') >= 0 || s.indexOf('name') >= 0; }, 2),
+    contact:  find(function (s) { return s.indexOf('contact') >= 0 || s.indexOf('phone') >= 0 || s.indexOf('mobile') >= 0; }, 3),
+    product:  find(function (s) { return s.indexOf('product') >= 0 || s.indexOf('detail') >= 0; }, 4),
+    amount:   find(function (s) { return s.indexOf('amount') >= 0 || s.indexOf('value') >= 0; }, 5)
+  };
+}
+
+// Read every salesperson's leads, grouped by person. Open to any logged-in user.
+function handleLeads(p) {
+  try {
+    var ss = _openOPS();
+    if (!ss) return { ok: false, error: 'Cannot open OPS sheet: ' + OPS_SHEET_ID };
+    var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+    function ds(v) {
+      if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+      return String(v == null ? '' : v).trim();
+    }
+    var byPerson = {};
+    LEADS_PEOPLE.forEach(function (person) {
+      var rows = [];
+      var sh = ss.getSheetByName(_leadsSheetName(person));
+      if (sh) {
+        var last = sh.getLastRow();
+        if (last >= 2) {
+          var C = _leadCols(sh);
+          var vals = sh.getRange(2, 1, last - 1, C.ncol).getValues();
+          for (var i = 0; i < vals.length; i++) {
+            var r = vals[i];
+            var g = function (ci) { return (ci >= 0 && ci < r.length) ? r[ci] : ''; };
+            var customer = String(g(C.customer) || '').trim();
+            var contact  = String(g(C.contact)  || '').trim();
+            var product  = String(g(C.product)  || '').trim();
+            var dateStr  = ds(g(C.date));
+            // Skip fully blank rows (e.g. trailing formatting rows).
+            if (!customer && !contact && !product && !dateStr) continue;
+            var amt = g(C.amount);
+            rows.push({
+              slNo:     (g(C.sl) === '' || g(C.sl) == null) ? String(rows.length + 1) : String(g(C.sl)).trim(),
+              date:     dateStr,
+              customer: customer,
+              contact:  contact,
+              product:  product,
+              amount:   String(amt == null ? '' : amt).trim()
+            });
+          }
+        }
+      }
+      byPerson[person] = rows;
+    });
+    return { ok: true, leads: byPerson, people: LEADS_PEOPLE, scriptVersion: SCRIPT_VERSION };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+// Append a new lead to one salesperson's tab (creating the tab if needed). Any
+// logged-in salesperson can add a lead to their own register.
+function handleAddLead(body) {
+  var person   = String((body && (body.salesPerson || body.person)) || '').trim().toUpperCase();
+  var customer = String((body && body.customer) || '').trim();
+  var contact  = String((body && body.contact)  || '').trim();
+  var product  = String((body && body.product)  || '').trim();
+  var amountIn = (body && body.amount != null) ? body.amount : '';
+  var dateIn   = String((body && body.date) || '').trim();
+  var by       = String((body && (body.by || body.createdBy)) || '').trim();
+
+  if (LEADS_PEOPLE.indexOf(person) < 0)
+    return { ok: false, error: 'Unknown sales person: ' + (person || '(blank)') };
+  if (!customer && !contact)
+    return { ok: false, error: 'Enter at least a customer name or contact number.' };
+
+  var lock = LockService.getScriptLock();
+  var haveLock = false;
+  try { haveLock = lock.tryLock(15000); } catch (e) {}
+  try {
+    var sh = _leadsSheet(person, true);
+    if (!sh) return { ok: false, error: 'Cannot open leads sheet for ' + person };
+    var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+    var C = _leadCols(sh);
+    var last = sh.getLastRow();
+    var slNo = Math.max(0, last - 1) + 1;                 // next running SL NO
+    var dateStr = dateIn || Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+    var ncol = Math.max(C.ncol, LEADS_HEADERS.length);
+    var row = new Array(ncol);
+    for (var k = 0; k < ncol; k++) row[k] = '';
+    function put(ci, val) { if (ci >= 0 && ci < ncol) row[ci] = val; }
+    put(C.sl, slNo);
+    put(C.date, dateStr);
+    put(C.customer, customer);
+    put(C.contact, contact);
+    put(C.product, product);
+    put(C.amount, (amountIn === '' ? '' : (Number(amountIn) || amountIn)));
+    sh.appendRow(row);
+
+    _appendLog(by, '', 'ADD_LEAD', person + ' · ' + customer + (contact ? ' · ' + contact : ''));
+    return { ok: true, slNo: String(slNo), scriptVersion: SCRIPT_VERSION };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
+  }
 }
 
 // ─── 4S PREMIER LEAGUE ────────────────────────────────────────────────────────
