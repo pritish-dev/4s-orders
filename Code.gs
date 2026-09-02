@@ -3225,7 +3225,11 @@ function handleLeagueGet(p) {
     var target  = Number(props.getProperty('LEAGUE_MONTHLY_TARGET')) || 0;
     var wTarget = Number(props.getProperty('LEAGUE_WEEKLY_TARGET')) || 0;
     var som     = props.getProperty('LEAGUE_SALESMAN_OF_MONTH') || '';
-    return { ok: true, scores: rows, monthlyTarget: target, weeklyTarget: wTarget, salesmanOfMonth: som, scriptVersion: SCRIPT_VERSION };
+    // Per-month team rosters (admin can re-pick the teams once a month). Stored
+    // as a JSON map { "yyyy-mm": { strikers:[…], titans:[…], captains:{…} } }.
+    var rosters = {};
+    try { rosters = JSON.parse(props.getProperty('LEAGUE_ROSTERS') || '{}') || {}; } catch (e) { rosters = {}; }
+    return { ok: true, scores: rows, monthlyTarget: target, weeklyTarget: wTarget, salesmanOfMonth: som, rosters: rosters, scriptVersion: SCRIPT_VERSION };
   } catch (e) { return { ok: false, error: e.message }; }
 }
 
@@ -3286,6 +3290,27 @@ function handleLeagueSaveConfig(body) {
     }
     if (body && body.salesmanOfMonth !== undefined) {
       props.setProperty('LEAGUE_SALESMAN_OF_MONTH', String(body.salesmanOfMonth || ''));
+    }
+    // Monthly team roster — merge one month's roster into the stored map. The
+    // teams can be re-picked once a month; this replaces that month's entry.
+    if (body && body.rosterMonth && body.roster && typeof body.roster === 'object') {
+      var monthKey = String(body.rosterMonth).slice(0, 7);
+      if (/^\d{4}-\d{2}$/.test(monthKey)) {
+        var rosters = {};
+        try { rosters = JSON.parse(props.getProperty('LEAGUE_ROSTERS') || '{}') || {}; } catch (e) { rosters = {}; }
+        var _clean = function (arr) { return (arr || []).map(function (n) { return String(n || '').trim(); }).filter(String); };
+        var r = body.roster;
+        var caps = (r.captains && typeof r.captains === 'object') ? r.captains : {};
+        rosters[monthKey] = {
+          strikers: _clean(r.strikers),
+          titans:   _clean(r.titans),
+          captains: { strikers: String(caps.strikers || ''), titans: String(caps.titans || '') },
+          updatedBy: by,
+          updatedAt: Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Kolkata', 'yyyy-MM-dd HH:mm:ss')
+        };
+        props.setProperty('LEAGUE_ROSTERS', JSON.stringify(rosters));
+        _appendLog(by, '', 'LEAGUE_ROSTER', monthKey + ' S=' + rosters[monthKey].strikers.join('/') + ' T=' + rosters[monthKey].titans.join('/'));
+      }
     }
     _appendLog(by, '', 'LEAGUE_CONFIG', 'monthly=' + (body && body.monthlyTarget) + ' weekly=' + (body && body.weeklyTarget) + ' som=' + (body && body.salesmanOfMonth));
     return { ok: true, scriptVersion: SCRIPT_VERSION };
