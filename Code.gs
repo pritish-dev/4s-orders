@@ -2210,8 +2210,10 @@ function handleSetAppSerial(body) {
 // "You do not have permission to call UrlFetchApp.fetch". This sends nothing to
 // any customer; it just makes a harmless GET to trigger the permission prompt.
 function authorizeWhatsApp() {
-  var res = UrlFetchApp.fetch('https://graph.facebook.com/', { muteHttpExceptions: true });
-  Logger.log('External requests authorized — Graph API responded HTTP ' + res.getResponseCode());
+  // example.com is a stable endpoint that never throttles — we only need this
+  // call to run at all, which forces the one-time external-request consent.
+  var res = UrlFetchApp.fetch('https://example.com/', { muteHttpExceptions: true });
+  Logger.log('External requests authorized — test endpoint responded HTTP ' + res.getResponseCode() + '. You can close this; the WhatsApp send is ready.');
   return res.getResponseCode();
 }
 
