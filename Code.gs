@@ -2217,9 +2217,23 @@ function authorizeWhatsApp() {
   return res.getResponseCode();
 }
 
+// body: { to, type?, ... }
+//   type 'template' (default): { template?, lang?, components? } — see above.
+//   type 'text': { text } — a free-form message. NOTE: WhatsApp only delivers a
+//     free-form message inside the 24-hour window after the customer last
+//     messaged this business number. Outside that window Meta rejects it
+//     (error 131047 / "re-engagement message"), and a template must be used.
 function handleSendWhatsApp(body) {
   var to = _waNormPhone(body && body.to);
   if (!to) return { ok: false, error: 'Enter a valid phone number.' };
+
+  var kind = String((body && body.type) || 'template').trim().toLowerCase();
+  if (kind === 'text') {
+    var text = String((body && body.text) || '').trim();
+    if (!text) return { ok: false, error: 'Enter a message to send.' };
+    return _sendWhatsAppText(to, text);
+  }
+
   var template = String((body && body.template) || 'hello_world').trim();
   var lang     = String((body && body.lang) || 'en_US').trim();
   var comps    = (body && body.components) || null;
@@ -2238,14 +2252,6 @@ function _waNormPhone(raw) {
 }
 
 function _sendWhatsAppTemplate(to, template, lang, components) {
-  var props   = PropertiesService.getScriptProperties();
-  var token   = props.getProperty('WA_TOKEN');
-  var phoneId = props.getProperty('WA_PHONE_NUMBER_ID');
-  var version = props.getProperty('WA_API_VERSION') || 'v22.0';
-  if (!token || !phoneId) {
-    return { ok: false, error: 'WhatsApp not configured — set WA_TOKEN and WA_PHONE_NUMBER_ID in Script Properties.' };
-  }
-
   var payload = {
     messaging_product: 'whatsapp',
     to: to,
@@ -2253,6 +2259,29 @@ function _sendWhatsAppTemplate(to, template, lang, components) {
     template: { name: template, language: { code: lang } }
   };
   if (components && components.length) payload.template.components = components;
+  return _waPost(payload);
+}
+
+function _sendWhatsAppText(to, text) {
+  return _waPost({
+    messaging_product: 'whatsapp',
+    to: to,
+    type: 'text',
+    text: { preview_url: false, body: text }
+  });
+}
+
+// Low-level POST to the WhatsApp Cloud API. Reads credentials from Script
+// Properties, sends the given message payload, and normalises the reply to
+// { ok, id } / { ok:false, error, code }.
+function _waPost(payload) {
+  var props   = PropertiesService.getScriptProperties();
+  var token   = props.getProperty('WA_TOKEN');
+  var phoneId = props.getProperty('WA_PHONE_NUMBER_ID');
+  var version = props.getProperty('WA_API_VERSION') || 'v22.0';
+  if (!token || !phoneId) {
+    return { ok: false, error: 'WhatsApp not configured — set WA_TOKEN and WA_PHONE_NUMBER_ID in Script Properties.' };
+  }
 
   var url = 'https://graph.facebook.com/' + version + '/' + phoneId + '/messages';
   var res;
@@ -2273,7 +2302,7 @@ function _sendWhatsAppTemplate(to, template, lang, components) {
   var data; try { data = JSON.parse(text); } catch (e) { data = null; }
 
   if (code >= 200 && code < 300 && data && data.messages && data.messages.length) {
-    return { ok: true, id: data.messages[0].id, to: to };
+    return { ok: true, id: data.messages[0].id, to: payload.to };
   }
   var err = (data && data.error && data.error.message) || ('HTTP ' + code + ': ' + text.slice(0, 200));
   return { ok: false, error: err, code: code };
