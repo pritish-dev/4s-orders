@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '74';
+  var V = '75';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -3326,11 +3326,11 @@ function LeagueTeamCard({team, isLeader, decided}) {
       </div>
       {/* Batting-card style player rows */}
       <div>
-        <div style={{display:'grid',gridTemplateColumns:'1.5fr repeat(4,1fr) auto',gap:4,padding:'7px 12px',fontSize:9,fontWeight:800,letterSpacing:.4,color:T.ink4,borderBottom:`1px solid ${T.line}`,textTransform:'uppercase'}}>
-          <span>Batter</span><span style={{textAlign:'center'}}>Ord</span><span style={{textAlign:'center'}} title="Happy calling — orders with a Happy Code (auto)">Hpy</span><span style={{textAlign:'center'}}>Rev</span><span style={{textAlign:'center'}}>Tele</span><span style={{textAlign:'right'}}>Pts</span>
+        <div style={{display:'grid',gridTemplateColumns:'1.5fr repeat(5,1fr) auto',gap:4,padding:'7px 12px',fontSize:9,fontWeight:800,letterSpacing:.4,color:T.ink4,borderBottom:`1px solid ${T.line}`,textTransform:'uppercase'}}>
+          <span>Batter</span><span style={{textAlign:'center'}}>Ord</span><span style={{textAlign:'center'}} title="Happy calling — orders with a Happy Code (auto)">Hpy</span><span style={{textAlign:'center'}}>Rev</span><span style={{textAlign:'center'}}>Tele</span><span style={{textAlign:'center'}} title="Lead conversions — orders matched to a lead you added (auto, +6 each)">Conv</span><span style={{textAlign:'right'}}>Pts</span>
         </div>
         {team.players.map((p,i)=>(
-          <div key={p.name} style={{display:'grid',gridTemplateColumns:'1.5fr repeat(4,1fr) auto',gap:4,padding:'9px 12px',alignItems:'center',borderBottom:i<team.players.length-1?`1px solid ${T.line}`:'none'}}>
+          <div key={p.name} style={{display:'grid',gridTemplateColumns:'1.5fr repeat(5,1fr) auto',gap:4,padding:'9px 12px',alignItems:'center',borderBottom:i<team.players.length-1?`1px solid ${T.line}`:'none'}}>
             <div style={{display:'flex',alignItems:'center',gap:8,minWidth:0}}>
               <LeagueAvatar name={p.name} team={team} size={30} captain={p.captain}/>
               <div style={{minWidth:0}}>
@@ -3342,6 +3342,7 @@ function LeagueTeamCard({team, isLeader, decided}) {
             <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.auto.happyCalls}</span>
             <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.man.reviews}</span>
             <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.man.teleConv+p.man.teleConvReview}</span>
+            <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:800,color:p.auto.leadConv>0?T.green:T.ink2}} title={p.auto.leadConv>0?('+'+(p.auto.leadConv*6)+' pts from lead conversions'):''}>{p.auto.leadConv}</span>
             <span style={{textAlign:'right',fontFamily:T.mono,fontSize:14,fontWeight:900,color:team.accent}}>{p.pts}</span>
           </div>
         ))}
@@ -3757,12 +3758,14 @@ function LeagueScreen({ctx}) {
 // which earn +6 points in the 4S Premier League.
 const LEADS_PEOPLE = ['SWATI','ARCHITA','ADITYA','BISWAJIT','SAROJ','PRITISH'];
 
-function AddLeadModal({person, canPickPerson, lead, converted, onCancel, onSave}){
+function AddLeadModal({person, canPickPerson, lead, prefill, onCancel, onSave}){
   const editing = !!lead;
+  const newCycle = !editing && !!(prefill && (prefill.customer || prefill.contact)); // "new items" for a converted customer
   const pickPerson = canPickPerson && !editing;   // an existing lead lives in one person's tab
+  const seed = lead || prefill || {};
   const [p,setP]           = useState(person);
-  const [customer,setCust] = useState((lead&&lead.customer)||'');
-  const [contact,setContact] = useState((lead&&lead.contact)||'');
+  const [customer,setCust] = useState(seed.customer||'');
+  const [contact,setContact] = useState(seed.contact||'');
   const [product,setProduct] = useState((lead&&lead.product)||'');
   const [amount,setAmount]   = useState((lead&&lead.amount!=null&&lead.amount!=='')?String(lead.amount).replace(/[^\d.]/g,''):'');
   const [date,setDate]       = useState((lead&&lead.date)||_todayISO());
@@ -3782,14 +3785,13 @@ function AddLeadModal({person, canPickPerson, lead, converted, onCancel, onSave}
     <div style={{position:'fixed',inset:0,zIndex:9999,background:'rgba(0,0,0,.45)',display:'flex',alignItems:'flex-end',justifyContent:'center'}} onClick={onCancel}>
       <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:600,background:'#fff',borderTopLeftRadius:16,borderTopRightRadius:16,padding:'16px 18px 24px',maxHeight:'88vh',overflowY:'auto'}}>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6}}>
-          <div style={{fontSize:16,fontWeight:800,color:T.ink}}>{editing?'Edit lead':'Add a lead'}</div>
+          <div style={{fontSize:16,fontWeight:800,color:T.ink}}>{editing?'Edit lead':(newCycle?'New items for this customer':'Add a lead')}</div>
           <button onClick={onCancel} style={{width:30,height:30,borderRadius:6,background:T.paper2||'#f2f2f4',border:`1px solid ${T.line}`,cursor:'pointer',fontSize:16,color:T.ink3}}>×</button>
         </div>
         <div style={{fontSize:11,color:T.ink4,marginBottom:6}}>{editing?'Updating':'Saved to'} <b>{_leadsSheetLabel(p)}</b> in the OPS sheet.</div>
-        {editing && converted && (
+        {newCycle && (
           <div style={{margin:'6px 0 4px',padding:'9px 11px',background:T.warnSoft||'#fff6e6',border:'1px solid #e6cc95',borderRadius:8,fontSize:11.5,color:T.warn||'#8a6d00',lineHeight:1.4}}>
-            This lead has already <b>converted</b>. To log new items they now want to buy, replace the product &amp; amount below with the new items and set the date to today — the lead value will then reflect the <b>new items only</b>, and it re-converts when a fresh order is booked.
-            <button type="button" onClick={()=>setDate(_todayISO())} style={{display:'block',marginTop:7,padding:'6px 10px',borderRadius:7,background:'#fff',border:`1px solid ${T.warn||'#8a6d00'}`,color:T.warn||'#8a6d00',fontSize:11,fontWeight:800,cursor:'pointer'}}>↻ Reopen for new items (set date to today)</button>
+            This starts a <b>fresh lead</b> for the same customer for the new items they now want. The earlier converted lead keeps its value and its league points — this new one carries only the new items' value and converts on its own future order.
           </div>
         )}
         <div style={lbl}>Sales person</div>
@@ -3830,25 +3832,58 @@ function LeadsScreen({ctx}){
   useEffect(()=>{ loadLeads(); },[]);
 
   const rows = (leads&&leads[sel])||[];
-  // Phones this salesperson has booked orders for → the LATEST booking date per
-  // phone. Used to flag converted leads: a lead is only "converted" when an order
-  // for its phone was booked ON/AFTER the lead was added — an order that predates
-  // the lead (or a lead re-opened with a newer date for fresh items) is not counted.
-  const orderDateByPhone = React.useMemo(()=>{
+  // Every booking date this salesperson has, per customer phone (sorted ascending).
+  // A lead is "converted" by the FIRST order booked ON/AFTER the lead was added; an
+  // order that predates the lead (or a fresh "new items" lead added later) is not
+  // counted against it. Using the first-order-on/after date also tells us WHICH
+  // month the conversion happened in (for the month-wise value breakdown below).
+  const ordersByPhone = React.useMemo(()=>{
     const key=String(sel||'').toLowerCase(); const m=new Map();
-    (orders||[]).forEach(o=>{ if(o&&o.status!=='draft'&&String(o.salesExec||'').toLowerCase().includes(key)){ const ph=_normPhone(o.phone); if(ph&&ph.length>=10){ const iso=_toISO(o.date)||''; const prev=m.get(ph); if(prev===undefined||iso>prev) m.set(ph,iso); } } });
+    (orders||[]).forEach(o=>{ if(o&&o.status!=='draft'&&String(o.salesExec||'').toLowerCase().includes(key)){ const ph=_normPhone(o.phone); const iso=_toISO(o.date); if(ph&&ph.length>=10&&iso){ if(!m.has(ph)) m.set(ph,[]); m.get(ph).push(iso); } } });
+    m.forEach(arr=>arr.sort());
     return m;
   },[orders,sel]);
-  const isConverted = l => {
-    const ph=_normPhone(l&&l.contact); if(!(ph&&ph.length>=10)) return false;
-    const ord=orderDateByPhone.get(ph); if(ord===undefined) return false;
+  // The order ISO date that converted this lead (earliest booking on/after it was
+  // added), or null if it hasn't converted. No lead date → any matching order.
+  const convOrderISO = l => {
+    const ph=_normPhone(l&&l.contact); if(!(ph&&ph.length>=10)) return null;
+    const arr=ordersByPhone.get(ph); if(!arr||!arr.length) return null;
     const ld=String((l&&l.date)||'').slice(0,10);
-    return ld ? (ord>=ld) : true;   // no lead date → fall back to a plain phone match
+    if(!ld) return arr[arr.length-1];
+    for(let i=0;i<arr.length;i++){ if(arr[i]>=ld) return arr[i]; }
+    return null;
   };
+  const isConverted = l => !!convOrderISO(l);
   const convCount = rows.filter(isConverted).length;
+
+  // ── Estimated & conversion value, per month ──────────────────────────────────
+  // Estimated value is bucketed by the month the lead was ADDED; conversion value
+  // by the month it was CONVERTED (the converting order's month). A lead's value is
+  // its recorded amount.
+  const _leadAmt = l => Number(String((l&&l.amount)||'').replace(/[^\d.]/g,''))||0;
+  const _MONS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const _monLabel = key => { const parts=String(key||'').split('-'); const mi=(Number(parts[1])||0)-1; return (_MONS[mi]||'?')+' '+(parts[0]||''); };
+  const monthAgg = React.useMemo(()=>{
+    const est={}, conv={};
+    rows.forEach(l=>{
+      const amt=_leadAmt(l);
+      const addKey=String((l&&l.date)||'').slice(0,7);
+      if(addKey){ (est[addKey]=est[addKey]||{count:0,value:0}); est[addKey].count++; est[addKey].value+=amt; }
+      const cISO=convOrderISO(l);
+      if(cISO){ const cKey=cISO.slice(0,7); (conv[cKey]=conv[cKey]||{count:0,value:0}); conv[cKey].count++; conv[cKey].value+=amt; }
+    });
+    const keys=Array.from(new Set(Object.keys(est).concat(Object.keys(conv)))).sort().reverse();
+    return { est, conv, keys };
+  },[rows,ordersByPhone]);
+  const totalEst  = rows.reduce((s,l)=>s+_leadAmt(l),0);
+  const totalConv = rows.reduce((s,l)=>s+(isConverted(l)?_leadAmt(l):0),0);
 
   // A regular salesperson may only add to their own register; a manager/admin to any.
   const canAdd = isManager || !!me;
+  // Opening the Add sheet with a customer+contact seed creates a fresh "new items"
+  // lead cycle for a converted customer — the original converted lead (and its
+  // league points) is left untouched.
+  const [addPrefill,setAddPrefill] = useState(null);
 
   return (
     <div className="screen">
@@ -3887,12 +3922,40 @@ function LeadsScreen({ctx}){
             <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>CONVERTED</div>
             <div style={{fontSize:24,fontWeight:800,color:convCount>0?T.green:T.ink,lineHeight:1.1,marginTop:2}}>{convCount}<span style={{fontSize:11,fontWeight:700,color:T.ink4}}> · +{convCount*6} pts</span></div>
           </div>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>EST. VALUE</div>
+            <div style={{fontSize:20,fontWeight:800,color:T.ink,lineHeight:1.1,marginTop:2,fontFamily:T.mono}}>{_fmtAmt(totalEst)}</div>
+          </div>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>CONVERSION VALUE</div>
+            <div style={{fontSize:20,fontWeight:800,color:totalConv>0?T.green:T.ink,lineHeight:1.1,marginTop:2,fontFamily:T.mono}}>{_fmtAmt(totalConv)}</div>
+          </div>
         </div>
+
+        {/* Month-wise value breakdown */}
+        {monthAgg.keys.length>0 && (
+          <div style={{margin:'10px 16px 2px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:10,overflow:'hidden'}}>
+            <div style={{padding:'9px 12px 7px',borderBottom:`1px solid ${T.line}`,fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:1,textTransform:'uppercase'}}>Month-wise value</div>
+            <div style={{display:'grid',gridTemplateColumns:'1.1fr 1fr 1fr',gap:4,padding:'7px 12px',fontSize:9,fontWeight:800,letterSpacing:.4,color:T.ink4,borderBottom:`1px solid ${T.line}`,textTransform:'uppercase'}}>
+              <span>Month</span><span style={{textAlign:'right'}} title="Leads added this month · their estimated value">Added · Est.</span><span style={{textAlign:'right'}} title="Leads converted this month · their value">Conv · Value</span>
+            </div>
+            {monthAgg.keys.map((k,i)=>{
+              const e=monthAgg.est[k]||{count:0,value:0}; const c=monthAgg.conv[k]||{count:0,value:0};
+              return (
+                <div key={k} style={{display:'grid',gridTemplateColumns:'1.1fr 1fr 1fr',gap:4,padding:'8px 12px',alignItems:'center',borderBottom:i<monthAgg.keys.length-1?`1px solid ${T.line}`:'none'}}>
+                  <span style={{fontSize:12,fontWeight:700,color:T.ink}}>{_monLabel(k)}</span>
+                  <span style={{textAlign:'right',fontFamily:T.mono,fontSize:12,color:T.ink2}}>{e.count?(<span><b style={{color:T.ink}}>{_fmtAmt(e.value)}</b> <span style={{fontSize:10,color:T.ink4}}>·{e.count}</span></span>):<span style={{color:T.ink4}}>—</span>}</span>
+                  <span style={{textAlign:'right',fontFamily:T.mono,fontSize:12}}>{c.count?(<span><b style={{color:T.green}}>{_fmtAmt(c.value)}</b> <span style={{fontSize:10,color:T.ink4}}>·{c.count}</span></span>):<span style={{color:T.ink4}}>—</span>}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* Add-lead button */}
         {canAdd && (
           <div style={{padding:'8px 16px 4px'}}>
-            <button onClick={()=>setShowAdd(true)} style={{width:'100%',height:44,borderRadius:10,background:T.green,color:'#fff',border:'none',fontSize:14,fontWeight:800,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>{Icon.plus('#fff',18)} Add a lead{(!isManager&&me)?' for '+me:''}</button>
+            <button onClick={()=>{setAddPrefill(null);setShowAdd(true);}} style={{width:'100%',height:44,borderRadius:10,background:T.green,color:'#fff',border:'none',fontSize:14,fontWeight:800,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>{Icon.plus('#fff',18)} Add a lead{(!isManager&&me)?' for '+me:''}</button>
           </div>
         )}
         {!canAdd && (
@@ -3914,7 +3977,7 @@ function LeadsScreen({ctx}){
           ) : (
             <div style={{display:'flex',flexDirection:'column',gap:8}}>
               {rows.map((l,i)=>{
-                const conv=isConverted(l);
+                const cISO=convOrderISO(l); const conv=!!cISO;
                 return (
                 <div key={i} style={{background:'#fff',border:`1px solid ${conv?T.green:T.line}`,borderRadius:10,padding:'11px 13px',position:'relative',overflow:'hidden'}}>
                   {conv && <div style={{position:'absolute',left:0,top:0,bottom:0,width:3,background:T.green}}/>}
@@ -3926,11 +3989,12 @@ function LeadsScreen({ctx}){
                         {conv && <span style={{fontSize:9,fontWeight:900,letterSpacing:.4,color:'#fff',background:T.green,padding:'2px 7px',borderRadius:99,textTransform:'uppercase'}}>Converted · +6</span>}
                       </div>
                       {l.product && <div style={{fontSize:12,color:T.ink2,marginTop:3}}>{l.product}</div>}
-                      <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:3}}>{l.date||'—'}{l.contact?' · '+l.contact:''}</div>
+                      <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:3}}>{l.date||'—'}{l.contact?' · '+l.contact:''}{conv?' · converted '+_monLabel(cISO.slice(0,7)):''}</div>
                     </div>
                     <div style={{textAlign:'right',flexShrink:0}}>
                       {l.amount?<div style={{fontSize:14,fontFamily:T.mono,fontWeight:800,color:T.ink}}>₹{(Number(String(l.amount).replace(/[^\d.]/g,''))||0).toLocaleString('en-IN')}</div>:<div style={{fontSize:11,color:T.ink4}}>—</div>}
                       <div style={{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:10,marginTop:6}}>
+                        {isManager && conv && <button onClick={e=>{e.stopPropagation();setAddPrefill({customer:l.customer||'',contact:l.contact||''});setShowAdd(true);}} title="Log new items this customer now wants — starts a fresh lead; the converted one keeps its points" style={{fontSize:11,fontWeight:800,color:T.green,background:'none',border:'none',padding:0,cursor:'pointer'}}>＋ New items</button>}
                         {isManager && <button onClick={e=>{e.stopPropagation();setEditLead({...l,_person:sel,_converted:conv});}} style={{fontSize:11,fontWeight:700,color:T.ink3,background:'none',border:'none',padding:0,cursor:'pointer'}}>Edit ✎</button>}
                         {l.contact && <a href={'https://wa.me/91'+_normPhone(l.contact)} target="_blank" rel="noopener" onClick={e=>e.stopPropagation()} style={{fontSize:11,fontWeight:700,color:T.green,textDecoration:'none'}}>WhatsApp ↗</a>}
                       </div>
@@ -3948,7 +4012,8 @@ function LeadsScreen({ctx}){
         <AddLeadModal
           person={(!isManager&&me)?me:sel}
           canPickPerson={isManager}
-          onCancel={()=>setShowAdd(false)}
+          prefill={addPrefill}
+          onCancel={()=>{setShowAdd(false);setAddPrefill(null);}}
           onSave={doAddLead}
         />
       )}
@@ -3957,7 +4022,6 @@ function LeadsScreen({ctx}){
           person={editLead._person||sel}
           canPickPerson={false}
           lead={editLead}
-          converted={!!editLead._converted}
           onCancel={()=>setEditLead(null)}
           onSave={doEditLead}
         />
