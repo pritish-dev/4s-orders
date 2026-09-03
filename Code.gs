@@ -95,6 +95,20 @@ function _jsonPost(obj) {
 // ─── Entry points ─────────────────────────────────────────────────────────────
 function doGet(e) {
   var p        = (e && e.parameter) ? e.parameter : {};
+
+  // ── WhatsApp webhook verification handshake ──────────────────────────────────
+  // When you save the webhook in Meta, it sends a GET with hub.mode/hub.challenge/
+  // hub.verify_token. Echo the challenge back as plain text IF the verify token
+  // matches the one stored in Script Properties (WA_VERIFY_TOKEN). This is what
+  // makes Meta accept this /exec URL as the callback.
+  if (p['hub.mode'] || p['hub.challenge'] || p['hub.verify_token']) {
+    var vt = PropertiesService.getScriptProperties().getProperty('WA_VERIFY_TOKEN') || '';
+    if (p['hub.mode'] === 'subscribe' && vt && p['hub.verify_token'] === vt) {
+      return ContentService.createTextOutput(p['hub.challenge'] || '');
+    }
+    return ContentService.createTextOutput('Forbidden');
+  }
+
   var callback = p.callback || 'cb';
   var result;
   try {
@@ -127,6 +141,17 @@ function doPost(e) {
   var body;
   try { body = JSON.parse(e.postData.contents); }
   catch(ex) { return _jsonPost({ ok: false, error: 'Bad JSON body' }); }
+
+  // ── WhatsApp inbound webhook ────────────────────────────────────────────────
+  // Meta POSTs incoming customer messages here (object:'whatsapp_business_account').
+  // Handle it and always return a fast 200 so Meta doesn't retry. This is the
+  // auto-reply bot: a customer messaging us opens the 24h window, so we may reply
+  // with free-form text.
+  if (body && body.object === 'whatsapp_business_account') {
+    try { _handleWhatsAppWebhook(body); } catch (err) {}
+    return ContentService.createTextOutput('EVENT_RECEIVED');
+  }
+
   var result;
   try {
     switch (body.action || '') {
@@ -2238,6 +2263,54 @@ function handleSendWhatsApp(body) {
   var lang     = String((body && body.lang) || 'en_US').trim();
   var comps    = (body && body.components) || null;
   return _sendWhatsAppTemplate(to, template, lang, comps);
+}
+
+// ─── WHATSAPP AUTO-REPLY BOT (inbound webhook) ────────────────────────────────
+// Called from doPost when Meta delivers an inbound event. Walks the payload,
+// and for each genuine incoming *message* (not a delivery/read status) sends an
+// automatic reply. Because the customer just messaged us, we're inside the
+// 24-hour window, so a free-form text reply is allowed.
+//
+// Control via Script Properties:
+//   WA_AUTOREPLY_ENABLED  'false' turns the bot off (any other value / unset = on)
+//   WA_AUTOREPLY_TEXT     the reply message (falls back to a sensible default)
+function _handleWhatsAppWebhook(body) {
+  if (String(PropertiesService.getScriptProperties().getProperty('WA_AUTOREPLY_ENABLED') || 'true') === 'false') return;
+
+  var entries = body.entry || [];
+  for (var i = 0; i < entries.length; i++) {
+    var changes = (entries[i] && entries[i].changes) || [];
+    for (var j = 0; j < changes.length; j++) {
+      var value = (changes[j] && changes[j].value) || {};
+      var messages = value.messages || [];
+      if (!messages.length) continue;        // statuses (sent/delivered/read) — skip
+      for (var k = 0; k < messages.length; k++) {
+        var msg  = messages[k] || {};
+        var from = msg.from;                 // sender's WhatsApp number (full intl)
+        if (!from) continue;
+        if (_waSeen('msg_' + msg.id, 6 * 3600)) continue;   // Meta retries → dedupe
+        if (_waSeen('reply_' + from, 6 * 3600)) continue;   // reply at most once / 6h / sender
+        _sendWhatsAppText(from, _waAutoReplyText());
+      }
+    }
+  }
+}
+
+// Returns true if this key was already seen within the window, and marks it seen.
+// Backed by CacheService so it survives across the short webhook-retry window.
+function _waSeen(key, ttlSeconds) {
+  var cache = CacheService.getScriptCache();
+  var k = 'wa_' + key;
+  if (cache.get(k)) return true;
+  cache.put(k, '1', ttlSeconds);
+  return false;
+}
+
+function _waAutoReplyText() {
+  return PropertiesService.getScriptProperties().getProperty('WA_AUTOREPLY_TEXT') ||
+    'Namaste 🙏 Thank you for messaging Interio by Godrej, Patia. ' +
+    'We’ve received your message and our team will get back to you shortly. ' +
+    'For anything urgent, please call us. — 4S Interiors';
 }
 
 // Normalises a phone number for the Cloud API: digits only, no '+'. A bare
