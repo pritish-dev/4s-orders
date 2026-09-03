@@ -141,6 +141,7 @@ function doPost(e) {
       case 'saveLeagueScore': result = handleLeagueSaveScore(body);   break;
       case 'saveLeagueConfig':result = handleLeagueSaveConfig(body);  break;
       case 'addLead':         result = handleAddLead(body);           break;
+      case 'editLead':        result = handleEditLead(body);          break;
       default:                result = { ok: false, error: 'Unknown action: ' + body.action };
     }
   } catch(err) {
@@ -3482,6 +3483,65 @@ function handleAddLead(body) {
 
     _appendLog(by, '', 'ADD_LEAD', person + ' · ' + customer + (contact ? ' · ' + contact : ''));
     return { ok: true, slNo: String(slNo), scriptVersion: SCRIPT_VERSION };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
+  }
+}
+
+// Edit an existing lead in a salesperson's tab. The row is located by its SL NO
+// (which is stable — it never changes on add). Updates the date, customer, contact,
+// product details and amount in place. Used to correct a lead, or to re-open a
+// converted lead for new items (replace the product/amount and set the date to
+// today, so the lead's value reflects only the new, not-yet-converted items).
+function handleEditLead(body) {
+  var person   = String((body && (body.salesPerson || body.person)) || '').trim().toUpperCase();
+  var slNo     = String((body && body.slNo) || '').trim();
+  var customer = String((body && body.customer) || '').trim();
+  var contact  = String((body && body.contact)  || '').trim();
+  var product  = String((body && body.product)  || '').trim();
+  var amountIn = (body && body.amount != null) ? body.amount : '';
+  var dateIn   = String((body && body.date) || '').trim();
+  var by       = String((body && (body.by || body.createdBy)) || '').trim();
+
+  if (LEADS_PEOPLE.indexOf(person) < 0)
+    return { ok: false, error: 'Unknown sales person: ' + (person || '(blank)') };
+  if (!slNo)
+    return { ok: false, error: 'Missing lead reference (SL NO).' };
+  if (!customer && !contact)
+    return { ok: false, error: 'Enter at least a customer name or contact number.' };
+
+  var lock = LockService.getScriptLock();
+  var haveLock = false;
+  try { haveLock = lock.tryLock(15000); } catch (e) {}
+  try {
+    var sh = _leadsSheet(person, false);
+    if (!sh) return { ok: false, error: 'No leads sheet for ' + person };
+    var last = sh.getLastRow();
+    if (last < 2) return { ok: false, error: 'No leads to edit for ' + person };
+    var C = _leadCols(sh);
+    var ncol = Math.max(C.ncol, LEADS_HEADERS.length);
+    var vals = sh.getRange(2, 1, last - 1, ncol).getValues();
+    var target = -1;
+    for (var i = 0; i < vals.length; i++) {
+      var sv = (C.sl >= 0 && C.sl < vals[i].length) ? String(vals[i][C.sl]).trim() : '';
+      if (sv === slNo) { target = i; break; }
+    }
+    if (target < 0) return { ok: false, error: 'Lead #' + slNo + ' not found for ' + person };
+    var rowNum = target + 2;
+    var row = vals[target].slice();
+    while (row.length < ncol) row.push('');
+    function put(ci, val) { if (ci >= 0 && ci < ncol) row[ci] = val; }
+    if (dateIn) put(C.date, dateIn);
+    put(C.customer, customer);
+    put(C.contact, contact);
+    put(C.product, product);
+    put(C.amount, (amountIn === '' ? '' : (Number(amountIn) || amountIn)));
+    sh.getRange(rowNum, 1, 1, ncol).setValues([row]);
+
+    _appendLog(by, '', 'EDIT_LEAD', person + ' #' + slNo + ' · ' + customer + (contact ? ' · ' + contact : ''));
+    return { ok: true, slNo: slNo, scriptVersion: SCRIPT_VERSION };
   } catch (e) {
     return { ok: false, error: e.message };
   } finally {
