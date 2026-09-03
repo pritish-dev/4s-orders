@@ -2202,6 +2202,19 @@ function handleSetAppSerial(body) {
 //   template   template name       (default 'hello_world')
 //   lang       template language   (default 'en_US')
 //   components template variables — Meta "components" array, passed through as-is
+// ONE-TIME AUTHORIZATION HELPER. Run this once from the Apps Script editor
+// (pick "authorizeWhatsApp" in the function dropdown → Run) and approve the
+// consent dialog. It grants the script the "connect to an external service"
+// permission (script.external_request) that UrlFetchApp needs — a one-time step
+// only the script owner can do. Without it the web app returns
+// "You do not have permission to call UrlFetchApp.fetch". This sends nothing to
+// any customer; it just makes a harmless GET to trigger the permission prompt.
+function authorizeWhatsApp() {
+  var res = UrlFetchApp.fetch('https://graph.facebook.com/', { muteHttpExceptions: true });
+  Logger.log('External requests authorized — Graph API responded HTTP ' + res.getResponseCode());
+  return res.getResponseCode();
+}
+
 function handleSendWhatsApp(body) {
   var to = _waNormPhone(body && body.to);
   if (!to) return { ok: false, error: 'Enter a valid phone number.' };
