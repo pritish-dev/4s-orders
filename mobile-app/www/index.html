@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '76';
+  var V = '77';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -8595,6 +8595,12 @@ function SettingsScreen({ctx}) {
   const [pinging,setPinging]       = useState(false);
   const [debugResult,setDebugResult] = useState(null);
   const [debugging,setDebugging]   = useState(false);
+  // WhatsApp Cloud API test send (admin only) — proves the server→Meta pipe works.
+  const [waTo,setWaTo]             = useState('');
+  const [waTemplate,setWaTemplate] = useState('hello_world');
+  const [waLang,setWaLang]         = useState('en_US');
+  const [waSending,setWaSending]   = useState(false);
+  const [waResult,setWaResult]     = useState(null);
   const isAdmin = normRole(user?.role) === 'admin';
   // App-order serial counter (admin control)
   const [serial,setSerial]         = useState(null);   // {lastIssued,nextWillBe}
@@ -8635,6 +8641,19 @@ function SettingsScreen({ctx}) {
       else showToast(res?.error || 'Could not update the counter','bad');
     } catch(e) { showToast(e.message,'bad'); }
     finally { setSerialSaving(false); }
+  }
+
+  // Fire a single WhatsApp template message via the backend (Cloud API).
+  async function sendWhatsAppTest() {
+    const to = (waTo||'').trim();
+    if (!to) { showToast('Enter a phone number to send to','warn'); return; }
+    setWaSending(true); setWaResult(null);
+    try {
+      const res = await apiPost({ action:'sendWhatsApp', to, template:(waTemplate||'hello_world').trim(), lang:(waLang||'en_US').trim(), by:user?.code });
+      setWaResult(res);
+      showToast(res && res.ok ? 'WhatsApp sent ✓ — check the phone' : (res?.error || 'Send failed'), res && res.ok ? 'ok' : 'bad');
+    } catch(e) { setWaResult({ ok:false, error:e.message }); showToast(e.message,'bad'); }
+    finally { setWaSending(false); }
   }
 
   async function runDebug() {
@@ -8773,6 +8792,35 @@ function SettingsScreen({ctx}) {
                   style={{flex:1,border:`1px solid ${T.line}`,borderRadius:6,outline:'none',fontFamily:T.mono,fontSize:15,color:T.ink,background:'#fff',padding:'0 12px'}}/>
                 <Btn primary onClick={saveSerial} disabled={serialSaving}>{serialSaving?'Saving…':'Set number'}</Btn>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── WhatsApp Cloud API test send (admin only) ── */}
+        {isAdmin && (
+          <div style={{padding:'0 18px 14px'}}>
+            <div style={{fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:1.2,marginBottom:6}}>WHATSAPP CLOUD API — TEST SEND</div>
+            <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'14px'}}>
+              <div style={{fontSize:12,color:T.ink3,lineHeight:1.6,marginBottom:10}}>
+                Sends one <b>approved template</b> from the business number automatically (no manual tap). Set <b>WA_TOKEN</b> and <b>WA_PHONE_NUMBER_ID</b> in the Apps Script <b>Script Properties</b> first. The default <b>hello_world</b> template ships with every account — use it to prove the pipe works.
+              </div>
+              <input value={waTo} onChange={e=>setWaTo(e.target.value)}
+                type="tel" inputMode="tel" placeholder="Send to (e.g. 9876543210)"
+                style={{width:'100%',boxSizing:'border-box',border:`1px solid ${T.line}`,borderRadius:6,outline:'none',fontFamily:T.mono,fontSize:15,color:T.ink,background:'#fff',padding:'10px 12px',marginBottom:8}}/>
+              <div style={{display:'flex',gap:8,marginBottom:10}}>
+                <input value={waTemplate} onChange={e=>setWaTemplate(e.target.value)}
+                  placeholder="Template name" title="Template name"
+                  style={{flex:2,boxSizing:'border-box',border:`1px solid ${T.line}`,borderRadius:6,outline:'none',fontFamily:T.mono,fontSize:14,color:T.ink,background:'#fff',padding:'10px 12px'}}/>
+                <input value={waLang} onChange={e=>setWaLang(e.target.value)}
+                  placeholder="Lang" title="Template language code"
+                  style={{flex:1,boxSizing:'border-box',border:`1px solid ${T.line}`,borderRadius:6,outline:'none',fontFamily:T.mono,fontSize:14,color:T.ink,background:'#fff',padding:'10px 12px'}}/>
+              </div>
+              <Btn primary full icon={Icon.whatsapp&&Icon.whatsapp('#fff',15)} onClick={sendWhatsAppTest} disabled={waSending}>{waSending?'Sending…':'Send test WhatsApp'}</Btn>
+              {waResult && (
+                <div style={{marginTop:10,padding:'10px 12px',borderRadius:6,fontFamily:T.mono,fontSize:11,lineHeight:1.5,wordBreak:'break-word',background:waResult.ok?'#eaf7ee':(T.badSoft||'#fdecec'),color:waResult.ok?T.green:T.bad,border:`1px solid ${waResult.ok?T.green:T.bad}`}}>
+                  {waResult.ok ? ('Sent ✓  id: '+waResult.id) : ('Failed: '+(waResult.error||'unknown error'))}
+                </div>
+              )}
             </div>
           </div>
         )}

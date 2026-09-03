@@ -142,6 +142,7 @@ function doPost(e) {
       case 'saveLeagueConfig':result = handleLeagueSaveConfig(body);  break;
       case 'addLead':         result = handleAddLead(body);           break;
       case 'editLead':        result = handleEditLead(body);          break;
+      case 'sendWhatsApp':    result = handleSendWhatsApp(body);      break;
       default:                result = { ok: false, error: 'Unknown action: ' + body.action };
     }
   } catch(err) {
@@ -2177,6 +2178,90 @@ function handleSetAppSerial(body) {
     try { lock.releaseLock(); } catch (e) {}
   }
   return { ok: true, lastIssued: next - 1, nextWillBe: next };
+}
+
+// ─── WHATSAPP CLOUD API ───────────────────────────────────────────────────────
+// Sends a message through the WhatsApp Cloud API (Meta Graph API). Unlike the
+// wa.me links used elsewhere in the app — which only *open* WhatsApp with a
+// pre-filled message for a human to tap Send — this delivers automatically from
+// the business number, server-side, with no manual step.
+//
+// Credentials live in Script Properties (never in the client), the same place as
+// MASTER_SHEET_ID. Set once, per the API Setup page in Meta:
+//   WA_TOKEN            = permanent System User access token
+//   WA_PHONE_NUMBER_ID  = the Phone Number ID (NOT the phone number itself)
+// Optionally WA_API_VERSION (defaults to v22.0).
+//
+// Business-initiated messages must use a Meta-approved *template*. Every account
+// ships with the "hello_world" template (language en_US) — perfect to prove the
+// pipe works before you author your own. Free-form text is only allowed inside
+// the 24h window after the customer last messaged you.
+//
+// body: { to, template?, lang?, components? }
+//   to         phone number (10-digit Indian numbers get 91 prefixed; or full intl)
+//   template   template name       (default 'hello_world')
+//   lang       template language   (default 'en_US')
+//   components template variables — Meta "components" array, passed through as-is
+function handleSendWhatsApp(body) {
+  var to = _waNormPhone(body && body.to);
+  if (!to) return { ok: false, error: 'Enter a valid phone number.' };
+  var template = String((body && body.template) || 'hello_world').trim();
+  var lang     = String((body && body.lang) || 'en_US').trim();
+  var comps    = (body && body.components) || null;
+  return _sendWhatsAppTemplate(to, template, lang, comps);
+}
+
+// Normalises a phone number for the Cloud API: digits only, no '+'. A bare
+// 10-digit number is assumed Indian and gets 91 prefixed (matching the wa.me
+// links elsewhere). Returns '' if it can't be made into a plausible number.
+function _waNormPhone(raw) {
+  var d = String(raw == null ? '' : raw).replace(/[^0-9]/g, '');
+  if (!d) return '';
+  if (d.length === 10) d = '91' + d;                 // bare Indian mobile
+  else if (d.length === 11 && d.charAt(0) === '0') d = '91' + d.slice(1);
+  return (d.length >= 11 && d.length <= 15) ? d : '';
+}
+
+function _sendWhatsAppTemplate(to, template, lang, components) {
+  var props   = PropertiesService.getScriptProperties();
+  var token   = props.getProperty('WA_TOKEN');
+  var phoneId = props.getProperty('WA_PHONE_NUMBER_ID');
+  var version = props.getProperty('WA_API_VERSION') || 'v22.0';
+  if (!token || !phoneId) {
+    return { ok: false, error: 'WhatsApp not configured — set WA_TOKEN and WA_PHONE_NUMBER_ID in Script Properties.' };
+  }
+
+  var payload = {
+    messaging_product: 'whatsapp',
+    to: to,
+    type: 'template',
+    template: { name: template, language: { code: lang } }
+  };
+  if (components && components.length) payload.template.components = components;
+
+  var url = 'https://graph.facebook.com/' + version + '/' + phoneId + '/messages';
+  var res;
+  try {
+    res = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: 'Bearer ' + token },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    return { ok: false, error: 'Network error calling WhatsApp: ' + e.message };
+  }
+
+  var code = res.getResponseCode();
+  var text = res.getContentText();
+  var data; try { data = JSON.parse(text); } catch (e) { data = null; }
+
+  if (code >= 200 && code < 300 && data && data.messages && data.messages.length) {
+    return { ok: true, id: data.messages[0].id, to: to };
+  }
+  var err = (data && data.error && data.error.message) || ('HTTP ' + code + ': ' + text.slice(0, 200));
+  return { ok: false, error: err, code: code };
 }
 
 function _writeOrderToCRM(o) {
