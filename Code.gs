@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v55';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v56';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -3818,7 +3818,11 @@ function handleLeagueGet(p) {
     // as a JSON map { "yyyy-mm": { strikers:[…], titans:[…], captains:{…} } }.
     var rosters = {};
     try { rosters = JSON.parse(props.getProperty('LEAGUE_ROSTERS') || '{}') || {}; } catch (e) { rosters = {}; }
-    return { ok: true, scores: rows, monthlyTarget: target, weeklyTarget: wTarget, salesmanOfMonth: som, rosters: rosters, scriptVersion: SCRIPT_VERSION };
+    // Admin-adjustable point weights (per criterion). Only the keys the admin has
+    // overridden are stored; the client merges these over its built-in defaults.
+    var points = {};
+    try { points = JSON.parse(props.getProperty('LEAGUE_POINTS') || '{}') || {}; } catch (e) { points = {}; }
+    return { ok: true, scores: rows, monthlyTarget: target, weeklyTarget: wTarget, salesmanOfMonth: som, rosters: rosters, points: points, scriptVersion: SCRIPT_VERSION };
   } catch (e) { return { ok: false, error: e.message }; }
 }
 
@@ -3900,6 +3904,19 @@ function handleLeagueSaveConfig(body) {
         props.setProperty('LEAGUE_ROSTERS', JSON.stringify(rosters));
         _appendLog(by, '', 'LEAGUE_ROSTER', monthKey + ' S=' + rosters[monthKey].strikers.join('/') + ' T=' + rosters[monthKey].titans.join('/'));
       }
+    }
+    // Admin-adjustable point weights. Merge any provided keys over the stored map
+    // (validated against the known criteria; values rounded to whole points).
+    if (body && body.points && typeof body.points === 'object') {
+      var POINT_KEYS = ['salesConv','review','happyCalling','leadConv','teleConv','teleConvReview','followupMissed','timingPenalty','dressCode'];
+      var pts = {};
+      try { pts = JSON.parse(props.getProperty('LEAGUE_POINTS') || '{}') || {}; } catch (e) { pts = {}; }
+      POINT_KEYS.forEach(function (k) {
+        var v = body.points[k];
+        if (v !== undefined && v !== null && v !== '') pts[k] = Math.round(Number(v) || 0);
+      });
+      props.setProperty('LEAGUE_POINTS', JSON.stringify(pts));
+      _appendLog(by, '', 'LEAGUE_POINTS', JSON.stringify(pts));
     }
     _appendLog(by, '', 'LEAGUE_CONFIG', 'monthly=' + (body && body.monthlyTarget) + ' weekly=' + (body && body.weeklyTarget) + ' som=' + (body && body.salesmanOfMonth));
     return { ok: true, scriptVersion: SCRIPT_VERSION };

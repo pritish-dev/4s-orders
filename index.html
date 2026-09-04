@@ -2542,7 +2542,7 @@ function App() {
     try {
       const res = await apiGet('leagueScores', {}, 30000, 2);
       if (res && res.ok) {
-        const data = { scores: res.scores || [], monthlyTarget: Number(res.monthlyTarget)||0, weeklyTarget: Number(res.weeklyTarget)||0, salesmanOfMonth: res.salesmanOfMonth || '', rosters: (res.rosters && typeof res.rosters==='object') ? res.rosters : {} };
+        const data = { scores: res.scores || [], monthlyTarget: Number(res.monthlyTarget)||0, weeklyTarget: Number(res.weeklyTarget)||0, salesmanOfMonth: res.salesmanOfMonth || '', rosters: (res.rosters && typeof res.rosters==='object') ? res.rosters : {}, points: (res.points && typeof res.points==='object') ? res.points : {} };
         setLeague(data);
         localStorage.setItem('4s_league', JSON.stringify(data));
         return data;
@@ -3072,8 +3072,29 @@ const LEAGUE_TEAMS = [
     grad:'linear-gradient(160deg,#e23140 0%,#7a1420 100%)', tagline:'United We Play, Together We Win',
     players:[ {name:'SWATI',captain:true,match:'swati'}, {name:'ADITYA',match:'aditya'}, {name:'SAROJ',match:'saroj'} ] },
 ];
-// Point weights straight off the league rulebook.
+// Default point weights straight off the league rulebook. An admin can override
+// any of these from the app (the "Points system" editor); the overrides are kept
+// in the backend and merged over these defaults by leaguePts().
 const LEAGUE_PTS = { salesConv:1, review:1, happyCalling:1, teleConv:4, teleConvReview:6, leadConv:6, followupMissed:-1, timingPenalty:-1, dressCode:-1 };
+// Effective point weights = the defaults with the admin's saved overrides applied.
+function leaguePts(league){
+  const o=(league&&league.points)||{}; const out={...LEAGUE_PTS};
+  Object.keys(LEAGUE_PTS).forEach(k=>{ if(o[k]!==undefined&&o[k]!==null&&o[k]!=='') out[k]=Number(o[k])||0; });
+  return out;
+}
+// The point values an admin can adjust from the app. "Conversion" (a lead that
+// books an order) leads the list; the rest of the points system follows.
+const LEAGUE_PTS_EDITABLE = [
+  { key:'leadConv',       label:'Conversion (lead → order)', hint:'auto · matched to a lead by phone' },
+  { key:'salesConv',      label:'Sales conversion',          hint:'auto · per order booked (excl. B2B)' },
+  { key:'review',         label:'Review',                    hint:'manual' },
+  { key:'happyCalling',   label:'Happy calling',             hint:'auto · order with a Happy Code' },
+  { key:'followupMissed', label:'Missed follow-up',          hint:'manual · penalty' },
+  { key:'timingPenalty',  label:'Timing',                    hint:'manual · penalty' },
+  { key:'dressCode',      label:'Dress code',                hint:'manual · penalty' },
+];
+// "+6 points" / "−1 point" — a signed, pluralised points label for the rulebook.
+function _ptsTxt(n){ n=Number(n)||0; return (n>0?'+':'')+n+' point'+(Math.abs(n)===1?'':'s'); }
 // Normalise a phone number to its last 10 digits for lead↔order matching.
 function _normPhone(v){ const d=String(v||'').replace(/\D/g,''); return d.length>10 ? d.slice(-10) : d; }
 // Build { salesperson-match-key → Map(last-10-digit contact → earliest add-date) }
@@ -3099,12 +3120,10 @@ function leadContactMap(leads){
 // Happy calling is NOT here: it is now awarded automatically from orders that carry
 // a Happy Code (see leagueAuto), so it is no longer entered by hand.
 const LEAGUE_MANUAL_FIELDS = [
-  { key:'reviews',        label:'Reviews',            pts:'+1',  tone:'good' },
-  { key:'teleConv',       label:'Tele conv.',         pts:'+4',  tone:'good' },
-  { key:'teleConvReview', label:'Tele conv.+review',  pts:'+6',  tone:'good' },
-  { key:'followupMissed', label:'Missed follow-ups',  pts:'−1',  tone:'bad' },
-  { key:'timingPenalty',  label:'Timing',             pts:'−1',  tone:'bad' },
-  { key:'dressCode',      label:'Dress code',         pts:'−1',  tone:'bad' },
+  { key:'reviews',        ptsKey:'review',         label:'Reviews',           tone:'good' },
+  { key:'followupMissed', ptsKey:'followupMissed', label:'Missed follow-ups', tone:'bad'  },
+  { key:'timingPenalty',  ptsKey:'timingPenalty',  label:'Timing',            tone:'bad'  },
+  { key:'dressCode',      ptsKey:'dressCode',      label:'Dress code',        tone:'bad'  },
 ];
 const _pad2 = n => String(n).padStart(2,'0');
 function _isoOf(d){ return d.getFullYear()+'-'+_pad2(d.getMonth()+1)+'-'+_pad2(d.getDate()); }
@@ -3211,6 +3230,7 @@ function leagueManualSum(scores, playerName, startISO, endISO){
 // a {startISO,endISO,year,month,days} window.
 function computeWeek(orders, league, teams, win, leadMap){
   leadMap = leadMap || {};
+  const PTS = leaguePts(league);                                  // effective (admin-adjustable) point weights
   const monthlyTarget = Number(league&&league.monthlyTarget)||0;
   const weeklyTarget  = Number(league&&league.weeklyTarget)||0;   // whole-showroom weekly target (admin-set)
   const scores = (league&&league.scores)||[];
@@ -3226,15 +3246,13 @@ function computeWeek(orders, league, teams, win, leadMap){
     const players = team.players.map(pl=>{
       const auto = leagueAuto(orders, pl.match, win.startISO, win.endISO, leadMap[pl.match]);
       const man  = leagueManualSum(scores, pl.name, win.startISO, win.endISO);
-      const pts = auto.orderCount*LEAGUE_PTS.salesConv
-        + man.reviews*LEAGUE_PTS.review
-        + auto.happyCalls*LEAGUE_PTS.happyCalling   // happy calling is now automatic (orders with a Happy Code)
-        + auto.leadConv*LEAGUE_PTS.leadConv         // +6 per converted lead (order matched to a lead by phone)
-        + man.teleConv*LEAGUE_PTS.teleConv
-        + man.teleConvReview*LEAGUE_PTS.teleConvReview
-        + man.followupMissed*LEAGUE_PTS.followupMissed
-        + man.timingPenalty*LEAGUE_PTS.timingPenalty
-        + man.dressCode*LEAGUE_PTS.dressCode;
+      const pts = auto.orderCount*PTS.salesConv
+        + man.reviews*PTS.review
+        + auto.happyCalls*PTS.happyCalling          // happy calling is automatic (orders with a Happy Code)
+        + auto.leadConv*PTS.leadConv                // per converted lead (order matched to a lead by phone)
+        + man.followupMissed*PTS.followupMissed
+        + man.timingPenalty*PTS.timingPenalty
+        + man.dressCode*PTS.dressCode;
       return { ...pl, auto, man, pts };
     });
     const teamBasic  = players.reduce((s,p)=>s+p.auto.basic,0);
@@ -3293,7 +3311,8 @@ function LeagueAvatar({name, team, size=34, captain}) {
 }
 
 // One team's cricket-style scorecard.
-function LeagueTeamCard({team, isLeader, decided}) {
+function LeagueTeamCard({team, isLeader, decided, pts}) {
+  const convPts = (pts&&pts.leadConv!=null) ? pts.leadConv : LEAGUE_PTS.leadConv;
   return (
     <div style={{borderRadius:14,overflow:'hidden',border:`1px solid ${T.line}`,background:'#fff',boxShadow:'0 2px 10px rgba(0,0,0,.05)'}}>
       {/* Header band with crest + total */}
@@ -3326,11 +3345,11 @@ function LeagueTeamCard({team, isLeader, decided}) {
       </div>
       {/* Batting-card style player rows */}
       <div>
-        <div style={{display:'grid',gridTemplateColumns:'1.5fr repeat(5,1fr) auto',gap:4,padding:'7px 12px',fontSize:9,fontWeight:800,letterSpacing:.4,color:T.ink4,borderBottom:`1px solid ${T.line}`,textTransform:'uppercase'}}>
-          <span>Batter</span><span style={{textAlign:'center'}}>Ord</span><span style={{textAlign:'center'}} title="Happy calling — orders with a Happy Code (auto)">Hpy</span><span style={{textAlign:'center'}}>Rev</span><span style={{textAlign:'center'}}>Tele</span><span style={{textAlign:'center'}} title="Lead conversions — orders matched to a lead you added (auto, +6 each)">Conv</span><span style={{textAlign:'right'}}>Pts</span>
+        <div style={{display:'grid',gridTemplateColumns:'1.5fr repeat(4,1fr) auto',gap:4,padding:'7px 12px',fontSize:9,fontWeight:800,letterSpacing:.4,color:T.ink4,borderBottom:`1px solid ${T.line}`,textTransform:'uppercase'}}>
+          <span>Batter</span><span style={{textAlign:'center'}}>Ord</span><span style={{textAlign:'center'}} title="Happy calling — orders with a Happy Code (auto)">Hpy</span><span style={{textAlign:'center'}}>Rev</span><span style={{textAlign:'center'}} title={"Lead conversions — orders matched to a lead you added (auto, +"+convPts+" each)"}>Conv</span><span style={{textAlign:'right'}}>Pts</span>
         </div>
         {team.players.map((p,i)=>(
-          <div key={p.name} style={{display:'grid',gridTemplateColumns:'1.5fr repeat(5,1fr) auto',gap:4,padding:'9px 12px',alignItems:'center',borderBottom:i<team.players.length-1?`1px solid ${T.line}`:'none'}}>
+          <div key={p.name} style={{display:'grid',gridTemplateColumns:'1.5fr repeat(4,1fr) auto',gap:4,padding:'9px 12px',alignItems:'center',borderBottom:i<team.players.length-1?`1px solid ${T.line}`:'none'}}>
             <div style={{display:'flex',alignItems:'center',gap:8,minWidth:0}}>
               <LeagueAvatar name={p.name} team={team} size={30} captain={p.captain}/>
               <div style={{minWidth:0}}>
@@ -3341,8 +3360,7 @@ function LeagueTeamCard({team, isLeader, decided}) {
             <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.auto.orderCount}</span>
             <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.auto.happyCalls}</span>
             <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.man.reviews}</span>
-            <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.man.teleConv+p.man.teleConvReview}</span>
-            <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:800,color:p.auto.leadConv>0?T.green:T.ink2}} title={p.auto.leadConv>0?('+'+(p.auto.leadConv*6)+' pts from lead conversions'):''}>{p.auto.leadConv}</span>
+            <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:800,color:p.auto.leadConv>0?T.green:T.ink2}} title={p.auto.leadConv>0?('+'+(p.auto.leadConv*convPts)+' pts from lead conversions'):''}>{p.auto.leadConv}</span>
             <span style={{textAlign:'right',fontFamily:T.mono,fontSize:14,fontWeight:900,color:team.accent}}>{p.pts}</span>
           </div>
         ))}
@@ -3359,7 +3377,8 @@ function LeagueTeamCard({team, isLeader, decided}) {
 function LeagueScreen({ctx}) {
   const {user,orders,league,leads,nav,loadLeague,leagueLoading,doSaveLeagueScore,doSaveLeagueConfig} = ctx;
   const canEdit = hasManagerAccess(user);         // manager or admin
-  const leadMap = React.useMemo(()=>leadContactMap(leads),[leads]);  // player → lead phones (for +6 conversions)
+  const PTS = React.useMemo(()=>leaguePts(league),[league&&league.points]);   // effective (admin-adjustable) point weights
+  const leadMap = React.useMemo(()=>leadContactMap(leads),[leads]);  // player → lead phones (for conversions)
   const [monthOff,setMonthOff] = useState(0);     // 0 = this month's season
   const [weekSel,setWeekSel]   = useState(null);  // selected weekly battle (idx); null → auto
   const [showRules,setShowRules] = useState(false);
@@ -3393,6 +3412,11 @@ function LeagueScreen({ctx}) {
   const [weeklyTarget,setWeeklyTarget]   = useState(String((league&&league.weeklyTarget)||''));
   const [som,setSom] = useState((league&&league.salesmanOfMonth)||'');
   useEffect(()=>{ setMonthlyTarget(String((league&&league.monthlyTarget)||'')); setWeeklyTarget(String((league&&league.weeklyTarget)||'')); setSom((league&&league.salesmanOfMonth)||''); },[league&&league.monthlyTarget,league&&league.weeklyTarget,league&&league.salesmanOfMonth]);
+  // ── Points-system editor (admin adjusts the points per criterion) ──
+  const [ptsDraft,setPtsDraft] = useState({});
+  const [savingPts,setSavingPts] = useState(false);
+  useEffect(()=>{ const s={}; LEAGUE_PTS_EDITABLE.forEach(f=>s[f.key]=String(PTS[f.key])); setPtsDraft(s); },[league&&league.points]);
+  async function savePoints(){ setSavingPts(true); const points={}; LEAGUE_PTS_EDITABLE.forEach(f=>{ points[f.key]=Math.round(Number(ptsDraft[f.key])||0); }); await doSaveLeagueConfig({points}); setSavingPts(false); }
   // Existing manual entry for a given (date, player), so the inputs pre-fill.
   function entryFor(date,player){
     return ((league&&league.scores)||[]).find(s=>String(s.date||'').slice(0,10)===date && String(s.player||'').trim().toLowerCase()===player.toLowerCase()) || {};
@@ -3421,7 +3445,7 @@ function LeagueScreen({ctx}) {
   // Counter step: +1 / −1 a manual criterion, clamped at 0 (never negative counts).
   function setDraftDelta(player,key,delta){ setDraftRows(p=>{ const cur=Number((p[player]||{})[key])||0; const next=Math.max(0,cur+delta); return {...p,[player]:{...(p[player]||{}),[key]:String(next)}}; }); }
   // Live points from the current (unsaved) draft, so the admin sees the tally build.
-  function draftManualPts(player){ const dr=draftRows[player]||{}; return (Number(dr.reviews)||0)*LEAGUE_PTS.review + (Number(dr.teleConv)||0)*LEAGUE_PTS.teleConv + (Number(dr.teleConvReview)||0)*LEAGUE_PTS.teleConvReview + (Number(dr.followupMissed)||0)*LEAGUE_PTS.followupMissed + (Number(dr.timingPenalty)||0)*LEAGUE_PTS.timingPenalty + (Number(dr.dressCode)||0)*LEAGUE_PTS.dressCode; }
+  function draftManualPts(player){ const dr=draftRows[player]||{}; return (Number(dr.reviews)||0)*PTS.review + (Number(dr.followupMissed)||0)*PTS.followupMissed + (Number(dr.timingPenalty)||0)*PTS.timingPenalty + (Number(dr.dressCode)||0)*PTS.dressCode; }
 
   // ── Monthly team-roster editor (admin — teams can be re-picked once a month) ──
   const rosterSet = !!((league&&league.rosters)||{})[mo.monthKey];   // custom roster already set this month?
@@ -3556,9 +3580,9 @@ function LeagueScreen({ctx}) {
 
         {/* Two team scorecards for the selected week */}
         <div style={{padding:'8px 16px',display:'flex',flexDirection:'column',gap:12}}>
-          <LeagueTeamCard team={a} isLeader={wstd.leader===a} decided={decided}/>
+          <LeagueTeamCard team={a} isLeader={wstd.leader===a} decided={decided} pts={PTS}/>
           <div style={{textAlign:'center',fontSize:13,fontWeight:900,color:T.ink4,letterSpacing:2}}>— VS —</div>
-          <LeagueTeamCard team={b} isLeader={wstd.leader===b} decided={decided}/>
+          <LeagueTeamCard team={b} isLeader={wstd.leader===b} decided={decided} pts={PTS}/>
         </div>
 
         {/* Awards — Orange & Purple caps are decided over the whole monthly run */}
@@ -3601,14 +3625,12 @@ function LeagueScreen({ctx}) {
                 ['Monthly season','runs from the 1st to the last day of every month'],
                 ['Weekly battles','the month is split into weeks from the 1st; each week is a battle between the two teams'],
                 ['Winner of the month','the team that wins the most weekly battles takes the month'],
-                ['Each sales conversion','+1 point (auto from orders, excl. B2B)'],
-                ['Each review','+1 point'],
+                ['Each sales conversion',_ptsTxt(PTS.salesConv)+' (auto from orders, excl. B2B)'],
+                ['Each review',_ptsTxt(PTS.review)],
                 ['Total sales value (basic) %','team score = % of target achieved (100% → 100 pts)'],
-                ['Negative points','−1 each for missed follow-ups, timings, dress code / presentation'],
-                ['Happy calling','+1 point per order with a Happy Code (auto)'],
-                ['Lead converted','+6 points when a lead you added books an order (auto, matched by phone)'],
-                ['Tele-calling / leads follow-up + conversion','+4 bonus points'],
-                ['Tele-calling + conversion + review','+6 bonus points'],
+                ['Negative points',_ptsTxt(PTS.followupMissed)+' missed follow-ups, '+_ptsTxt(PTS.timingPenalty)+' timings, '+_ptsTxt(PTS.dressCode)+' dress code / presentation'],
+                ['Happy calling',_ptsTxt(PTS.happyCalling)+' per order with a Happy Code (auto)'],
+                ['Lead converted',_ptsTxt(PTS.leadConv)+' when a lead you added books an order (auto, matched by phone)'],
                 ['Orange & Purple cap','decided over the whole month — top sales value & most orders'],
               ].map((r,i,arr)=>(
                 <div key={i} style={{display:'flex',gap:8,padding:'6px 0',borderBottom:i<arr.length-1?`1px solid ${T.line}`:'none'}}>
@@ -3698,6 +3720,25 @@ function LeagueScreen({ctx}) {
                     <button onClick={()=>doSaveLeagueConfig({salesmanOfMonth:som})} style={{flexShrink:0,height:32,padding:'0 12px',borderRadius:6,background:T.green,color:'#fff',border:'none',fontSize:12,fontWeight:700,cursor:'pointer'}}>Save</button>
                   </div>
                 </div>
+                {/* Points system — admin adjusts the points each criterion is worth */}
+                <div style={{border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px',marginBottom:12,background:T.paper2||'#f7f7f8'}}>
+                  <div style={{fontSize:11,fontWeight:800,color:T.ink,letterSpacing:.3}}>🎯 POINTS SYSTEM</div>
+                  <div style={{fontSize:9.5,color:T.ink4,margin:'1px 0 8px'}}>Set how many points each criterion is worth — Conversion leads the list. Penalties use negative values. Applies to the whole league instantly.</div>
+                  {LEAGUE_PTS_EDITABLE.map(f=>(
+                    <div key={f.key} style={{display:'flex',alignItems:'center',gap:8,padding:'6px 0',borderBottom:`1px solid ${T.line}`}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:11.5,fontWeight:700,color:T.ink}}>{f.label}</div>
+                        <div style={{fontSize:9,color:T.ink4}}>{f.hint}</div>
+                      </div>
+                      <input type="number" value={ptsDraft[f.key]!==undefined?ptsDraft[f.key]:''} onChange={e=>setPtsDraft(d=>({...d,[f.key]:e.target.value}))} style={{width:64,height:32,border:`1px solid ${T.line}`,borderRadius:6,textAlign:'center',fontFamily:T.mono,fontSize:14,fontWeight:800,color:T.ink}}/>
+                      <span style={{fontSize:9,color:T.ink4,width:22}}>pts</span>
+                    </div>
+                  ))}
+                  <div style={{display:'flex',gap:8,marginTop:10}}>
+                    <button onClick={savePoints} disabled={savingPts} style={{flex:1,height:34,borderRadius:6,background:T.green,color:'#fff',border:'none',fontSize:12,fontWeight:800,cursor:'pointer',opacity:savingPts?.6:1}}>{savingPts?'Saving…':'Save points system'}</button>
+                    <button onClick={()=>{const s={};LEAGUE_PTS_EDITABLE.forEach(f=>s[f.key]=String(LEAGUE_PTS[f.key]));setPtsDraft(s);}} title="Fill inputs with the default values (still needs Save)" style={{flexShrink:0,height:34,padding:'0 12px',borderRadius:6,background:'#fff',color:T.ink3,border:`1px solid ${T.line}`,fontSize:12,fontWeight:700,cursor:'pointer'}}>Defaults</button>
+                  </div>
+                </div>
                 <div style={{fontSize:11,color:T.ink4,background:T.paper2||'#f7f7f8',borderRadius:6,padding:'7px 10px',marginBottom:12}}>Both targets are the <b>whole-showroom</b> basic value and are split equally between the two teams. A <b>weekly target</b>, if set, is used for the weekly battle's sales-value % (it wins over the monthly target — set it each week from last week's performance); leave it blank/clear to auto-derive from the monthly target. Orders &amp; sales value are pulled automatically (B2B orders are excluded). Fill the daily manual criteria below — pick the date, fill each player, Save. The board updates instantly.</div>
                 {/* Date */}
                 <label style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.5}}>SCORE DATE</label>
@@ -3725,7 +3766,7 @@ function LeagueScreen({ctx}) {
                             <div key={f.key} style={{display:'flex',alignItems:'center',gap:8,padding:'5px 8px',background:val>0?(bad?(T.badSoft||'#fdecec'):(T.greenSoft||'#eaf6ee')):(T.paper2||'#f7f7f8'),border:`1px solid ${val>0?(bad?T.bad:T.green):T.line}`,borderRadius:8}}>
                               <div style={{flex:1,minWidth:0}}>
                                 <div style={{fontSize:11,fontWeight:700,color:bad?T.bad:T.ink2,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{f.label}</div>
-                                <div style={{fontSize:9,color:T.ink4}}>{f.pts} pt each</div>
+                                <div style={{fontSize:9,color:T.ink4}}>{(PTS[f.ptsKey]>0?'+':'')}{PTS[f.ptsKey]} pt each</div>
                               </div>
                               <button onClick={()=>setDraftDelta(pl.name,f.key,-1)} disabled={val<=0} title="Remove one" style={{width:30,height:30,borderRadius:99,border:`1.5px solid ${val<=0?T.line:T.bad}`,background:'#fff',color:val<=0?T.ink4:T.bad,fontSize:19,fontWeight:800,lineHeight:1,cursor:val<=0?'default':'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>−</button>
                               <span style={{minWidth:26,textAlign:'center',fontFamily:T.mono,fontSize:16,fontWeight:900,color:T.ink}}>{val}</span>
