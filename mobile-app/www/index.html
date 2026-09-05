@@ -776,7 +776,11 @@ function Btn({children,primary,danger,ghost,full,size='md',icon,onClick,disabled
   if(danger){bg=T.bad;fg='#fff';bd=T.bad;}
   if(ghost){bg='transparent';fg=T.ink;bd='transparent';}
   if(disabled){bg=T.paper2;fg=T.ink4;bd=T.line;}
-  return <button type={type} onClick={onClick} disabled={disabled} style={{height:h,padding:'0 16px',borderRadius:6,background:bg,color:fg,border:`1px solid ${bd}`,fontFamily:T.sans,fontWeight:600,fontSize:fs,letterSpacing:-0.1,width:full?'100%':undefined,cursor:disabled?'not-allowed':'pointer',display:'inline-flex',alignItems:'center',justifyContent:'center',gap:8,flexShrink:0,opacity:disabled?.5:1}}>{icon}{children}</button>;
+  // A soft shadow on the solid buttons gives the app a lifted, premium feel; the
+  // plain / ghost buttons stay flat so they recede next to a primary action.
+  const shadow = disabled ? 'none' : (primary ? '0 6px 16px rgba(240,64,64,.28)' : danger ? '0 6px 16px rgba(155,41,23,.24)' : 'none');
+  const radius = size==='lg'?12:10;
+  return <button type={type} onClick={onClick} disabled={disabled} style={{height:h,padding:'0 18px',borderRadius:radius,background:bg,color:fg,border:`1px solid ${bd}`,fontFamily:T.sans,fontWeight:700,fontSize:fs,letterSpacing:-0.1,width:full?'100%':undefined,cursor:disabled?'not-allowed':'pointer',display:'inline-flex',alignItems:'center',justifyContent:'center',gap:8,flexShrink:0,opacity:disabled?.5:1,boxShadow:shadow,transition:'box-shadow .15s,transform .05s',WebkitTapHighlightColor:'transparent'}}>{icon}{children}</button>;
 }
 
 function Field({label,value,onChange,mono,hint,required,action,onAction,multiline,type='text',placeholder,readOnly,error}) {
@@ -882,6 +886,81 @@ function SectionHead({n,label,action,onAction,id}) {
   // scrollMarginTop keeps the heading clear of the sticky progress bar when the
   // validation summary / progress chips scroll a section into view.
   return <div id={id} style={{padding:'14px 16px 6px',display:'flex',alignItems:'baseline',justifyContent:'space-between',background:T.paper,scrollMarginTop:52}}><div style={{display:'flex',alignItems:'baseline',gap:8}}><span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:700}}>{n}</span><span style={{fontSize:12,fontWeight:700,color:T.ink2,letterSpacing:1,textTransform:'uppercase'}}>{label}</span></div>{action&&<span onClick={onAction} style={{fontSize:11,color:T.green,fontWeight:700,cursor:'pointer'}}>{action}</span>}</div>;
+}
+
+// A collapsible section header for the order form. Clicking toggles the section
+// open/closed; the number badge turns into a green ✓ once the section's required
+// fields are all filled. `disabled` renders a muted, non-expandable header (used
+// by the Measurement section when the chosen items need no measurement).
+function AccordionHead({secKey,n,label,open,onToggle,done,disabled,note,action,onAction}) {
+  const badgeBg = disabled ? T.paper2 : done ? T.green : open ? T.ink : T.paper2;
+  const badgeFg = disabled ? T.ink4 : (done||open) ? '#fff' : T.ink4;
+  return (
+    <div id={'sec-'+secKey} style={{scrollMarginTop:52}}>
+      <div onClick={disabled?undefined:onToggle}
+        style={{display:'flex',alignItems:'center',gap:11,padding:'14px 16px',background:open&&!disabled?T.card:T.paper,borderTop:`1px solid ${T.line}`,borderBottom:open&&!disabled?'none':`1px solid ${T.line}`,cursor:disabled?'default':'pointer',userSelect:'none',transition:'background .15s'}}>
+        <span style={{width:24,height:24,borderRadius:8,flexShrink:0,display:'inline-flex',alignItems:'center',justifyContent:'center',background:badgeBg,color:badgeFg,fontFamily:T.mono,fontSize:11,fontWeight:800,border:(done||open)&&!disabled?'none':`1px solid ${T.line}`}}>{disabled?'–':done?'✓':n}</span>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:13.5,fontWeight:800,color:disabled?T.ink4:T.ink,letterSpacing:0.2}}>{label}</div>
+          {note&&<div style={{fontSize:11,color:T.ink4,marginTop:2}}>{note}</div>}
+        </div>
+        {action&&open&&!disabled&&<span onClick={e=>{e.stopPropagation();onAction&&onAction();}} style={{fontSize:11,color:T.green,fontWeight:700,cursor:'pointer'}}>{action}</span>}
+        {!disabled&&<span style={{fontSize:19,lineHeight:1,color:T.ink4,transform:open?'rotate(90deg)':'none',transition:'transform .18s',flexShrink:0,width:16,textAlign:'center'}}>›</span>}
+      </div>
+    </div>
+  );
+}
+
+// Day + Month picker (no year). Birthdays & anniversaries are stored as "DD/MM"
+// only — the year is never captured. Reads back legacy full-date values
+// (yyyy-MM-dd, or anything Sheets round-tripped as a real date) and shows only
+// their day & month, so old records display correctly without exposing a year.
+function parseDayMonth(v){
+  const s = String(v||'').trim();
+  if(!s) return {d:'',m:''};
+  let iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);            // legacy yyyy-mm-dd
+  if(iso) return {d:String(Number(iso[3])), m:String(Number(iso[2]))};
+  let dm = s.match(/^(\d{1,2})[\/\-](\d{1,2})$/);               // DD/MM (or DD-MM)
+  if(dm) return {d:String(Number(dm[1])), m:String(Number(dm[2]))};
+  const dt = new Date(s);                                        // any other date-ish string
+  if(!isNaN(dt.getTime())) return {d:String(dt.getDate()), m:String(dt.getMonth()+1)};
+  return {d:'',m:''};
+}
+function DayMonthField({label,value,onChange,hint,required}){
+  const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  // Local state is the source of truth for the two selects so a half-made choice
+  // (day picked, month not yet) isn't wiped. We re-sync from the incoming value
+  // whenever it changes (e.g. CRM autofill, or loading a saved order).
+  const init = parseDayMonth(value);
+  const [d,setD] = React.useState(init.d);
+  const [m,setM] = React.useState(init.m);
+  React.useEffect(()=>{ const p=parseDayMonth(value); setD(p.d); setM(p.m); },[value]);
+  const daysInMonth = m ? new Date(2024, Number(m), 0).getDate() : 31;   // 2024 = leap year → Feb 29 allowed
+  const commit = (nd,nm)=>{
+    let dd = nd ? Number(nd) : 0, mm = nm ? Number(nm) : 0;
+    if(dd&&mm){ const max = new Date(2024, mm, 0).getDate(); if(dd>max) dd=max; }   // clamp e.g. 31 Feb → 29
+    setD(dd?String(dd):''); setM(mm?String(mm):'');
+    if(dd&&mm) onChange(String(dd).padStart(2,'0')+'/'+String(mm).padStart(2,'0'));
+    else if(value) onChange('');   // a stored value existed and was made incomplete → clear it
+    // else: fresh field, only one half chosen so far — hold it locally, emit nothing yet
+  };
+  const selStyle = {flex:1,minWidth:0,border:`1px solid ${T.line}`,borderRadius:10,padding:'10px 12px',fontSize:15,fontFamily:T.sans,fontWeight:600,color:(d||m)?T.ink:T.ink4,background:T.paper,appearance:'none',WebkitAppearance:'none',cursor:'pointer',outline:'none'};
+  return (
+    <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+      <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:7}}>{label}{required&&<span style={{color:T.bad,marginLeft:3}}>*</span>}</div>
+      <div style={{display:'flex',gap:8}}>
+        <select value={d} onChange={e=>commit(e.target.value, m)} style={selStyle}>
+          <option value="">Day</option>
+          {Array.from({length:daysInMonth},(_,i)=>i+1).map(n=><option key={n} value={n}>{n}</option>)}
+        </select>
+        <select value={m} onChange={e=>commit(d, e.target.value)} style={{...selStyle,flex:1.4}}>
+          <option value="">Month</option>
+          {MONTH_NAMES.map((nm,i)=><option key={i} value={i+1}>{nm}</option>)}
+        </select>
+      </div>
+      {hint&&<div style={{fontSize:11,color:T.ink4,marginTop:4}}>{hint}</div>}
+    </div>
+  );
 }
 
 function Spinner({size=20,color=T.green}) {
@@ -2001,7 +2080,11 @@ function normalizeLoadedOrder(o) {
     const up   = mrp > 0 ? Math.round(mrp * (1 - (parseFloat(disc) || 0) / 100)) : (Number(it.unitPrice) || 0);
     return { ...it, disc, unitPrice: up, total: up * qty };
   });
-  return { ...o, orderDiscount: fixPct(o.orderDiscount), items };
+  // Birthdays & anniversaries are day+month only. Collapse any legacy full-date
+  // value (with a year) down to "DD/MM" on load, so even re-saving an untouched
+  // old order drops the year instead of writing it back.
+  const dmOnly = v => { const p = parseDayMonth(v); return (p.d && p.m) ? (String(p.d).padStart(2,'0') + '/' + String(p.m).padStart(2,'0')) : ''; };
+  return { ...o, orderDiscount: fixPct(o.orderDiscount), items, dob: dmOnly(o.dob), anniversary: dmOnly(o.anniversary) };
 }
 
 // Next auto Receipt No = a running counter of APP-booked orders. It is the highest
@@ -4537,7 +4620,7 @@ function HomeScreen({ctx}) {
               <div style={{minWidth:0}}>
                 <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3}}>
                   <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
-                  {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:<Pill tone="warn" size="sm">WON?</Pill>}
+                  {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:(isPendingWon(o)?<Pill tone="warn" size="sm">WON?</Pill>:null)}
                 </div>
                 <div style={{fontSize:13,fontWeight:600,color:T.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{o.customer}</div>
                 <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:1}}>{o.date} · {o.salesExec}</div>
@@ -5361,8 +5444,8 @@ function OrderFormScreen({ctx, viewOnly}) {
             email:    fill('email',    m.email),
             gstNumber:fill('gstNumber',m.gstNumber),
             alt:      fill('alt',      m.alt),
-            dob:      fill('dob',      m.dob),
-            anniversary: fill('anniversary', m.anniversary),
+            dob:      fill('dob',      (p=>p.d&&p.m?String(p.d).padStart(2,'0')+'/'+String(p.m).padStart(2,'0'):'')(parseDayMonth(m.dob))),
+            anniversary: fill('anniversary', (p=>p.d&&p.m?String(p.d).padStart(2,'0')+'/'+String(p.m).padStart(2,'0'):'')(parseDayMonth(m.anniversary))),
             // Repeat customer → set the purchase pattern from their order history
             // (authoritative: it reflects the real count, overriding any stale pick).
             purchasePattern: pattern ? [pattern] : curPat,
@@ -5392,7 +5475,21 @@ function OrderFormScreen({ctx, viewOnly}) {
   // Guided-form: once the user has tried to save, the validation summary + step
   // progress stay live so they can see what's left and jump straight to it.
   const [triedSave,setTriedSave] = React.useState(false);
-  const scrollToSec = sec => { try{ const el=document.getElementById('sec-'+sec); if(el) el.scrollIntoView({behavior:'smooth',block:'start'}); }catch(e){} };
+  // ── Collapsible form sections ────────────────────────────────────────────
+  // The form is split into expandable sections; Customer is open on load and the
+  // rest stay collapsed until tapped, so a new order reads as one clear step at a
+  // time. A section's error keys (from collectErrors) map here so scrolling to an
+  // error — or the "rooms" sub-section — opens the right parent section first.
+  const SEC_OF_ERR = { customer:'customer', address:'address', items:'items', measure:'measure', rooms:'measure', commercial:'commercial', payment:'payment', internal:'internal' };
+  const [openSecs,setOpenSecs] = React.useState(()=> viewOnly ? {customer:true,address:true,items:true,measure:true,commercial:true,payment:true,internal:true} : {customer:true});
+  const toggleSec = k => setOpenSecs(p=>({...p,[k]:!p[k]}));
+  const openSection = k => setOpenSecs(p=> p[k] ? p : {...p,[k]:true});
+  const scrollToSec = sec => {
+    const parent = SEC_OF_ERR[sec] || sec;
+    openSection(parent);
+    // Let the section expand before scrolling its header into view.
+    try{ setTimeout(()=>{ const el=document.getElementById('sec-'+sec)||document.getElementById('sec-'+parent); if(el) el.scrollIntoView({behavior:'smooth',block:'start'}); },40); }catch(e){}
+  };
 
   // Manager / Admin see cost + margin; Sales does not.
   const priv        = hasManagerAccess(user);
@@ -5423,6 +5520,10 @@ function OrderFormScreen({ctx, viewOnly}) {
   // Staircase measurements are only needed for a SOFA when there is NO lift AND
   // the delivery is above the ground floor.
   const needStaircase = hasSofa && o.liftAvailable==='No' && !isGroundFloor;
+  // Measurements are compulsory only for a sofa or a modular wardrobe. For any
+  // other item mix the whole Measurement section is "not applicable" — shown as a
+  // muted, non-expandable header rather than a set of empty fields.
+  const needsMeasurement = hasSofa || hasWardrobe;
 
   // ── Multi-block measurement state ──────────────────────────────────────
   // Normalise older orders (single wardrobe scalars) into the wardrobes[] /
@@ -5542,8 +5643,8 @@ function OrderFormScreen({ctx, viewOnly}) {
     // Order No and Receipt No — never re-prompt for them on an edit, only require
     // them when creating a brand-new order.
     const isExistingOrder = !!(String(o.no||'').trim() || o.internalNo);
-    if(!isExistingOrder && (!o.slNo||!String(o.slNo).trim())) add('internal','SI No is required');
-    if(!isExistingOrder && o.manualOrder && (!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim())) add('internal','Receipt No is required for a manual order');
+    if(!isExistingOrder && (!o.slNo||!String(o.slNo).trim())) add('commercial','SI No is required');
+    if(!isExistingOrder && o.manualOrder && (!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim())) add('commercial','Receipt No is required for a manual order');
     if(!o.paymentMode||!String(o.paymentMode).trim()) add('payment','Select the Payment Mode');
     // Finance-scheme (Pine Labs / Bajaj Finance) bookings don't use money receipts.
     if(!isFinanceScheme(o) && (!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim())) add('payment','Money Receipt No is required');
@@ -5675,9 +5776,14 @@ function OrderFormScreen({ctx, viewOnly}) {
 
   // Live validation state drives the step progress bar and the save summary.
   const liveErrors = collectErrors();
-  const STEPS = [['customer','Customer'],['address','Address'],['measure','Measure'],['items','Items'],['payment','Payment']];
-  const stepSecs = { customer:['customer'], address:['address'], measure:['measure','rooms'], items:['items'], payment:['payment','internal'] };
+  const STEPS = [['customer','Customer'],['address','Address'],['items','Items'],['measure','Measure'],['payment','Payment']];
+  const stepSecs = { customer:['customer'], address:['address'], items:['items'], measure:['measure','rooms'], payment:['payment','commercial','internal'] };
   const stepDone = k => !liveErrors.some(e => stepSecs[k].includes(e.sec));
+  // A collapsible section is "done" (green ✓) when it owns at least one required
+  // field and none of them is failing. Sections with no required fields never
+  // show a ✓ (they just show their number).
+  const SEC_OWNS = { customer:['customer'], address:['address'], items:['items'], measure:['measure','rooms'], commercial:['commercial'], payment:['payment'], internal:['internal'] };
+  const secDone = k => { const owns=SEC_OWNS[k]||[]; return owns.length>0 && !liveErrors.some(e=>owns.includes(e.sec)); };
 
   return (
     <div className="screen">
@@ -5717,7 +5823,8 @@ function OrderFormScreen({ctx, viewOnly}) {
             <Field label="Booking Date" value={dmyToISO(o.date)} onChange={v=>setF('date',isoToDMY(v))} type="date" mono required hint="Manual order — the actual date this order was booked"/>
           </>
         )}
-        <SectionHead n="01" label="Customer" id="sec-customer"/>
+        <AccordionHead secKey="customer" n="01" label="Customer" open={openSecs.customer} onToggle={()=>toggleSec('customer')} done={secDone('customer')}/>
+        {openSecs.customer && (<>
         <Field label="Customer Name" value={o.customer} onChange={v=>setF('customer',v)} required/>
         <Field label="Phone" value={o.phone} onChange={onPhoneChange} mono required type="tel" action="CALL" onAction={()=>o.phone&&window.open('tel:'+o.phone)} error={o.phone&&!isValidPhone(o.phone)?'Enter a valid 10-digit mobile number':undefined} hint={!o.no?'Returning customer? Their saved details fill in automatically.':undefined}/>
         {!o.no && crmStatus!=='idle' && (
@@ -5740,8 +5847,8 @@ function OrderFormScreen({ctx, viewOnly}) {
             {AWARENESS.map(a=><option key={a}>{a}</option>)}
           </select>
         </div>
-        <Field label="Date of Birth" value={o.dob} onChange={v=>setF('dob',v)} type="date" mono hint="Optional"/>
-        <Field label="Marriage Anniversary" value={o.anniversary} onChange={v=>setF('anniversary',v)} type="date" mono hint="Optional"/>
+        <DayMonthField label="Date of Birth" value={o.dob} onChange={v=>setF('dob',v)} hint="Optional · day & month only (the year is not stored)"/>
+        <DayMonthField label="Marriage Anniversary" value={o.anniversary} onChange={v=>setF('anniversary',v)} hint="Optional · day & month only (the year is not stored)"/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:8}}>Purchase Pattern <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
@@ -5761,7 +5868,9 @@ function OrderFormScreen({ctx, viewOnly}) {
           </select>
         </div>
 
-        <SectionHead n="02" label="Address" id="sec-address"/>
+        </>)}
+        <AccordionHead secKey="address" n="02" label="Address" open={openSecs.address} onToggle={()=>toggleSec('address')} done={secDone('address')}/>
+        {openSecs.address && (<>
         <Field label="Delivery Address" value={o.delivery} onChange={v=>setF('delivery',v)} multiline required/>
         <Field label="Pincode" value={o.pincode} onChange={v=>setF('pincode',v.replace(/[^\d]/g,'').slice(0,6))} mono required type="tel" hint="Mandatory · delivery address pincode (printed on the PDF)" error={o.pincode&&!/^\d{6}$/.test(o.pincode)?'Enter a valid 6-digit pincode':undefined}/>
         <Field label="Floor" value={o.floor} onChange={v=>setF('floor',v)} required hint="Mandatory"/>
@@ -5802,88 +5911,9 @@ function OrderFormScreen({ctx, viewOnly}) {
           </>
         );})()}
 
-        <SectionHead n="03" label="Site Measurements" id="sec-measure"/>
-        <div style={{padding:'8px 14px',background:T.paper2||'#fafafa',borderBottom:`1px solid ${T.line}`,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
-          <span style={{fontSize:11,color:T.ink4,fontWeight:700}}>ENTER IN</span>
-          {[['cm','cm'],['ft','ft / in']].map(([u,lbl])=>(
-            <span key={u} onClick={()=>setMeasUnit(u)} style={{padding:'5px 12px',borderRadius:99,background:measUnit===u?T.green:'#fff',color:measUnit===u?'#fff':T.ink2,border:`1px solid ${measUnit===u?T.green:T.line}`,fontSize:12,fontWeight:700,cursor:'pointer'}}>{lbl}</span>
-          ))}
-          <span style={{fontSize:11,color:T.ink4,fontWeight:600,marginLeft:'auto'}}>Saved in cm{measUnit==='ft'?' (auto-converted)':''}</span>
-        </div>
-        {hasSofa && (
-          <>
-            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Sofa in order — width, height & depth are mandatory (printed on the PDF)</div>
-            <MeasureField label="Sofa Width" value={o.sofaWidth} onChange={v=>setF('sofaWidth',v)} unit={measUnit} required/>
-            <MeasureField label="Sofa Height" value={o.sofaHeight} onChange={v=>setF('sofaHeight',v)} unit={measUnit} required/>
-            <MeasureField label="Sofa Depth" value={o.sofaDepth} onChange={v=>setF('sofaDepth',v)} unit={measUnit} required/>
-          </>
-        )}
-        {/* Modular furniture — one measurement block per modular wardrobe
-            (Kalista / Kreation X2 / X3). Sales picks how many; each block carries
-            the wardrobe dims. */}
-        {hasWardrobe && (
-          <>
-            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Modular wardrobe in order — each furniture's length/width/height is mandatory (printed on the PDF)</div>
-            <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
-              <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>How many modular furnitures? <span style={{color:T.bad,marginLeft:3}}>*</span></div>
-              <select value={wardrobes.length||1} onChange={e=>setWardrobeCount(Number(e.target.value))} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
-                {[1,2,3,4,5,6,7,8].map(n=><option key={n} value={n}>{n}</option>)}
-              </select>
-              <div style={{fontSize:11,color:T.ink4,marginTop:3}}>e.g. Kreation X3 + Kalista → 2 furnitures</div>
-            </div>
-            {wardrobes.map((w,wi)=>(
-              <div key={wi} style={{borderBottom:`1px solid ${T.line}`,background:T.paper2||'#fafafa'}}>
-                <div style={{padding:'8px 14px',fontSize:11,fontWeight:700,color:T.ink2,letterSpacing:0.5,textTransform:'uppercase'}}>Modular Furniture {wi+1}</div>
-                <div style={{background:'#fff'}}>
-                  <Field label="Furniture Name" value={w.name} onChange={v=>setWardrobeField(wi,'name',v)} hint="e.g. Kreation X3, Kalista"/>
-                  <MeasureField label="Wardrobe Length" value={w.length} onChange={v=>setWardrobeField(wi,'length',v)} unit={measUnit} required/>
-                  <MeasureField label="Wardrobe Width" value={w.width} onChange={v=>setWardrobeField(wi,'width',v)} unit={measUnit} required/>
-                  <MeasureField label="Wardrobe Height" value={w.height} onChange={v=>setWardrobeField(wi,'height',v)} unit={measUnit} required/>
-                </div>
-              </div>
-            ))}
-          </>
-        )}
-        {/* Rooms — sales picks how many rooms, then notes each room's dims.
-            Mandatory when a modular wardrobe is in the order. */}
-        <SectionHead n="03b" label="Rooms" id="sec-rooms"/>
-        {hasWardrobe && (
-          <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Modular wardrobe in order — room measurements are mandatory (printed on the PDF)</div>
-        )}
-        <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
-          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>How many rooms?{hasWardrobe&&<span style={{color:T.bad,marginLeft:3}}>*</span>}</div>
-          <select value={rooms.length||(hasWardrobe?1:0)} onChange={e=>setRoomCount(Number(e.target.value))} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
-            {(hasWardrobe?[1,2,3,4,5,6,7,8]:[0,1,2,3,4,5,6,7,8]).map(n=><option key={n} value={n}>{n}</option>)}
-          </select>
-          <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Add a measurement block per room.</div>
-        </div>
-        {rooms.map((r,ri)=>(
-          <div key={ri} style={{borderBottom:`1px solid ${T.line}`,background:T.paper2||'#fafafa'}}>
-            <div style={{padding:'8px 14px',fontSize:11,fontWeight:700,color:T.ink2,letterSpacing:0.5,textTransform:'uppercase'}}>Room {ri+1}</div>
-            <div style={{background:'#fff'}}>
-              <Field label="Room Name" value={r.name} onChange={v=>setRoomField(ri,'name',v)} placeholder={`Room ${ri+1}`} required={hasWardrobe} hint="e.g. Master Bedroom, Kids Room"/>
-              <MeasureField label="Room Width" value={r.width} onChange={v=>setRoomField(ri,'width',v)} unit={measUnit} required={hasWardrobe}/>
-              <MeasureField label="Room Height" value={r.height} onChange={v=>setRoomField(ri,'height',v)} unit={measUnit} required={hasWardrobe}/>
-              <MeasureField label="Room Depth" value={r.depth} onChange={v=>setRoomField(ri,'depth',v)} unit={measUnit} required={hasWardrobe}/>
-            </div>
-          </div>
-        ))}
-        {/* Staircase — only for a SOFA with NO lift (skip if there's a lift or no sofa).
-            Staircase width + the landing area's length / width / depth. */}
-        {needStaircase && (
-          <>
-            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Sofa with no lift — staircase width & the landing area length/width/depth are mandatory (printed on the PDF)</div>
-            <MeasureField label="Staircase Width" value={o.staircaseWidth} onChange={v=>setF('staircaseWidth',v)} unit={measUnit} required/>
-            <MeasureField label="Landing Area Length" value={o.landingLength} onChange={v=>setF('landingLength',v)} unit={measUnit} required/>
-            <MeasureField label="Landing Area Width" value={o.landingWidth} onChange={v=>setF('landingWidth',v)} unit={measUnit} required/>
-            <MeasureField label="Landing Area Depth" value={o.landingDepth} onChange={v=>setF('landingDepth',v)} unit={measUnit} required/>
-          </>
-        )}
-        {/* Entry-door measurement — mandatory only for sofa orders */}
-        <MeasureField label="Entry Door Width" value={o.entryDoorWidth} onChange={v=>setF('entryDoorWidth',v)} unit={measUnit} required={hasSofa} hint={hasSofa?'Mandatory for sofa orders':undefined}/>
-        <MeasureField label="Entry Door Height" value={o.entryDoorHeight} onChange={v=>setF('entryDoorHeight',v)} unit={measUnit} required={hasSofa}/>
-
-        <SectionHead n="04" label={`Items · ${(o.items||[]).length}`} action="+ ADD ITEM" onAction={()=>nav('search')} id="sec-items"/>
+        </>)}
+        <AccordionHead secKey="items" n="03" label={`Items · ${(o.items||[]).length}`} open={openSecs.items} onToggle={()=>toggleSec('items')} done={secDone('items')} action="+ ADD ITEM" onAction={()=>nav('search')}/>
+        {openSecs.items && (<>
         <div style={{background:'#fff'}}>
           {(o.items||[]).map((it,i)=>{
             const mrpVal   = it.mrp||it.cpl||0;                 // pre-GST list price (base)
@@ -6050,7 +6080,7 @@ function OrderFormScreen({ctx, viewOnly}) {
             a row is recorded in the "Gifts Given" log tying the gift to this
             order/customer (see _commitGifts in Code.gs). The + stepper is capped
             at the available quantity so stock can't be over-committed. */}
-        <SectionHead n="04b" label={`Gift${(o.gifts||[]).length?` · ${(o.gifts||[]).length}`:''}`} id="sec-gift"/>
+        <SectionHead n="03b" label={`Gift${(o.gifts||[]).length?` · ${(o.gifts||[]).length}`:''}`} id="sec-gift"/>
         {(()=>{
           const giftStock = ctx.gifts||[];
           const findGift  = name => giftStock.find(x=>String(x.item||'').trim().toUpperCase()===String(name||'').trim().toUpperCase());
@@ -6111,7 +6141,92 @@ function OrderFormScreen({ctx, viewOnly}) {
           </div>
           );
         })()}
-        <SectionHead n="05" label="Commercials" id="sec-commercial"/>
+        </>)}
+        <AccordionHead secKey="measure" n="04" label="Site Measurements" open={openSecs.measure} onToggle={()=>toggleSec('measure')} done={needsMeasurement&&secDone('measure')} disabled={!needsMeasurement} note={needsMeasurement?(hasSofa&&hasWardrobe?'Sofa & modular wardrobe — measurements required':hasSofa?'Sofa in order — measurements required':'Modular wardrobe — measurements required'):'Not applicable for the selected items'}/>
+        {openSecs.measure && needsMeasurement && (<>
+        <div style={{padding:'8px 14px',background:T.paper2||'#fafafa',borderBottom:`1px solid ${T.line}`,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+          <span style={{fontSize:11,color:T.ink4,fontWeight:700}}>ENTER IN</span>
+          {[['cm','cm'],['ft','ft / in']].map(([u,lbl])=>(
+            <span key={u} onClick={()=>setMeasUnit(u)} style={{padding:'5px 12px',borderRadius:99,background:measUnit===u?T.green:'#fff',color:measUnit===u?'#fff':T.ink2,border:`1px solid ${measUnit===u?T.green:T.line}`,fontSize:12,fontWeight:700,cursor:'pointer'}}>{lbl}</span>
+          ))}
+          <span style={{fontSize:11,color:T.ink4,fontWeight:600,marginLeft:'auto'}}>Saved in cm{measUnit==='ft'?' (auto-converted)':''}</span>
+        </div>
+        {hasSofa && (
+          <>
+            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Sofa in order — width, height & depth are mandatory (printed on the PDF)</div>
+            <MeasureField label="Sofa Width" value={o.sofaWidth} onChange={v=>setF('sofaWidth',v)} unit={measUnit} required/>
+            <MeasureField label="Sofa Height" value={o.sofaHeight} onChange={v=>setF('sofaHeight',v)} unit={measUnit} required/>
+            <MeasureField label="Sofa Depth" value={o.sofaDepth} onChange={v=>setF('sofaDepth',v)} unit={measUnit} required/>
+          </>
+        )}
+        {/* Modular furniture — one measurement block per modular wardrobe
+            (Kalista / Kreation X2 / X3). Sales picks how many; each block carries
+            the wardrobe dims. */}
+        {hasWardrobe && (
+          <>
+            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Modular wardrobe in order — each furniture's length/width/height is mandatory (printed on the PDF)</div>
+            <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+              <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>How many modular furnitures? <span style={{color:T.bad,marginLeft:3}}>*</span></div>
+              <select value={wardrobes.length||1} onChange={e=>setWardrobeCount(Number(e.target.value))} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+                {[1,2,3,4,5,6,7,8].map(n=><option key={n} value={n}>{n}</option>)}
+              </select>
+              <div style={{fontSize:11,color:T.ink4,marginTop:3}}>e.g. Kreation X3 + Kalista → 2 furnitures</div>
+            </div>
+            {wardrobes.map((w,wi)=>(
+              <div key={wi} style={{borderBottom:`1px solid ${T.line}`,background:T.paper2||'#fafafa'}}>
+                <div style={{padding:'8px 14px',fontSize:11,fontWeight:700,color:T.ink2,letterSpacing:0.5,textTransform:'uppercase'}}>Modular Furniture {wi+1}</div>
+                <div style={{background:'#fff'}}>
+                  <Field label="Furniture Name" value={w.name} onChange={v=>setWardrobeField(wi,'name',v)} hint="e.g. Kreation X3, Kalista"/>
+                  <MeasureField label="Wardrobe Length" value={w.length} onChange={v=>setWardrobeField(wi,'length',v)} unit={measUnit} required/>
+                  <MeasureField label="Wardrobe Width" value={w.width} onChange={v=>setWardrobeField(wi,'width',v)} unit={measUnit} required/>
+                  <MeasureField label="Wardrobe Height" value={w.height} onChange={v=>setWardrobeField(wi,'height',v)} unit={measUnit} required/>
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+        {/* Rooms — sales picks how many rooms, then notes each room's dims.
+            Mandatory when a modular wardrobe is in the order. */}
+        <SectionHead n="04b" label="Rooms" id="sec-rooms"/>
+        {hasWardrobe && (
+          <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Modular wardrobe in order — room measurements are mandatory (printed on the PDF)</div>
+        )}
+        <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>How many rooms?{hasWardrobe&&<span style={{color:T.bad,marginLeft:3}}>*</span>}</div>
+          <select value={rooms.length||(hasWardrobe?1:0)} onChange={e=>setRoomCount(Number(e.target.value))} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+            {(hasWardrobe?[1,2,3,4,5,6,7,8]:[0,1,2,3,4,5,6,7,8]).map(n=><option key={n} value={n}>{n}</option>)}
+          </select>
+          <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Add a measurement block per room.</div>
+        </div>
+        {rooms.map((r,ri)=>(
+          <div key={ri} style={{borderBottom:`1px solid ${T.line}`,background:T.paper2||'#fafafa'}}>
+            <div style={{padding:'8px 14px',fontSize:11,fontWeight:700,color:T.ink2,letterSpacing:0.5,textTransform:'uppercase'}}>Room {ri+1}</div>
+            <div style={{background:'#fff'}}>
+              <Field label="Room Name" value={r.name} onChange={v=>setRoomField(ri,'name',v)} placeholder={`Room ${ri+1}`} required={hasWardrobe} hint="e.g. Master Bedroom, Kids Room"/>
+              <MeasureField label="Room Width" value={r.width} onChange={v=>setRoomField(ri,'width',v)} unit={measUnit} required={hasWardrobe}/>
+              <MeasureField label="Room Height" value={r.height} onChange={v=>setRoomField(ri,'height',v)} unit={measUnit} required={hasWardrobe}/>
+              <MeasureField label="Room Depth" value={r.depth} onChange={v=>setRoomField(ri,'depth',v)} unit={measUnit} required={hasWardrobe}/>
+            </div>
+          </div>
+        ))}
+        {/* Staircase — only for a SOFA with NO lift (skip if there's a lift or no sofa).
+            Staircase width + the landing area's length / width / depth. */}
+        {needStaircase && (
+          <>
+            <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Sofa with no lift — staircase width & the landing area length/width/depth are mandatory (printed on the PDF)</div>
+            <MeasureField label="Staircase Width" value={o.staircaseWidth} onChange={v=>setF('staircaseWidth',v)} unit={measUnit} required/>
+            <MeasureField label="Landing Area Length" value={o.landingLength} onChange={v=>setF('landingLength',v)} unit={measUnit} required/>
+            <MeasureField label="Landing Area Width" value={o.landingWidth} onChange={v=>setF('landingWidth',v)} unit={measUnit} required/>
+            <MeasureField label="Landing Area Depth" value={o.landingDepth} onChange={v=>setF('landingDepth',v)} unit={measUnit} required/>
+          </>
+        )}
+        {/* Entry-door measurement — mandatory only for sofa orders */}
+        <MeasureField label="Entry Door Width" value={o.entryDoorWidth} onChange={v=>setF('entryDoorWidth',v)} unit={measUnit} required={hasSofa} hint={hasSofa?'Mandatory for sofa orders':undefined}/>
+        <MeasureField label="Entry Door Height" value={o.entryDoorHeight} onChange={v=>setF('entryDoorHeight',v)} unit={measUnit} required={hasSofa}/>
+
+        </>)}
+        <AccordionHead secKey="commercial" n="05" label="Commercials" open={openSecs.commercial} onToggle={()=>toggleSec('commercial')} done={secDone('commercial')}/>
+        {openSecs.commercial && (<>
         <Field label="Additional Order Discount %" value={o.orderDiscount} onChange={v=>setF('orderDiscount',v.replace(/[^\d.]/g,''))} mono type="number" hint="Extra discount on the whole order (on top of per-item discounts). Shown on the PDF."/>
         <Field label="SI No" value={o.slNo} onChange={v=>setF('slNo',v)} mono required hint="Mandatory · the order-form SI number · printed as the Sl part of the PDF's Order No. (Sl / Receipt)"/>
         {o.manualOrder
@@ -6124,7 +6239,9 @@ function OrderFormScreen({ctx, viewOnly}) {
         <Field label="WON (Godrej SO No)" value={o.won} onChange={setWon} mono hint="Godrej SO / WON number — can be added or updated any time"/>
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setOrder(prev=>({...prev,plannedDly:v,followUp:followUpFromDelivery(v)||prev.followUp}))} mono required type="date" hint="Follow-up auto-set to 2 days before this date"/>
         <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
-        <SectionHead n="06" label="Payment" id="sec-payment"/>
+        </>)}
+        <AccordionHead secKey="payment" n="06" label="Payment" open={openSecs.payment} onToggle={()=>toggleSec('payment')} done={secDone('payment')}/>
+        {openSecs.payment && (<>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>PAYMENT MODE <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <select value={o.paymentMode} onChange={e=>{const pm=e.target.value; const fin=financeSchemeOf(pm); setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:'',amt:''}); if(fin){arr[0]={...arr[0],no:fin};} else if(financeSchemeOf(prev.paymentMode)){arr[0]={...arr[0],no:''};} return {...prev,paymentMode:pm,moneyReceipts:arr,receiptNo: fin?fin:(financeSchemeOf(prev.paymentMode)?'':prev.receiptNo)};});}} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.paymentMode?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
@@ -6189,7 +6306,9 @@ function OrderFormScreen({ctx, viewOnly}) {
           <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Order is Completed only when "Installation Done".</div>
           {/partial/i.test(o.deliveryStatus||'') && <PartialDeliverySummary order={o} onEdit={()=>setPartialPicker(true)}/>}
         </div>
-        <SectionHead n="07" label="Internal" id="sec-internal"/>
+        </>)}
+        <AccordionHead secKey="internal" n="07" label="Internal" open={openSecs.internal} onToggle={()=>toggleSec('internal')} done={secDone('internal')}/>
+        {openSecs.internal && (<>
         <Field label="Salesperson" value={o.salesExec??''} onChange={v=>setF('salesExec',v)} mono hint="Pre-filled with your name — edit or clear freely (your name is used if left blank)."/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Order Type <span style={{color:T.bad,marginLeft:3}}>*</span></div>
@@ -6198,6 +6317,7 @@ function OrderFormScreen({ctx, viewOnly}) {
             <option>B2B</option>
           </select>
         </div>
+        </>)}
         <div style={{padding:'14px 14px 18px'}}>
           <div style={{background:T.ink,color:'#fff',borderRadius:8,padding:'14px 16px',fontFamily:T.mono}}>
             <div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>Items subtotal (incl. GST)</span><span>₹{(total+orderDiscAmt).toLocaleString('en-IN')}</span></div>
@@ -6610,7 +6730,7 @@ function PDFPreviewScreen({ctx}) {
             </div>
           </div>
         </div>
-        {!o.won&&<div style={{marginTop:14,padding:'12px 14px',background:'rgba(255,210,122,.1)',border:'1px dashed rgba(255,210,122,.5)',borderRadius:6,color:'#ffd27a',fontSize:11.5,lineHeight:1.5,display:'flex',gap:10}}>
+        {isPendingWon(o)&&<div style={{marginTop:14,padding:'12px 14px',background:'rgba(255,210,122,.1)',border:'1px dashed rgba(255,210,122,.5)',borderRadius:6,color:'#ffd27a',fontSize:11.5,lineHeight:1.5,display:'flex',gap:10}}>
           {Icon.bolt('#ffd27a',16)}
           <div><b style={{color:'#ffe6b0'}}>Add Godrej WON later.</b><br/><span style={{color:'rgba(255,255,255,.7)'}}>PDF and customer QR update automatically once added.</span></div>
           <span onClick={()=>nav('won')} style={{alignSelf:'center',fontWeight:700,color:'#ffd27a',cursor:'pointer',whiteSpace:'nowrap'}}>ADD →</span>
@@ -7137,7 +7257,10 @@ function HistoryScreen({ctx}) {
               <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3,flexWrap:'wrap'}}>
                 <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
                 {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:null}
-                <span onClick={e=>{e.stopPropagation();setWonOrder(o);}} style={{display:'inline-flex',alignItems:'center',height:16,padding:'0 6px',borderRadius:4,background:T.warnSoft,color:T.warn,border:'1px solid #e6cc95',fontSize:10,fontWeight:700,cursor:'pointer'}}>{o.won?'+ SO':'+ ADD SO'}</span>
+                {/* SO / WON is generated only for the franchise channel — a pure 4S
+                    order (or a mixed order once its franchise line already carries an
+                    SO) is never prompted to add one. isPendingWon() encodes that rule. */}
+                {(o.won || isPendingWon(o)) && <span onClick={e=>{e.stopPropagation();setWonOrder(o);}} style={{display:'inline-flex',alignItems:'center',height:16,padding:'0 6px',borderRadius:4,background:T.warnSoft,color:T.warn,border:'1px solid #e6cc95',fontSize:10,fontWeight:700,cursor:'pointer'}}>{o.won?'+ SO':'+ ADD SO'}</span>}
               </div>
               <div style={{fontSize:14,fontWeight:700,color:T.ink}}>{o.customer}</div>
               <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.salesExec}</div>

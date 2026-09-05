@@ -2537,6 +2537,7 @@ function _writeOrderToCRM(o) {
     } else if (oldCount > newCount) {
       for (var dd = oldCount - 1; dd >= newCount; dd--) sh.deleteRow(firstSheetRow + dd);
     }
+    _stampDayMonthText(sh, colOf, firstSheetRow, newCount, o.dob, o.anniversary);
     return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: newCount, isNew: !isExisting };
   }
 
@@ -2548,7 +2549,9 @@ function _writeOrderToCRM(o) {
 
   var built = _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wonToWrite, sh.getLastRow());
   if (!built.length) return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: 0, isNew: !isExisting };
-  sh.getRange(sh.getLastRow() + 1, 1, built.length, ncol).setValues(built);
+  var appendAt = sh.getLastRow() + 1;
+  sh.getRange(appendAt, 1, built.length, ncol).setValues(built);
+  _stampDayMonthText(sh, colOf, appendAt, built.length, o.dob, o.anniversary);
   return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: built.length, isNew: !isExisting };
 }
 
@@ -2758,6 +2761,30 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
   }
 
   return out;
+}
+
+// Force the DATE OF BIRTH / MARRIAGE ANNIVERSARY cells of an order's rows to plain
+// text and (re)write the day+month string. We now capture only "DD/MM" (the year is
+// intentionally not stored); if these cells stayed date-formatted, Sheets would
+// silently coerce "20/07" into a real date and reintroduce a year. Setting the
+// number format to text first keeps the stored value exactly as the app sent it.
+function _stampDayMonthText(sh, colOf, firstRow, numRows, dob, anniv) {
+  if (numRows <= 0) return;
+  var pairs = [
+    [colOf(['DATE OF BIRTH', 'DOB']), String(dob || '')],
+    [colOf(['MARRIAGE ANNIVERSARY', 'MARRIAGE ANNIVERSARY DATE', 'ANNIVERSARY']), String(anniv || '')]
+  ];
+  for (var p = 0; p < pairs.length; p++) {
+    var ci = pairs[p][0];
+    if (ci < 0) continue;
+    try {
+      var rng = sh.getRange(firstRow, ci + 1, numRows, 1);
+      rng.setNumberFormat('@');           // plain text — never parse "20/07" as a date
+      var vals = [];
+      for (var r = 0; r < numRows; r++) vals.push([pairs[p][1]]);
+      rng.setValues(vals);
+    } catch (e) { /* missing column / protected range — skip */ }
+  }
 }
 
 // ─── UPDATE WON ───────────────────────────────────────────────────────────────
