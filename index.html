@@ -2088,6 +2088,95 @@ function prettyDate(iso) {
   if (isNaN(d.getTime())) return iso;
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: IST_TZ });
 }
+
+// ─── CUSTOMER OCCASIONS (birthday / anniversary) ──────────────────────────────
+// Birthdays & anniversaries are stored day+month only ("DD/MM"). These helpers
+// work out when the NEXT occurrence lands so "My Customers" and the occasion
+// notifications can surface the ones coming up within the next week.
+const OCCASION_WINDOW_DAYS = 7;   // show/notify occasions within this many days
+// Format a stored day+month value as "DD/MM" (or '' if incomplete).
+function dmFmt(v){ const p = parseDayMonth(v); return (p.d && p.m) ? (String(p.d).padStart(2,'0')+'/'+String(p.m).padStart(2,'0')) : ''; }
+// The ISO date (yyyy-mm-dd) of the next occurrence of a stored "DD/MM", counting
+// from today in IST. A 29-Feb date clamps to 28 Feb in non-leap years. '' if unset.
+function dayMonthNextISO(dm){
+  const p = parseDayMonth(dm); if(!p.d || !p.m) return '';
+  const d = Number(p.d), m = Number(p.m);
+  if(!(d>=1 && d<=31 && m>=1 && m<=12)) return '';
+  const nowStr = new Date().toLocaleDateString('en-CA', { timeZone: IST_TZ });  // yyyy-mm-dd today (IST)
+  const parts = nowStr.split('-').map(Number); const ty=parts[0], tm=parts[1], td=parts[2];
+  const today = new Date(ty, tm-1, td);
+  function occ(y){ let day=d; const max=new Date(y, m, 0).getDate(); if(day>max) day=max; return new Date(y, m-1, day); }
+  let nx = occ(ty); if(nx.getTime() < today.getTime()) nx = occ(ty+1);
+  return nx.getFullYear()+'-'+String(nx.getMonth()+1).padStart(2,'0')+'-'+String(nx.getDate()).padStart(2,'0');
+}
+// Whole days until the next occurrence (0 = today), or null if unset.
+function daysUntilDayMonth(dm){ const iso = dayMonthNextISO(dm); return iso ? daysFromToday(iso) : null; }
+
+// Build the upcoming birthday / anniversary events from the order book. One entry
+// per customer (deduped by phone) per occasion whose next occurrence is within
+// `windowDays` (0 = today). Pass { salesExec:'Name' } to scope to one salesperson;
+// pass { all:true } to include every customer regardless of who booked them.
+function buildCustomerEvents(orders, windowDays, opts){
+  const w = (windowDays==null) ? OCCASION_WINDOW_DAYS : windowDays;
+  const o = opts||{};
+  const wantExec = String(o.salesExec||'').trim().toLowerCase();
+  const byPhone = new Map();
+  (orders||[]).forEach(od=>{
+    if(!od || od.status==='draft') return;
+    if(!o.all && wantExec && !String(od.salesExec||'').toLowerCase().includes(wantExec)) return;
+    const ph = _normPhone(od.phone);
+    if(!(ph && ph.length>=10)) return;
+    const iso = _toISO(od.date) || '';
+    const prev = byPhone.get(ph);
+    if(!prev || iso > (prev._iso||'')) byPhone.set(ph, Object.assign({}, od, { _iso: iso }));
+  });
+  const evs = [];
+  byPhone.forEach((od, ph)=>{
+    [['Birthday', od.dob], ['Anniversary', od.anniversary]].forEach(pair=>{
+      const occ = pair[0], dm = pair[1];
+      const days = daysUntilDayMonth(dm);
+      if(days==null || days<0 || days>w) return;
+      evs.push({ occasion: occ, customer: od.customer||'', phone: ph, dm: dmFmt(dm),
+        salesExec: od.salesExec||'', days: days, iso: dayMonthNextISO(dm), orderNo: od.no||'', order: od });
+    });
+  });
+  evs.sort((a,b)=> (a.days-b.days) || String(a.customer).localeCompare(String(b.customer)));
+  return evs;
+}
+
+// A key that uniquely identifies a customer for the once-per-customer offer lock
+// (the normalised 10-digit phone). Kept in one place so the client and the
+// "already sent" check always agree.
+function offerKeyFor(ev){ return _normPhone(ev && (ev.phone!=null ? ev.phone : (ev.order && ev.order.phone))) || ''; }
+
+// The store's standard sign-off, appended to every customer WhatsApp message:
+//   Regards,
+//   <sales person>
+//   interio by godrej, patia
+function occasionSignOff(senderName){
+  return '\n\nRegards,\n' + (String(senderName||'').trim() || 'Team 4S Interiors') + '\ninterio by godrej, patia';
+}
+// A warm, personalised birthday / anniversary WISH.
+function customerWishMessage(occasion, customerName, senderName){
+  const name = String(customerName||'').trim() || 'there';
+  const body = (occasion==='Anniversary')
+    ? ('Dear ' + name + ',\n\nWishing you a very Happy Marriage Anniversary! 💐❤️ May your bond grow warmer and stronger with every passing year, filled with love, laughter and beautiful memories. It is our privilege to have you in the Interio by Godrej, Patia family.')
+    : ('Dear ' + name + ',\n\nWishing you a very Happy Birthday! 🎂🎉 May this year bring you great health, happiness and everything your heart desires. Thank you for being a valued part of the Interio by Godrej, Patia family.');
+  return body + occasionSignOff(senderName);
+}
+// The one-time SPECIAL OFFER message. The offer is valid only on the customer's
+// birthday / anniversary itself ("that day only"). `sameDay` tailors the wording
+// for when it is being sent on the day vs. a little ahead.
+function customerOfferMessage(occasion, customerName, senderName, sameDay){
+  const name = String(customerName||'').trim() || 'there';
+  const reason = (occasion==='Anniversary') ? 'Anniversary' : 'Birthday';
+  const validity = sameDay
+    ? 'Do note: this offer is valid TODAY only — on your special day.'
+    : ('Do note: this offer is valid only on your ' + reason + ' — your special day.');
+  const body = 'Dear ' + name + ',\n\nHappy ' + reason + '! 🎉 To make your special day even better, here is an exclusive ' + reason + ' offer, just for you from Interio by Godrej, Patia — a special discount + a surprise gift on your favourite furniture. 🎁\n\n' + validity + ' Simply visit our showroom or reply to this message to claim it. We would love to be a part of your celebrations!';
+  return body + occasionSignOff(senderName);
+}
+
 // An order counts as "done" (no more delivery chasing) once fully delivered or installed.
 function isDeliveryDone(o) {
   const s = (o.deliveryStatus || '').toLowerCase();
@@ -2220,7 +2309,7 @@ function misForOrder(mis, o) {
 }
 // Build the notification feed from the current orders + MIS data. Each item has a
 // stable id so we only fire a native push once per event.
-function buildNotifications(orders, mis) {
+function buildNotifications(orders, mis, user) {
   const out = [];
   (orders || []).forEach(o => {
     const m = misForOrder(mis, o);
@@ -2273,8 +2362,26 @@ function buildNotifications(orders, mis) {
       });
     }
   });
+  // 4) Customer birthday / anniversary coming up within the next week — a nudge
+  // to open My Customers and send them a wish (and, once ever, the special offer).
+  // Scoped to the logged-in salesperson's own customers so nobody is nudged about
+  // someone else's; a manager still only gets their own to keep the list focused.
+  const meName = String((user && user.name) || '').trim();
+  if (meName) {
+    buildCustomerEvents(orders, OCCASION_WINDOW_DAYS, { salesExec: meName }).forEach(ev => {
+      const occLc = ev.occasion.toLowerCase();
+      out.push({
+        id: 'occ|' + ev.occasion + '|' + ev.phone + '|' + ev.dm,
+        kind: 'occasion', tone: ev.days === 0 ? 'green' : 'warn', orderNo: ev.orderNo || '', order: ev.order || null,
+        title: (ev.occasion === 'Birthday' ? '🎂 ' : '💍 ') + (ev.customer || 'A customer') + "'s " + occLc +
+               (ev.days === 0 ? ' is today!' : ' in ' + ev.days + ' day' + (ev.days > 1 ? 's' : '')),
+        body: (ev.days === 0 ? 'Send them a wish' : 'Coming up') + ' from My Customers' + (ev.phone ? ' · ' + ev.phone : ''),
+        sortDate: ev.iso,
+      });
+    });
+  }
   // Overdue first, then follow-ups, then soonest; committed notices interleave by date.
-  const rank = { overdue: 0, followup: 1, soon: 2, mis: 3 };
+  const rank = { occasion: -1, overdue: 0, followup: 1, soon: 2, mis: 3 };
   out.sort((a, b) => (rank[a.kind] - rank[b.kind]) || String(a.sortDate).localeCompare(String(b.sortDate)));
   return out;
 }
@@ -2352,6 +2459,11 @@ function App() {
   // Leads — per-salesperson lead register, grouped by person ({ SWATI:[…], … }).
   const [leads,         setLeads]        = useState(() => { try { return JSON.parse(localStorage.getItem('4s_leads')||'{}'); } catch { return {}; } });
   const [leadsLoading,  setLeadsLoading] = useState(false);
+  // Customers who have already been sent the once-per-customer birthday/anniversary
+  // OFFER. Keyed by normalised phone → true. Hydrated synchronously from the local
+  // cache so the Offer buttons render disabled instantly, then reconciled with the
+  // backend (so the lock holds across every device, not just the one that sent it).
+  const [offersSent,   setOffersSent]   = useState(() => { try { return JSON.parse(localStorage.getItem('4s_offers_sent')||'{}'); } catch { return {}; } });
 
   const showToast = (msg,type='ok') => setToast({msg,type});
   // "New order placed" celebration overlay — set by doSaveOrder on a first-time
@@ -2442,6 +2554,7 @@ function App() {
     loadMis({ silent: true });
     loadLeague({ silent: true });
     loadLeads({ silent: true });
+    loadOffersSent();
   }, [user]);
 
   // Re-sync shared data every time the app is reopened / brought to the
@@ -2461,6 +2574,7 @@ function App() {
       syncGifts();
       loadMis({ silent: true });
       loadOrders();
+      loadOffersSent();
       loadPriceListItems(false, true)   // skip local cache, use shared server cache
         .then(pi => {
           if (pi && pi.length) {
@@ -2701,6 +2815,42 @@ function App() {
     } catch(e) { showToast(e.message,'bad'); return false; }
   }
 
+  // ── Birthday / anniversary offer lock ──────────────────────────────────────
+  // Pull the list of customers who have already been sent the one-time offer from
+  // the backend and merge it into local state (never drops a locally-known send,
+  // so an optimistic lock survives a slow/failed sync). Cached for instant paint.
+  async function loadOffersSent(opts) {
+    try {
+      const res = await apiGet('offersSent', {}, 30000, 2);
+      if (res && res.ok && Array.isArray(res.offers)) {
+        setOffersSent(prev => {
+          const merged = { ...(prev||{}) };
+          res.offers.forEach(o => { const k = _normPhone(o && o.phone); if (k) merged[k] = true; });
+          try { localStorage.setItem('4s_offers_sent', JSON.stringify(merged)); } catch(e) {}
+          return merged;
+        });
+        return true;
+      }
+    } catch(e) { /* offline / not deployed yet — keep the local cache */ }
+    return false;
+  }
+  // Record that a customer has now been sent the offer. Optimistic: the lock is set
+  // locally (and cached) immediately so the button disables on this device at once,
+  // then persisted to the backend so it holds on every other device too.
+  async function doMarkOfferSent(ev) {
+    const key = offerKeyFor(ev);
+    if (!key) return false;
+    setOffersSent(prev => {
+      const next = { ...(prev||{}), [key]: true };
+      try { localStorage.setItem('4s_offers_sent', JSON.stringify(next)); } catch(e) {}
+      return next;
+    });
+    try {
+      await apiPost({ action:'markOfferSent', phone:key, customer:(ev&&ev.customer)||'', occasion:(ev&&ev.occasion)||'', by:user?.name||user?.username||'' });
+    } catch(e) { /* stays locked locally; loadOffersSent will reconcile later */ }
+    return true;
+  }
+
   // Ask the backend for the exact next app Receipt No (authoritative — it reads the
   // live sheet and skips manual orders). Returns a number, or null if unreachable.
   async function getNextReceipt() {
@@ -2884,14 +3034,14 @@ function App() {
   }
 
   // ── Notification feed (MIS committed + delivery deadlines) ────────────────
-  const notifications = React.useMemo(() => buildNotifications(orders, mis), [orders, mis]);
+  const notifications = React.useMemo(() => buildNotifications(orders, mis, user), [orders, mis, user]);
   const [seenNotifs, setSeenNotifs] = useState(() => { try { return JSON.parse(localStorage.getItem('4s_notif_seen')||'[]'); } catch { return []; } });
   const unreadCount = notifications.filter(n => !seenNotifs.includes(n.id)).length;
   const markNotifsSeen = useCallback(() => {
-    const ids = buildNotifications(orders, mis).map(n => n.id);
+    const ids = buildNotifications(orders, mis, user).map(n => n.id);
     setSeenNotifs(ids);
     localStorage.setItem('4s_notif_seen', JSON.stringify(ids));
-  }, [orders, mis]);
+  }, [orders, mis, user]);
 
   // Ring the bell when the unread count goes up (a genuinely new alert). The
   // initial value is skipped so it doesn't chime just for pre-existing alerts.
@@ -2990,7 +3140,8 @@ function App() {
     svcRequests, loadServiceRequests, doCreateServiceRequest, doUpdateServiceRequest,
     mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen,
     league, leagueLoading, loadLeague, doSaveLeagueScore, doSaveLeagueConfig,
-    leads, leadsLoading, loadLeads, doAddLead, doEditLead };
+    leads, leadsLoading, loadLeads, doAddLead, doEditLead,
+    offersSent, loadOffersSent, doMarkOfferSent };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -3012,6 +3163,8 @@ function App() {
     collect: <CollectiblesScreen ctx={ctx}/>,
     league:  <LeagueScreen ctx={ctx}/>,
     leads:   <LeadsScreen ctx={ctx}/>,
+    mycustomers: <MyCustomerScreen ctx={ctx}/>,
+    offerzone:   <OfferZoneScreen ctx={ctx}/>,
   };
 
   return (
@@ -3961,6 +4114,203 @@ function AddLeadModal({person, canPickPerson, lead, prefill, onCancel, onSave}){
 }
 function _leadsSheetLabel(person){ return String(person||'').trim().toUpperCase()+' LEADS'; }
 
+// ═══════════════════════════════════════════════════════════
+// MY CUSTOMERS + OFFER ZONE  (birthdays & anniversaries)
+// ═══════════════════════════════════════════════════════════
+// Open WhatsApp to a customer with a pre-filled message — same wa.me pattern used
+// across the app (a 10-digit Indian number gets a 91 prefix).
+function _openWhatsApp(phone, text){
+  const p = _normPhone(phone);
+  try { window.open('https://wa.me/'+(p?'91'+p:'')+'?text='+encodeURIComponent(text||''), '_blank'); } catch(e) {}
+}
+
+// One customer-occasion row, shared by My Customers and the Offer Zone. A Wish
+// button (when showWish) opens a warm greeting; the one-time Offer button (when
+// showOffer) opens the special-offer message and then locks itself for good on
+// every device — a customer who already got the offer shows "Offer sent".
+function CustomerEventCard({ev, offerSent, onWish, onOffer, showWish, showOffer}){
+  const isBday = ev.occasion==='Birthday';
+  const when = ev.days===0 ? 'Today 🎉' : (ev.days===1 ? 'Tomorrow' : 'In '+ev.days+' days');
+  const whenTone = ev.days===0 ? T.green : (ev.days<=2 ? T.warn : T.ink4);
+  return (
+    <div style={{background:'#fff',border:`1px solid ${ev.days===0?T.green:T.line}`,borderRadius:10,padding:'12px 13px',position:'relative',overflow:'hidden'}}>
+      {ev.days===0 && <div style={{position:'absolute',left:0,top:0,bottom:0,width:3,background:T.green}}/>}
+      <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:10}}>
+        <div style={{minWidth:0,flex:1}}>
+          <div style={{display:'flex',alignItems:'center',gap:7,flexWrap:'wrap'}}>
+            <span style={{fontSize:18}}>{isBday?'🎂':'💍'}</span>
+            <span style={{fontSize:15,fontWeight:800,color:T.ink}}>{ev.customer||'—'}</span>
+            <span style={{fontSize:9,fontWeight:900,letterSpacing:.4,color:'#fff',background:isBday?'#c026a3':'#7c3aed',padding:'2px 7px',borderRadius:99,textTransform:'uppercase'}}>{ev.occasion}</span>
+          </div>
+          <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:4}}>{ev.dm}{ev.phone?' · '+ev.phone:''}{ev.salesExec?' · '+ev.salesExec:''}</div>
+        </div>
+        <div style={{textAlign:'right',flexShrink:0}}>
+          <div style={{fontSize:12,fontWeight:800,color:whenTone}}>{when}</div>
+        </div>
+      </div>
+      <div style={{display:'flex',gap:8,marginTop:11}}>
+        {showWish!==false && (
+          <button onClick={()=>onWish(ev)} style={{flex:1,height:40,borderRadius:8,background:'#25d366',border:'none',color:'#fff',fontSize:13,fontWeight:800,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:7}}>{Icon.whatsapp('#fff',15)} Wish</button>
+        )}
+        {showOffer && (
+          offerSent
+            ? <button disabled title="This customer's one-time offer has already been sent" style={{flex:1,height:40,borderRadius:8,background:T.paper,border:`1px solid ${T.line}`,color:T.ink4,fontSize:12,fontWeight:800,cursor:'not-allowed',display:'flex',alignItems:'center',justifyContent:'center',gap:6}}>✓ Offer sent</button>
+            : <button onClick={()=>onOffer(ev)} style={{flex:1,height:40,borderRadius:8,background:'#0b6b3a',border:'none',color:'#fff',fontSize:13,fontWeight:800,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:6}}>🎁 Offer</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Shared hook: the upcoming birthday/anniversary events for the current view.
+// `showAll` (managers only) widens the scope from the logged-in salesperson's own
+// customers to everyone's; the events refresh whenever the order book changes.
+function useCustomerEvents(ctx, showAll){
+  const { orders, user } = ctx;
+  const senderName = String(user?.name||'').trim();
+  return React.useMemo(
+    ()=> buildCustomerEvents(orders, OCCASION_WINDOW_DAYS, showAll ? { all:true } : { salesExec: senderName }),
+    [orders, showAll, senderName]
+  );
+}
+
+function MyCustomerScreen({ctx}){
+  const { user, nav, loadOrders, offersSent, loadOffersSent, doMarkOfferSent, showToast } = ctx;
+  const isManager = hasManagerAccess(user);
+  const senderName = String(user?.name||'').trim();
+  const [showAll,setShowAll] = useState(isManager);
+  useEffect(()=>{ loadOrders({silent:true}); loadOffersSent(); },[]);
+  const events = useCustomerEvents(ctx, showAll);
+  const todayCount = events.filter(e=>e.days===0).length;
+
+  const wish = ev => _openWhatsApp(ev.phone, customerWishMessage(ev.occasion, ev.customer, senderName));
+  const offer = ev => {
+    const k = offerKeyFor(ev);
+    if (offersSent && offersSent[k]) { showToast && showToast('This customer has already received their offer','warn'); return; }
+    if (!window.confirm('Send '+(ev.customer||'this customer')+' their one-time '+ev.occasion+' offer?\n\nIt is valid today only and can be sent just once — the button then stays disabled on every device.')) return;
+    doMarkOfferSent(ev);
+    _openWhatsApp(ev.phone, customerOfferMessage(ev.occasion, ev.customer, senderName, ev.days===0));
+  };
+
+  return (
+    <div className="screen">
+      <div style={{flexShrink:0,background:'linear-gradient(120deg,#0b6b3a 0%,#0e5c4f 100%)',color:'#fff',padding:'12px 16px 14px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.home('#fff',18)}</button>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,opacity:.85}}>🎉 MY CUSTOMERS</div>
+            <div style={{fontSize:20,fontWeight:900,letterSpacing:-0.5}}>Birthdays &amp; Anniversaries</div>
+          </div>
+          <button onClick={()=>{loadOrders();loadOffersSent();}} title="Refresh" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.refresh('#fff',15)}</button>
+        </div>
+        <div style={{fontSize:11,opacity:.85,marginTop:8}}>Customers with a birthday or anniversary in the next {OCCASION_WINDOW_DAYS} days{showAll?' · all salespeople':(senderName?' · '+senderName:'')}.</div>
+        {isManager && (
+          <div style={{display:'flex',gap:6,marginTop:10}}>
+            <button onClick={()=>setShowAll(false)} style={{flex:1,padding:'7px 10px',borderRadius:99,border:`1.5px solid ${!showAll?'#fff':'rgba(255,255,255,.3)'}`,background:!showAll?'#fff':'rgba(255,255,255,.08)',color:!showAll?'#0e5c4f':'#fff',fontSize:12,fontWeight:800,cursor:'pointer'}}>My customers</button>
+            <button onClick={()=>setShowAll(true)} style={{flex:1,padding:'7px 10px',borderRadius:99,border:`1.5px solid ${showAll?'#fff':'rgba(255,255,255,.3)'}`,background:showAll?'#fff':'rgba(255,255,255,.08)',color:showAll?'#0e5c4f':'#fff',fontSize:12,fontWeight:800,cursor:'pointer'}}>All customers</button>
+          </div>
+        )}
+      </div>
+
+      <div className="scroll" style={{background:T.paper}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,padding:'12px 16px 4px'}}>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>UPCOMING (7 DAYS)</div>
+            <div style={{fontSize:24,fontWeight:800,color:T.ink,lineHeight:1.1,marginTop:2}}>{events.length}</div>
+          </div>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TODAY</div>
+            <div style={{fontSize:24,fontWeight:800,color:todayCount>0?T.green:T.ink,lineHeight:1.1,marginTop:2}}>{todayCount}</div>
+          </div>
+        </div>
+
+        <div style={{padding:'8px 16px 4px',fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:1,textTransform:'uppercase'}}>Wish &amp; offer</div>
+        <div style={{padding:'0 16px 20px',display:'flex',flexDirection:'column',gap:8}}>
+          {events.length===0 ? (
+            <div style={{background:'#fff',border:`1px dashed ${T.line}`,borderRadius:10,padding:'28px 16px',textAlign:'center'}}>
+              <div style={{fontSize:30,marginBottom:6}}>🎂</div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2}}>No birthdays or anniversaries in the next {OCCASION_WINDOW_DAYS} days</div>
+              <div style={{fontSize:12,color:T.ink4,marginTop:3}}>They appear here automatically as the date nears — captured from the customer profile on each order.</div>
+            </div>
+          ) : events.map((ev,i)=>(
+            <CustomerEventCard key={ev.occasion+'|'+ev.phone+'|'+i} ev={ev} offerSent={!!(offersSent&&offersSent[offerKeyFor(ev)])} onWish={wish} onOffer={offer} showWish={true} showOffer={true}/>
+          ))}
+        </div>
+        <div style={{height:28}}/>
+      </div>
+      <BottomNav screen="home" nav={nav}/>
+    </div>
+  );
+}
+
+function OfferZoneScreen({ctx}){
+  const { user, nav, loadOrders, offersSent, loadOffersSent, doMarkOfferSent, showToast } = ctx;
+  const isManager = hasManagerAccess(user);
+  const senderName = String(user?.name||'').trim();
+  const [showAll,setShowAll] = useState(isManager);
+  useEffect(()=>{ loadOrders({silent:true}); loadOffersSent(); },[]);
+  const events = useCustomerEvents(ctx, showAll);
+  const sentCount = events.filter(e=>offersSent&&offersSent[offerKeyFor(e)]).length;
+
+  const offer = ev => {
+    const k = offerKeyFor(ev);
+    if (offersSent && offersSent[k]) { showToast && showToast('This customer has already received their offer','warn'); return; }
+    if (!window.confirm('Send '+(ev.customer||'this customer')+' their one-time '+ev.occasion+' offer?\n\nIt is valid today only and can be sent just once — the button then stays disabled on every device.')) return;
+    doMarkOfferSent(ev);
+    _openWhatsApp(ev.phone, customerOfferMessage(ev.occasion, ev.customer, senderName, ev.days===0));
+  };
+
+  return (
+    <div className="screen">
+      <div style={{flexShrink:0,background:'linear-gradient(120deg,#7a1420 0%,#b5471d 100%)',color:'#fff',padding:'12px 16px 14px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.home('#fff',18)}</button>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,opacity:.85}}>🎁 OFFER ZONE</div>
+            <div style={{fontSize:20,fontWeight:900,letterSpacing:-0.5}}>Special day offers</div>
+          </div>
+          <button onClick={()=>{loadOrders();loadOffersSent();}} title="Refresh" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.refresh('#fff',15)}</button>
+        </div>
+        <div style={{fontSize:11,opacity:.9,marginTop:8}}>Send a one-time birthday / anniversary offer — valid the same day only. Each customer can be sent the offer just once; it then stays disabled on every device.</div>
+        {isManager && (
+          <div style={{display:'flex',gap:6,marginTop:10}}>
+            <button onClick={()=>setShowAll(false)} style={{flex:1,padding:'7px 10px',borderRadius:99,border:`1.5px solid ${!showAll?'#fff':'rgba(255,255,255,.3)'}`,background:!showAll?'#fff':'rgba(255,255,255,.08)',color:!showAll?'#7a1420':'#fff',fontSize:12,fontWeight:800,cursor:'pointer'}}>My customers</button>
+            <button onClick={()=>setShowAll(true)} style={{flex:1,padding:'7px 10px',borderRadius:99,border:`1.5px solid ${showAll?'#fff':'rgba(255,255,255,.3)'}`,background:showAll?'#fff':'rgba(255,255,255,.08)',color:showAll?'#7a1420':'#fff',fontSize:12,fontWeight:800,cursor:'pointer'}}>All customers</button>
+          </div>
+        )}
+      </div>
+
+      <div className="scroll" style={{background:T.paper}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,padding:'12px 16px 4px'}}>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>ELIGIBLE (7 DAYS)</div>
+            <div style={{fontSize:24,fontWeight:800,color:T.ink,lineHeight:1.1,marginTop:2}}>{events.length}</div>
+          </div>
+          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>OFFER SENT</div>
+            <div style={{fontSize:24,fontWeight:800,color:sentCount>0?T.green:T.ink,lineHeight:1.1,marginTop:2}}>{sentCount}</div>
+          </div>
+        </div>
+
+        <div style={{padding:'8px 16px 4px',fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:1,textTransform:'uppercase'}}>Share the offer</div>
+        <div style={{padding:'0 16px 20px',display:'flex',flexDirection:'column',gap:8}}>
+          {events.length===0 ? (
+            <div style={{background:'#fff',border:`1px dashed ${T.line}`,borderRadius:10,padding:'28px 16px',textAlign:'center'}}>
+              <div style={{fontSize:30,marginBottom:6}}>🎁</div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2}}>No customers eligible right now</div>
+              <div style={{fontSize:12,color:T.ink4,marginTop:3}}>Offers become available as a customer's birthday or anniversary approaches (within {OCCASION_WINDOW_DAYS} days).</div>
+            </div>
+          ) : events.map((ev,i)=>(
+            <CustomerEventCard key={ev.occasion+'|'+ev.phone+'|'+i} ev={ev} offerSent={!!(offersSent&&offersSent[offerKeyFor(ev)])} onOffer={offer} showWish={false} showOffer={true}/>
+          ))}
+        </div>
+        <div style={{height:28}}/>
+      </div>
+      <BottomNav screen="home" nav={nav}/>
+    </div>
+  );
+}
+
 function LeadsScreen({ctx}){
   const {user,orders,leads,leadsLoading,nav,loadLeads,doAddLead,doEditLead} = ctx;
   const isManager = hasManagerAccess(user);
@@ -4560,6 +4910,30 @@ function HomeScreen({ctx}) {
               <div><div style={{fontSize:14,fontWeight:700,color:T.ink,letterSpacing:-0.2}}>Leads</div><div style={{fontSize:11,color:T.ink4}}>Track leads · add new · +6 pts on convert</div></div>
             </div>
             <div style={{textAlign:'right'}}><div style={{fontSize:15,fontWeight:800,fontFamily:T.mono,color:T.ink}}>{total}</div><div style={{fontSize:10,color:T.ink4}}>{total===1?'lead':'leads'}</div></div>
+          </button>
+          );})()}
+        </div>
+        {/* My Customers — upcoming birthdays & anniversaries (wish + one-time offer) */}
+        <div style={{padding:'0 18px 12px'}}>
+          {(()=>{ const scope=hasManagerAccess(user)?{all:true}:{salesExec:user?.name||''}; const evs=buildCustomerEvents(orders,OCCASION_WINDOW_DAYS,scope); const today=evs.filter(e=>e.days===0).length; return (
+          <button onClick={()=>nav('mycustomers')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 18px',background:'#fff',border:`1px solid ${today>0?T.green:T.line}`,borderRadius:8,cursor:'pointer',textAlign:'left'}}>
+            <div style={{display:'flex',alignItems:'center',gap:12}}>
+              <div style={{width:38,height:38,borderRadius:99,background:T.greenSoft,display:'flex',alignItems:'center',justifyContent:'center',fontSize:18}}>🎉</div>
+              <div><div style={{fontSize:14,fontWeight:700,color:T.ink,letterSpacing:-0.2}}>My Customers</div><div style={{fontSize:11,color:T.ink4}}>Birthdays &amp; anniversaries · wish · offer</div></div>
+            </div>
+            <div style={{textAlign:'right'}}><div style={{fontSize:15,fontWeight:800,fontFamily:T.mono,color:today>0?T.green:T.ink}}>{evs.length}</div><div style={{fontSize:10,color:T.ink4}}>{today>0?today+' today':'in 7 days'}</div></div>
+          </button>
+          );})()}
+        </div>
+        {/* Offer Zone — one-time special-day offers, valid same day only */}
+        <div style={{padding:'0 18px 12px'}}>
+          {(()=>{ const scope=hasManagerAccess(user)?{all:true}:{salesExec:user?.name||''}; const evs=buildCustomerEvents(orders,OCCASION_WINDOW_DAYS,scope); const avail=evs.filter(e=>!(ctx.offersSent&&ctx.offersSent[offerKeyFor(e)])).length; return (
+          <button onClick={()=>nav('offerzone')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 18px',background:'linear-gradient(100deg,#7a1420 0%,#b5471d 100%)',color:'#fff',border:'none',borderRadius:8,cursor:'pointer',textAlign:'left'}}>
+            <div style={{display:'flex',alignItems:'center',gap:12}}>
+              <div style={{width:38,height:38,borderRadius:99,background:'rgba(255,255,255,.16)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:18}}>🎁</div>
+              <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>Offer Zone</div><div style={{fontSize:11,opacity:.85}}>Send a special day offer · once per customer</div></div>
+            </div>
+            <div style={{textAlign:'right'}}><div style={{fontSize:15,fontWeight:800,fontFamily:T.mono}}>{avail}</div><div style={{fontSize:10,opacity:.85}}>{avail===1?'to send':'to send'}</div></div>
           </button>
           );})()}
         </div>
@@ -8539,6 +8913,7 @@ function NotificationsScreen({ctx}) {
   const committedCount = misList.filter(m=>m.committed).length;
 
   const groups = [
+    {kind:'occasion', label:'Customer birthdays & anniversaries', icon:<span style={{fontSize:15,lineHeight:'15px'}}>🎂</span>, tone:T.green, soft:T.greenSoft},
     {kind:'overdue',  label:'Overdue deliveries', icon:Icon.clock(T.bad,16), tone:T.bad, soft:T.badSoft||'#fdecec'},
     {kind:'followup', label:'Follow-ups due', icon:Icon.bell(T.ink2,15), tone:T.ink2, soft:T.paper2},
     {kind:'soon',     label:'Delivery approaching', icon:Icon.truck(T.warn,16), tone:T.warn, soft:T.warnSoft},
@@ -8623,7 +8998,7 @@ function NotificationsScreen({ctx}) {
               </div>
               <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`}}>
                 {items.map((n,i)=>(
-                  <div key={n.id} onClick={()=>openOrder(n.order)} style={{display:'flex',gap:10,padding:'11px 16px',alignItems:'flex-start',borderBottom:i<items.length-1?`1px solid ${T.line}`:'none',cursor:'pointer',borderLeft:`3px solid ${g.tone}`}}>
+                  <div key={n.id} onClick={()=> n.kind==='occasion' ? nav('mycustomers') : openOrder(n.order)} style={{display:'flex',gap:10,padding:'11px 16px',alignItems:'flex-start',borderBottom:i<items.length-1?`1px solid ${T.line}`:'none',cursor:'pointer',borderLeft:`3px solid ${g.tone}`}}>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontSize:13,fontWeight:700,color:T.ink}}>{n.title}</div>
                       <div style={{fontSize:11.5,color:T.ink3,marginTop:2,lineHeight:1.45}}>{n.body}</div>
