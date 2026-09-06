@@ -170,6 +170,7 @@ function doPost(e) {
       case 'editLead':        result = handleEditLead(body);          break;
       case 'sendWhatsApp':    result = handleSendWhatsApp(body);      break;
       case 'markOfferSent':   result = handleMarkOfferSent(body);     break;
+      case 'resetOffersSent': result = handleResetOffersSent(body);   break;
       default:                result = { ok: false, error: 'Unknown action: ' + body.action };
     }
   } catch(err) {
@@ -3917,6 +3918,34 @@ function handleMarkOfferSent(body) {
     var dateStr = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
     sh.appendRow([phone, occasion, year, customer, by, dateStr]);
     return { ok: true, already: false, phone: phone, occasion: occasion, year: year };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
+  }
+}
+
+// POST (admin only): clear the OFFERS SENT lock so every customer can be sent the
+// special-day offer again — used for trial runs. Wipes every data row (keeps the
+// header) so the shared lock is empty on every device after the next sync. Guarded
+// server-side: the caller's role is looked up from the same creds/staff sheets used
+// for login and the reset only proceeds when that role is 'admin'.
+// body: { by }  (by = the caller's username)
+function handleResetOffersSent(body) {
+  var by = String((body && (body.by || body.updatedBy)) || '').trim();
+  if (_lookupRole(by) !== 'admin') {
+    return { ok: false, error: 'Only an admin can reset the offer counter.' };
+  }
+  var lock = LockService.getScriptLock();
+  var haveLock = false;
+  try { haveLock = lock.tryLock(15000); } catch (e) {}
+  try {
+    var sh = _offersSheet(false);
+    if (!sh) return { ok: true, cleared: 0 };   // no tab yet → nothing to clear
+    var cleared = Math.max(0, sh.getLastRow() - 1);
+    if (cleared > 0) sh.deleteRows(2, cleared);
+    _appendLog(by, '', 'RESET_OFFERS_SENT', 'Cleared ' + cleared + ' offer lock(s)');
+    return { ok: true, cleared: cleared };
   } catch (e) {
     return { ok: false, error: e.message };
   } finally {

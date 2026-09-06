@@ -2228,10 +2228,20 @@ function customerWishMessage(occasion, customerName, senderName){
 function customerOfferMessage(occasion, customerName, senderName, sameDay){
   const name = String(customerName||'').trim() || 'there';
   const reason = (occasion==='Anniversary') ? 'Anniversary' : 'Birthday';
-  const validity = sameDay
-    ? ('Do note: this offer is valid all through your ' + reason + ' month — and today is your special day! 🎉')
-    : ('Do note: this offer is valid all through your ' + reason + ' month.');
-  const body = 'Dear ' + name + ',\n\nHappy ' + reason + '! 🎉 To make your special ' + reason.toLowerCase() + ' month even better, here is an exclusive ' + reason + ' offer, just for you from Interio by Godrej, Patia — a special discount + a surprise gift on your favourite furniture. 🎁\n\n' + validity + ' Simply visit our showroom or reply to this message to claim it. We would love to be a part of your celebrations!';
+  const celebrate = sameDay
+    ? '✨ And today is your special day — this month is all about celebrating YOU!'
+    : '✨ This month is all about celebrating YOU!';
+  const body =
+    'Dear ' + name + ',\n\n' +
+    'To make your special month even more memorable, we\'re delighted to offer you an EXCLUSIVE ' + reason + ' Month Discount 🎁✨\n\n' +
+    'Enjoy a Special Discount + Surprise Gift on your furniture purchase, exclusively during your ' + reason + ' Month.\n\n' +
+    '📅 Offer Validity: Throughout your ' + reason + ' Month\n' +
+    '🛋️ Applicable on: Your purchase from Interio by Godrej, Patia\n\n' +
+    'Terms & Conditions:\n' +
+    '• Offer cannot be clubbed with other ongoing offers, discounts or schemes.\n' +
+    '• Other terms and conditions may apply.\n\n' +
+    celebrate + '\n' +
+    'Visit our showroom and make your special month even more special with beautiful furniture for your home. ❤️';
   return body + occasionSignOff(senderName);
 }
 
@@ -2929,6 +2939,28 @@ function App() {
     }
   }
 
+  // Admin-only: clear the shared birthday/anniversary offer lock so every customer
+  // can be sent the offer again — for trial runs. Wipes the backend OFFERS SENT tab
+  // (re-checked as admin server-side) and the local cache/state so the Offer buttons
+  // re-enable instantly on this device; other devices clear on their next sync.
+  async function doResetOffersSent() {
+    if (normRole(user?.role) !== 'admin') {
+      showToast('Only an admin can reset the offer counter','bad'); return false;
+    }
+    setLoading(true);
+    try {
+      const res = await apiPost({ action:'resetOffersSent', by: user?.username||'' });
+      if (res && res.ok) {
+        setOffersSent({});
+        try { localStorage.setItem('4s_offers_sent', JSON.stringify({})); } catch(e) {}
+        showToast('Offer counter reset ✓ — ' + (res.cleared||0) + ' cleared');
+        return true;
+      }
+      showToast((res && res.error) || 'Could not reset the offer counter','bad'); return false;
+    } catch(e) { showToast(e.message,'bad'); return false; }
+    finally { setLoading(false); }
+  }
+
   // Ask the backend for the exact next app Receipt No (authoritative — it reads the
   // live sheet and skips manual orders). Returns a number, or null if unreachable.
   async function getNextReceipt() {
@@ -3220,7 +3252,7 @@ function App() {
     mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen,
     league, leagueLoading, loadLeague, doSaveLeagueScore, doSaveLeagueConfig,
     leads, leadsLoading, loadLeads, doAddLead, doEditLead,
-    offersSent, loadOffersSent, doMarkOfferSent };
+    offersSent, loadOffersSent, doMarkOfferSent, doResetOffersSent };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -4277,9 +4309,15 @@ function useCustomerEvents(ctx, showAll){
 }
 
 function MyCustomerScreen({ctx}){
-  const { user, nav, loadOrders, offersSent, loadOffersSent, doMarkOfferSent, showToast } = ctx;
+  const { user, nav, loadOrders, offersSent, loadOffersSent, doMarkOfferSent, doResetOffersSent, showToast } = ctx;
   const isManager = hasManagerAccess(user);
+  const isAdmin = normRole(user?.role) === 'admin';
   const senderName = String(user?.name||'').trim();
+  const resetOffers = async () => {
+    if (!window.confirm('Reset the offer counter for ALL customers?\n\nThis clears the once-per-customer lock on every device so the birthday / anniversary offer can be sent again. Use this only for trial runs.')) return;
+    const ok = await doResetOffersSent();
+    if (ok) loadOffersSent();
+  };
   const [showAll,setShowAll] = useState(isManager);
   useEffect(()=>{ loadOrders({silent:true}); loadOffersSent(); },[]);
   const events = useCustomerEvents(ctx, showAll);
@@ -4324,6 +4362,14 @@ function MyCustomerScreen({ctx}){
         {events.length>0 && (
           <div style={{margin:'2px 16px 6px',padding:'9px 12px',background:T.greenSoft,border:`1px solid ${T.greenLine||T.line}`,borderRadius:8,fontSize:11,color:T.ink3,lineHeight:1.5}}>
             <b style={{color:T.ink2}}>Wish</b> sends a greeting · <b style={{color:T.ink2}}>Offer</b> sends the one-time special offer, valid all through the customer's birthday / anniversary month. The offer can be sent just once per customer per occasion each year — once sent it locks on every device, for every salesperson, so nobody sends a duplicate.
+          </div>
+        )}
+        {isAdmin && (
+          <div style={{margin:'2px 16px 6px',display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'9px 12px',background:T.warnSoft||'#fff7ed',border:`1px solid ${T.warnLine||T.line}`,borderRadius:8}}>
+            <div style={{fontSize:11,color:T.ink3,lineHeight:1.4}}>
+              <b style={{color:T.ink2}}>Trial mode</b> · reset the once-per-customer offer lock so every customer can be messaged again.
+            </div>
+            <button onClick={resetOffers} style={{flexShrink:0,padding:'7px 12px',borderRadius:99,border:`1.5px solid ${T.warn||'#d97706'}`,background:'#fff',color:T.warn||'#d97706',fontSize:12,fontWeight:800,cursor:'pointer',whiteSpace:'nowrap'}}>🧪 Reset all offers</button>
           </div>
         )}
         <div style={{padding:'0 16px 20px',display:'flex',flexDirection:'column',gap:8}}>
