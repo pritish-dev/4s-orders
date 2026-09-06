@@ -2144,10 +2144,19 @@ function buildCustomerEvents(orders, windowDays, opts){
   return evs;
 }
 
-// A key that uniquely identifies a customer for the once-per-customer offer lock
-// (the normalised 10-digit phone). Kept in one place so the client and the
-// "already sent" check always agree.
-function offerKeyFor(ev){ return _normPhone(ev && (ev.phone!=null ? ev.phone : (ev.order && ev.order.phone))) || ''; }
+// The key that locks a customer's special-day offer. It is scoped to the CUSTOMER
+// (10-digit phone) + the OCCASION (Birthday / Anniversary) + the YEAR of that
+// occasion. So a customer can receive BOTH a birthday and an anniversary offer,
+// but never two birthday offers (or two anniversary offers) in the same year —
+// no duplicate on the day, from any device or salesperson. The lock naturally
+// frees up again next year. Kept in one place so the client and the backend agree.
+function offerYearOf(ev){ return String((ev && ev.iso) || '').slice(0,4) || String(new Date().getFullYear()); }
+function offerKeyFor(ev){
+  if(!ev) return '';
+  const ph = _normPhone(ev.phone!=null ? ev.phone : (ev.order && ev.order.phone));
+  if(!ph) return '';
+  return ph + '|' + (String(ev.occasion||'').trim() || 'Offer') + '|' + offerYearOf(ev);
+}
 
 // The store's standard sign-off, appended to every customer WhatsApp message:
 //   Regards,
@@ -2825,7 +2834,12 @@ function App() {
       if (res && res.ok && Array.isArray(res.offers)) {
         setOffersSent(prev => {
           const merged = { ...(prev||{}) };
-          res.offers.forEach(o => { const k = _normPhone(o && o.phone); if (k) merged[k] = true; });
+          res.offers.forEach(o => {
+            const ph = _normPhone(o && o.phone); if (!ph) return;
+            const occ = String((o && o.occasion) || '').trim() || 'Offer';
+            const yr = String((o && o.year) || '').trim() || String((o && o.date) || '').slice(0,4);
+            merged[ph + '|' + occ + '|' + yr] = true;
+          });
           try { localStorage.setItem('4s_offers_sent', JSON.stringify(merged)); } catch(e) {}
           return merged;
         });
@@ -2843,15 +2857,18 @@ function App() {
   //   already=true  → someone else already sent it → do NOT send again
   // The local lock is set immediately either way so the button disables at once.
   async function doMarkOfferSent(ev) {
-    const key = offerKeyFor(ev);
-    if (!key) return { proceed:false };
+    const lockKey = offerKeyFor(ev);
+    const phone = _normPhone(ev && (ev.phone!=null ? ev.phone : (ev.order && ev.order.phone)));
+    if (!lockKey || !phone) return { proceed:false };
+    const occasion = String((ev && ev.occasion) || '').trim();
+    const year = offerYearOf(ev);
     setOffersSent(prev => {
-      const next = { ...(prev||{}), [key]: true };
+      const next = { ...(prev||{}), [lockKey]: true };
       try { localStorage.setItem('4s_offers_sent', JSON.stringify(next)); } catch(e) {}
       return next;
     });
     try {
-      const res = await apiPost({ action:'markOfferSent', phone:key, customer:(ev&&ev.customer)||'', occasion:(ev&&ev.occasion)||'', by:user?.name||user?.username||'' });
+      const res = await apiPost({ action:'markOfferSent', phone:phone, occasion:occasion, year:year, customer:(ev&&ev.customer)||'', by:user?.name||user?.username||'' });
       if (res && res.ok) return { proceed: !res.already, already: !!res.already };
       // Backend reachable but the action isn't live yet — send optimistically.
       return { proceed:true, offline:true };
@@ -3173,7 +3190,6 @@ function App() {
     league:  <LeagueScreen ctx={ctx}/>,
     leads:   <LeadsScreen ctx={ctx}/>,
     mycustomers: <MyCustomerScreen ctx={ctx}/>,
-    offerzone:   <OfferZoneScreen ctx={ctx}/>,
   };
 
   return (
@@ -4251,7 +4267,12 @@ function MyCustomerScreen({ctx}){
           </div>
         </div>
 
-        <div style={{padding:'8px 16px 4px',fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:1,textTransform:'uppercase'}}>Wish &amp; offer</div>
+        <div style={{padding:'8px 16px 4px',fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:1,textTransform:'uppercase'}}>🎁 Offer Zone · wish &amp; special-day offer</div>
+        {events.length>0 && (
+          <div style={{margin:'2px 16px 6px',padding:'9px 12px',background:T.greenSoft,border:`1px solid ${T.greenLine||T.line}`,borderRadius:8,fontSize:11,color:T.ink3,lineHeight:1.5}}>
+            <b style={{color:T.ink2}}>Wish</b> sends a greeting · <b style={{color:T.ink2}}>Offer</b> sends the one-time special-day offer. The offer can be sent just once per customer per occasion each year — once sent it locks on every device, for every salesperson, so nobody sends a duplicate.
+          </div>
+        )}
         <div style={{padding:'0 16px 20px',display:'flex',flexDirection:'column',gap:8}}>
           {events.length===0 ? (
             <div style={{background:'#fff',border:`1px dashed ${T.line}`,borderRadius:10,padding:'28px 16px',textAlign:'center'}}>
@@ -4261,68 +4282,6 @@ function MyCustomerScreen({ctx}){
             </div>
           ) : events.map((ev,i)=>(
             <CustomerEventCard key={ev.occasion+'|'+ev.phone+'|'+i} ev={ev} offerSent={!!(offersSent&&offersSent[offerKeyFor(ev)])} onWish={wish} onOffer={offer} showWish={true} showOffer={true}/>
-          ))}
-        </div>
-        <div style={{height:28}}/>
-      </div>
-      <BottomNav screen="home" nav={nav}/>
-    </div>
-  );
-}
-
-function OfferZoneScreen({ctx}){
-  const { user, nav, loadOrders, offersSent, loadOffersSent, doMarkOfferSent, showToast } = ctx;
-  const isManager = hasManagerAccess(user);
-  const senderName = String(user?.name||'').trim();
-  const [showAll,setShowAll] = useState(isManager);
-  useEffect(()=>{ loadOrders({silent:true}); loadOffersSent(); },[]);
-  const events = useCustomerEvents(ctx, showAll);
-  const sentCount = events.filter(e=>offersSent&&offersSent[offerKeyFor(e)]).length;
-
-  const offer = ev => sendOfferWithLock({ ev, senderName, offersSent, doMarkOfferSent, showToast });
-
-  return (
-    <div className="screen">
-      <div style={{flexShrink:0,background:'linear-gradient(120deg,#7a1420 0%,#b5471d 100%)',color:'#fff',padding:'12px 16px 14px'}}>
-        <div style={{display:'flex',alignItems:'center',gap:10}}>
-          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.home('#fff',18)}</button>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,opacity:.85}}>🎁 OFFER ZONE</div>
-            <div style={{fontSize:20,fontWeight:900,letterSpacing:-0.5}}>Special day offers</div>
-          </div>
-          <button onClick={()=>{loadOrders();loadOffersSent();}} title="Refresh" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.refresh('#fff',15)}</button>
-        </div>
-        <div style={{fontSize:11,opacity:.9,marginTop:8}}>Send a one-time birthday / anniversary offer — valid the same day only. Each customer can be sent the offer just once; it then stays disabled on every device.</div>
-        {isManager && (
-          <div style={{display:'flex',gap:6,marginTop:10}}>
-            <button onClick={()=>setShowAll(false)} style={{flex:1,padding:'7px 10px',borderRadius:99,border:`1.5px solid ${!showAll?'#fff':'rgba(255,255,255,.3)'}`,background:!showAll?'#fff':'rgba(255,255,255,.08)',color:!showAll?'#7a1420':'#fff',fontSize:12,fontWeight:800,cursor:'pointer'}}>My customers</button>
-            <button onClick={()=>setShowAll(true)} style={{flex:1,padding:'7px 10px',borderRadius:99,border:`1.5px solid ${showAll?'#fff':'rgba(255,255,255,.3)'}`,background:showAll?'#fff':'rgba(255,255,255,.08)',color:showAll?'#7a1420':'#fff',fontSize:12,fontWeight:800,cursor:'pointer'}}>All customers</button>
-          </div>
-        )}
-      </div>
-
-      <div className="scroll" style={{background:T.paper}}>
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,padding:'12px 16px 4px'}}>
-          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px'}}>
-            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>ELIGIBLE (7 DAYS)</div>
-            <div style={{fontSize:24,fontWeight:800,color:T.ink,lineHeight:1.1,marginTop:2}}>{events.length}</div>
-          </div>
-          <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px'}}>
-            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>OFFER SENT</div>
-            <div style={{fontSize:24,fontWeight:800,color:sentCount>0?T.green:T.ink,lineHeight:1.1,marginTop:2}}>{sentCount}</div>
-          </div>
-        </div>
-
-        <div style={{padding:'8px 16px 4px',fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:1,textTransform:'uppercase'}}>Share the offer</div>
-        <div style={{padding:'0 16px 20px',display:'flex',flexDirection:'column',gap:8}}>
-          {events.length===0 ? (
-            <div style={{background:'#fff',border:`1px dashed ${T.line}`,borderRadius:10,padding:'28px 16px',textAlign:'center'}}>
-              <div style={{fontSize:30,marginBottom:6}}>🎁</div>
-              <div style={{fontSize:14,fontWeight:700,color:T.ink2}}>No customers eligible right now</div>
-              <div style={{fontSize:12,color:T.ink4,marginTop:3}}>Offers become available as a customer's birthday or anniversary approaches (within {OCCASION_WINDOW_DAYS} days).</div>
-            </div>
-          ) : events.map((ev,i)=>(
-            <CustomerEventCard key={ev.occasion+'|'+ev.phone+'|'+i} ev={ev} offerSent={!!(offersSent&&offersSent[offerKeyFor(ev)])} onOffer={offer} showWish={false} showOffer={true}/>
           ))}
         </div>
         <div style={{height:28}}/>
@@ -4825,11 +4784,40 @@ function CollectiblesScreen({ctx}) {
 // ─── Home ───────────────────────────────────────────────────
 function HomeScreen({ctx}) {
   const {user,orders,syncedAt,priceItems,priceSyncError,nav,loadOrders,syncPriceList,loading,unreadCount,loadMis} = ctx;
-  const isAdmin = normRole(user?.role) === 'admin';
+  const role        = normRole(user?.role);
+  const canManual   = role === 'admin' || role === 'owner';   // Manual Order: admin & owner only
   const todayOrders = orders.filter(o=>o.date===istToday({day:'2-digit',month:'2-digit',year:'2-digit'}).replace(/\//g,'.'));
   const pendingWON  = orders.filter(isPendingWon).length;
   const mtd         = orders.reduce((s,o)=>s+o.amt,0);
   useEffect(()=>{ loadOrders(); loadMis({silent:true}); requestNotifPermission(); },[]);
+
+  // ── The premium coloured menu (one rectangle per destination) ──────────────
+  const leadTotal  = Object.keys(ctx.leads||{}).reduce((s,k)=>s+((ctx.leads[k]||[]).length),0);
+  const custScope  = hasManagerAccess(user) ? {all:true} : {salesExec:user?.name||''};
+  const custEvs    = buildCustomerEvents(orders, OCCASION_WINDOW_DAYS, custScope);
+  const custToday  = custEvs.filter(e=>e.days===0).length;
+  const dueTotal   = (orders||[]).filter(o=>o&&o.status!=='draft').reduce((s,o)=>s+orderReceived(o).balance,0);
+  const openSvc    = orders.filter(o=>o.serviceFlag&&!/resolved/i.test(o.serviceStatus||'')).length;
+
+  const tiles = [
+    { key:'book',    label:'Book an Order',        sub:'New customer order',        emoji:'🛒', bg:'linear-gradient(135deg,#0b6b3a 0%,#0e5c4f 100%)', onClick:()=>{ctx.setOrder({...BLANK_ORDER(),salesExec:user?.name||''});nav('order');} },
+    canManual && { key:'manual', label:'Manual Order', sub:'Admin & owner only',    emoji:'📝', bg:'linear-gradient(135deg,#334155 0%,#1e293b 100%)', onClick:()=>{ctx.setOrder({...BLANK_ORDER(),manualOrder:true,salesExec:user?.name||''});nav('order');} },
+    { key:'reports', label:'Sales Summary',        sub:'Month-to-date report',      emoji:'📊', bg:'linear-gradient(135deg,#0e7490 0%,#155e75 100%)', onClick:()=>nav('reports') },
+    { key:'league',  label:'4S Premier League',    sub:'Live scoreboard',           emoji:'🏆', bg:'linear-gradient(135deg,#1e3a8a 0%,#7a1420 100%)', onClick:()=>nav('league') },
+    { key:'leads',   label:'Leads',                sub:leadTotal+(leadTotal===1?' lead':' leads'), emoji:'🎯', bg:'linear-gradient(135deg,#b45309 0%,#92400e 100%)', onClick:()=>nav('leads') },
+    { key:'cust',    label:'My Customers',         sub:custToday>0?(custToday+' today'):(custEvs.length+' in 7 days'), emoji:'🎉', bg:'linear-gradient(135deg,#be185d 0%,#9d174d 100%)', onClick:()=>nav('mycustomers') },
+    { key:'collect', label:'Outstanding Payments', sub:dueTotal>0?('₹'+Math.round(dueTotal).toLocaleString('en-IN')+' to collect'):'All clear', emoji:'💰', bg:'linear-gradient(135deg,#9f1239 0%,#7a1420 100%)', onClick:()=>nav('collect') },
+    { key:'service', label:'Service Requests',     sub:openSvc?(openSvc+' open'):'None open', emoji:'🛠️', bg:'linear-gradient(135deg,#4338ca 0%,#3730a3 100%)', onClick:()=>nav('service') },
+  ].filter(Boolean);
+
+  // ── Bottom quick-tools dock (round buttons) ────────────────────────────────
+  const tools = [
+    { key:'search',  label:'Browse',   icon:Icon.search('#0b6b3a',20), onClick:()=>nav('search') },
+    { key:'finder',  label:'Price',    icon:<span style={{fontSize:20,lineHeight:'20px'}}>🏷️</span>, onClick:()=>nav('finder') },
+    { key:'history', label:'Orders',   icon:Icon.doc('#0b6b3a',20), onClick:()=>nav('history') },
+    { key:'sync',    label:'Sync',     icon:Icon.refresh('#0b6b3a',18), onClick:()=>ctx.syncStock() },
+  ];
+
   return (
     <div className="screen">
       <div style={{flexShrink:0}}>
@@ -4838,7 +4826,7 @@ function HomeScreen({ctx}) {
           <div>
             <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>{istToday({weekday:'short',day:'2-digit',month:'short'}).toUpperCase()}</div>
             <div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2,display:'flex',alignItems:'center',gap:8}}>Hi, {user?.name||'there'}
-              {hasManagerAccess(user)&&<span style={{fontSize:9,fontWeight:800,letterSpacing:.6,color:'#fff',background:T.ink,padding:'2px 7px',borderRadius:99,textTransform:'uppercase'}}>{normRole(user?.role)}</span>}
+              {hasManagerAccess(user)&&<span style={{fontSize:9,fontWeight:800,letterSpacing:.6,color:'#fff',background:T.ink,padding:'2px 7px',borderRadius:99,textTransform:'uppercase'}}>{role}</span>}
             </div>
           </div>
           <div style={{display:'flex',alignItems:'center',gap:10}}>
@@ -4849,7 +4837,7 @@ function HomeScreen({ctx}) {
             <div style={{width:42,height:42,borderRadius:6,background:T.green,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:T.mono,fontSize:16,fontWeight:700}}>{(user?.name||'?').slice(0,2).toUpperCase()}</div>
           </div>
         </div>
-        <div style={{display:'grid',gridTemplateColumns:'1.2fr 1fr 1fr',gap:8,padding:'8px 18px 14px'}}>
+        <div style={{display:'grid',gridTemplateColumns:'1.2fr 1fr 1fr',gap:8,padding:'8px 18px 12px'}}>
           {[{label:'TODAY',val:String(todayOrders.length),sub:'orders',tone:'green'},{label:'PEND WON',val:String(pendingWON),sub:'awaiting',tone:'warn'},{label:'M.T.D.',val:'₹'+(mtd>99999?(mtd/100000).toFixed(1)+'L':mtd.toLocaleString('en-IN')),sub:'booked',tone:'ink'}].map(s=>(
             <div key={s.label} style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:6,padding:'10px 11px',position:'relative',overflow:'hidden'}}>
               <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>{s.label}</div>
@@ -4859,6 +4847,13 @@ function HomeScreen({ctx}) {
             </div>
           ))}
         </div>
+        {/* Price list status banner */}
+        {!priceItems?.length && (
+          <div style={{margin:'0 18px 10px',padding:'10px 14px',background:priceSyncError?T.badSoft:T.warnSoft,border:`1.5px solid ${priceSyncError?T.bad:T.warn}`,borderRadius:8,display:'flex',alignItems:'center',justifyContent:'space-between',gap:10}}>
+            <div style={{fontSize:12,color:priceSyncError?T.bad:T.warn,fontWeight:600,flex:1}}>{priceSyncError?'Price list sync failed — tap to retry':'Price list not loaded yet'}</div>
+            <button onClick={syncPriceList} disabled={loading} style={{flexShrink:0,padding:'6px 12px',borderRadius:6,background:priceSyncError?T.bad:T.warn,color:'#fff',border:'none',fontSize:12,fontWeight:700,cursor:'pointer'}}>{loading?'…':'Load'}</button>
+          </div>
+        )}
         {/* Resume an unsaved order draft (autosaved locally, restored after login). */}
         {(()=>{ let draft=null; try{ const d=JSON.parse(localStorage.getItem('4s_draft')||'null'); if(d && !d.no && ((d.items&&d.items.length)||d.customer)) draft=d; }catch(e){} if(!draft) return null; return (
           <div style={{margin:'0 18px 12px',padding:'11px 14px',background:T.warnSoft,border:'1px solid #e6cc95',borderRadius:8,display:'flex',alignItems:'center',gap:10}}>
@@ -4870,133 +4865,32 @@ function HomeScreen({ctx}) {
             <button onClick={()=>{ if(!window.confirm('Discard the unsaved draft?'))return; try{localStorage.removeItem('4s_draft');}catch(e){} ctx.setOrder(BLANK_ORDER()); }} title="Discard draft" style={{flexShrink:0,width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.trash(T.ink4,14)}</button>
           </div>
         ); })()}
-        <div style={{padding:'0 18px 12px'}}>
-          <button onClick={()=>{ctx.setOrder({...BLANK_ORDER(),salesExec:user?.name||''});nav('order');}} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 18px',background:T.green,color:'#fff',border:'none',borderRadius:8,cursor:'pointer',textAlign:'left'}}>
-            <div><div style={{fontSize:11,fontWeight:600,opacity:.7,letterSpacing:.5,textTransform:'uppercase'}}>NEW</div><div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4,marginTop:2}}>Book an order</div></div>
-            <div style={{width:40,height:40,borderRadius:99,background:'#fff',display:'flex',alignItems:'center',justifyContent:'center'}}>{Icon.plus(T.green)}</div>
-          </button>
-        </div>
-        {/* Manual Order — admin only. Same booking flow as "Book an order", but
-            the booking date is settable and 18% GST is baked into each item's
-            price. Used to replicate orders that were booked manually (on paper). */}
-        {isAdmin && (
-        <div style={{padding:'0 18px 12px'}}>
-          <button onClick={()=>{ctx.setOrder({...BLANK_ORDER(),manualOrder:true,salesExec:user?.name||''});nav('order');}} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 18px',background:T.ink,color:'#fff',border:'none',borderRadius:8,cursor:'pointer',textAlign:'left'}}>
-            <div><div style={{fontSize:11,fontWeight:600,opacity:.7,letterSpacing:.5,textTransform:'uppercase'}}>MANUAL</div><div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4,marginTop:2}}>Manual Order</div></div>
-            <div style={{width:40,height:40,borderRadius:99,background:'#fff',display:'flex',alignItems:'center',justifyContent:'center'}}>{Icon.plus(T.ink)}</div>
-          </button>
-        </div>
-        )}
-        {/* Price list status banner */}
-        {!priceItems?.length && (
-          <div style={{margin:'0 18px 10px',padding:'10px 14px',background:priceSyncError?T.badSoft:T.warnSoft,border:`1.5px solid ${priceSyncError?T.bad:T.warn}`,borderRadius:8,display:'flex',alignItems:'center',justifyContent:'space-between',gap:10}}>
-            <div style={{fontSize:12,color:priceSyncError?T.bad:T.warn,fontWeight:600,flex:1}}>{priceSyncError?'Price list sync failed — tap to retry':'Price list not loaded yet'}</div>
-            <button onClick={syncPriceList} disabled={loading} style={{flexShrink:0,padding:'6px 12px',borderRadius:6,background:priceSyncError?T.bad:T.warn,color:'#fff',border:'none',fontSize:12,fontWeight:700,cursor:'pointer'}}>{loading?'…':'Load'}</button>
-          </div>
-        )}
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,padding:'0 18px 16px'}}>
-          {[
-            {icon:Icon.search(T.ink2,18),label:'Browse\nItems',sub:(priceItems?.length>0)?(priceItems.length+' SKUs'):'Not loaded',tone:(priceItems?.length>0)?T.ok:T.warn,s:'search'},
-            {icon:<span style={{fontSize:18,lineHeight:'18px'}}>🏷️</span>,label:'Price\nFinder',sub:'MOP · WEF '+PRICE_BOOK_WEF,tone:T.ink4,s:'finder'},
-            {icon:Icon.doc(T.ink2,18),label:'Order\nHistory',sub:'',tone:T.ink4,s:'history'},
-            {icon:Icon.refresh(T.ink2,16),label:'Sync\nStock',sub:'',tone:T.ink4,s:null},
-            (()=>{const nOpen=orders.filter(o=>o.serviceFlag&&!/resolved/i.test(o.serviceStatus||'')).length;return {icon:<span style={{fontSize:18,lineHeight:'18px'}}>⚠️</span>,label:'Service\nRequests',sub:nOpen?nOpen+' open':'None open',tone:nOpen?T.bad:T.ink4,s:'service'};})(),
-          ].map((q,i)=>(
-            <div key={i} onClick={()=>q.s?nav(q.s):ctx.syncStock()} style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:6,padding:12,display:'flex',flexDirection:'column',gap:6,minHeight:76,cursor:'pointer'}}>
-              {q.icon}
-              <div style={{fontSize:12,fontWeight:600,color:T.ink,lineHeight:1.25,whiteSpace:'pre-line'}}>{q.label}</div>
-              {q.sub?<div style={{fontSize:10,fontWeight:700,fontFamily:T.mono,color:q.tone}}>{q.sub}</div>:null}
-            </div>
-          ))}
-        </div>
-        <div style={{padding:'0 18px 12px'}}>
-          <button onClick={()=>nav('reports')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 18px',background:T.green,color:'#fff',border:'none',borderRadius:8,cursor:'pointer',textAlign:'left'}}>
-            <div><div style={{fontSize:11,fontWeight:600,opacity:.7,letterSpacing:.5,textTransform:'uppercase'}}>REPORTS</div><div style={{fontSize:18,fontWeight:700,letterSpacing:-0.4,marginTop:2}}>Sales summary</div></div>
-            <div style={{width:40,height:40,borderRadius:99,background:'#fff',display:'flex',alignItems:'center',justifyContent:'center'}}>{Icon.doc(T.green,20)}</div>
-          </button>
-        </div>
-        {/* 4S Premier League — live team scoreboard */}
-        <div style={{padding:'0 18px 12px'}}>
-          <button onClick={()=>nav('league')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 18px',background:'linear-gradient(100deg,#0b2a6b 0%,#12173a 48%,#7a1420 100%)',color:'#fff',border:'none',borderRadius:8,cursor:'pointer',textAlign:'left',boxShadow:'0 4px 14px rgba(10,20,60,.25)'}}>
-            <div><div style={{fontSize:11,fontWeight:700,opacity:.8,letterSpacing:1,textTransform:'uppercase'}}>🏏 LIVE SCOREBOARD</div><div style={{fontSize:18,fontWeight:800,letterSpacing:-0.3,marginTop:2}}>4S Premier League</div><div style={{fontSize:11,opacity:.75,marginTop:1}}>Strikers vs Titans · monthly season, weekly battles</div></div>
-            <div style={{fontSize:26}}>🏆</div>
-          </button>
-        </div>
-        {/* Leads — per-salesperson lead register (view + add) */}
-        <div style={{padding:'0 18px 12px'}}>
-          {(()=>{ const total=Object.keys(ctx.leads||{}).reduce((s,k)=>s+((ctx.leads[k]||[]).length),0); return (
-          <button onClick={()=>nav('leads')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 18px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,cursor:'pointer',textAlign:'left'}}>
-            <div style={{display:'flex',alignItems:'center',gap:12}}>
-              <div style={{width:38,height:38,borderRadius:99,background:T.greenSoft,display:'flex',alignItems:'center',justifyContent:'center',fontSize:18}}>🎯</div>
-              <div><div style={{fontSize:14,fontWeight:700,color:T.ink,letterSpacing:-0.2}}>Leads</div><div style={{fontSize:11,color:T.ink4}}>Track leads · add new · +6 pts on convert</div></div>
-            </div>
-            <div style={{textAlign:'right'}}><div style={{fontSize:15,fontWeight:800,fontFamily:T.mono,color:T.ink}}>{total}</div><div style={{fontSize:10,color:T.ink4}}>{total===1?'lead':'leads'}</div></div>
-          </button>
-          );})()}
-        </div>
-        {/* My Customers — upcoming birthdays & anniversaries (wish + one-time offer) */}
-        <div style={{padding:'0 18px 12px'}}>
-          {(()=>{ const scope=hasManagerAccess(user)?{all:true}:{salesExec:user?.name||''}; const evs=buildCustomerEvents(orders,OCCASION_WINDOW_DAYS,scope); const today=evs.filter(e=>e.days===0).length; return (
-          <button onClick={()=>nav('mycustomers')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 18px',background:'#fff',border:`1px solid ${today>0?T.green:T.line}`,borderRadius:8,cursor:'pointer',textAlign:'left'}}>
-            <div style={{display:'flex',alignItems:'center',gap:12}}>
-              <div style={{width:38,height:38,borderRadius:99,background:T.greenSoft,display:'flex',alignItems:'center',justifyContent:'center',fontSize:18}}>🎉</div>
-              <div><div style={{fontSize:14,fontWeight:700,color:T.ink,letterSpacing:-0.2}}>My Customers</div><div style={{fontSize:11,color:T.ink4}}>Birthdays &amp; anniversaries · wish · offer</div></div>
-            </div>
-            <div style={{textAlign:'right'}}><div style={{fontSize:15,fontWeight:800,fontFamily:T.mono,color:today>0?T.green:T.ink}}>{evs.length}</div><div style={{fontSize:10,color:T.ink4}}>{today>0?today+' today':'in 7 days'}</div></div>
-          </button>
-          );})()}
-        </div>
-        {/* Offer Zone — one-time special-day offers, valid same day only */}
-        <div style={{padding:'0 18px 12px'}}>
-          {(()=>{ const scope=hasManagerAccess(user)?{all:true}:{salesExec:user?.name||''}; const evs=buildCustomerEvents(orders,OCCASION_WINDOW_DAYS,scope); const avail=evs.filter(e=>!(ctx.offersSent&&ctx.offersSent[offerKeyFor(e)])).length; return (
-          <button onClick={()=>nav('offerzone')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 18px',background:'linear-gradient(100deg,#7a1420 0%,#b5471d 100%)',color:'#fff',border:'none',borderRadius:8,cursor:'pointer',textAlign:'left'}}>
-            <div style={{display:'flex',alignItems:'center',gap:12}}>
-              <div style={{width:38,height:38,borderRadius:99,background:'rgba(255,255,255,.16)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:18}}>🎁</div>
-              <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>Offer Zone</div><div style={{fontSize:11,opacity:.85}}>Send a special day offer · once per customer</div></div>
-            </div>
-            <div style={{textAlign:'right'}}><div style={{fontSize:15,fontWeight:800,fontFamily:T.mono}}>{avail}</div><div style={{fontSize:10,opacity:.85}}>{avail===1?'to send':'to send'}</div></div>
-          </button>
-          );})()}
-        </div>
-        {/* Outstanding payments — live total still to collect across all booked orders */}
-        <div style={{padding:'0 18px 12px'}}>
-          {(()=>{ const due=(orders||[]).filter(o=>o&&o.status!=='draft').reduce((s,o)=>s+orderReceived(o).balance,0); return (
-          <button onClick={()=>nav('collect')} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 18px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,cursor:'pointer',textAlign:'left'}}>
-            <div style={{display:'flex',alignItems:'center',gap:12}}>
-              <div style={{width:38,height:38,borderRadius:99,background:due>0?T.badSoft:T.greenSoft,display:'flex',alignItems:'center',justifyContent:'center'}}><span style={{fontWeight:800,fontSize:18,color:due>0?T.bad:T.green}}>₹</span></div>
-              <div><div style={{fontSize:14,fontWeight:700,color:T.ink,letterSpacing:-0.2}}>Outstanding payments</div><div style={{fontSize:11,color:T.ink4}}>Balances still to collect</div></div>
-            </div>
-            <div style={{textAlign:'right'}}><div style={{fontSize:15,fontWeight:800,fontFamily:T.mono,color:due>0?T.bad:T.ok}}>₹{Math.round(due).toLocaleString('en-IN')}</div><div style={{fontSize:10,color:T.ink4}}>{due>0?'to collect':'all clear'}</div></div>
-          </button>
-          );})()}
-        </div>
-        <div style={{padding:'0 18px 6px',display:'flex',alignItems:'baseline',justifyContent:'space-between'}}>
-          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:1.2,textTransform:'uppercase'}}>RECENT ORDERS</div>
-          <div onClick={()=>nav('history')} style={{fontSize:11,color:T.green,fontWeight:600,cursor:'pointer'}}>VIEW ALL →</div>
-        </div>
       </div>
+
+      {/* Coloured menu — the heart of the home screen */}
       <div className="scroll">
-        <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`}}>
-          {orders.slice(0,5).map((o,i,arr)=>(
-            <div key={o.no} onClick={()=>{ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)});nav('orderview');}} style={{display:'grid',gridTemplateColumns:'1fr auto',padding:'11px 18px',alignItems:'center',gap:10,borderBottom:i<arr.length-1?`1px solid ${T.line}`:'none',cursor:'pointer'}}>
-              <div style={{minWidth:0}}>
-                <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3}}>
-                  <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
-                  {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:(isPendingWon(o)?<Pill tone="warn" size="sm">WON?</Pill>:null)}
-                </div>
-                <div style={{fontSize:13,fontWeight:600,color:T.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{o.customer}</div>
-                <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:1}}>{o.date} · {o.salesExec}</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,padding:'6px 16px 18px'}}>
+          {tiles.map(t=>(
+            <button key={t.key} onClick={t.onClick} style={{textAlign:'left',border:'none',cursor:'pointer',borderRadius:16,padding:'15px 14px',minHeight:112,background:t.bg,color:'#fff',display:'flex',flexDirection:'column',justifyContent:'space-between',boxShadow:'0 6px 18px rgba(10,20,15,.18)'}}>
+              <div style={{width:40,height:40,borderRadius:12,background:'rgba(255,255,255,.20)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:21}}>{t.emoji}</div>
+              <div>
+                <div style={{fontSize:15,fontWeight:800,letterSpacing:-0.3,lineHeight:1.15}}>{t.label}</div>
+                <div style={{fontSize:11,opacity:.88,marginTop:3,fontWeight:600}}>{t.sub}</div>
               </div>
-              <div style={{textAlign:'right'}}>
-                <div style={{fontSize:14,fontFamily:T.mono,fontWeight:700,color:T.ink,letterSpacing:-0.3}}>₹{o.amt.toLocaleString('en-IN')}</div>
-                <div style={{marginTop:3}}><Pill tone={o.status==='delivered'?'ok':o.status==='billed'?'green':o.status==='draft'?'neutral':'warn'} size="sm">{o.status==='pending-won'?'PENDING':o.status.toUpperCase()}</Pill></div>
-              </div>
-            </div>
+            </button>
           ))}
-          {loading && orders.length===0 && [0,1,2].map(i=><SkeletonOrderRow key={i}/>)}
-          {!loading && orders.length===0 && <div style={{padding:24,textAlign:'center',fontSize:13,color:T.ink4}}>No orders yet. Tap "Book an order" to start.</div>}
         </div>
-        <div style={{height:24}}/>
+        <div style={{height:8}}/>
+      </div>
+
+      {/* Bottom quick-tools dock — round shortcut buttons */}
+      <div style={{flexShrink:0,display:'flex',justifyContent:'space-around',gap:6,padding:'10px 12px 8px',background:'#fff',borderTop:`1px solid ${T.line}`}}>
+        {tools.map(t=>(
+          <button key={t.key} onClick={t.onClick} style={{background:'none',border:'none',cursor:'pointer',display:'flex',flexDirection:'column',alignItems:'center',gap:5,flex:1,padding:0}}>
+            <div style={{width:50,height:50,borderRadius:'50%',background:T.greenSoft,border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center'}}>{t.icon}</div>
+            <div style={{fontSize:11,fontWeight:700,color:T.ink2}}>{t.label}</div>
+          </button>
+        ))}
       </div>
       <BottomNav screen="home" nav={nav}/>
     </div>

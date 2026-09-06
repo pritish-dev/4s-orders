@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v57';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v58';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -3821,12 +3821,15 @@ function _leagueDate(v) {
 }
 
 // ─── BIRTHDAY / ANNIVERSARY OFFER LOCK ────────────────────────────────────────
-// The "Offer Zone" lets a salesperson send a customer a one-time special-day
-// offer. It may be sent only ONCE per customer, ever — and once sent it must stay
-// disabled on EVERY device. That shared state lives in an "OFFERS SENT" tab in the
-// OPS spreadsheet: one row per customer (keyed by their 10-digit phone), so any
-// device reading it sees the same locked set. GET returns the whole set; the POST
-// appends a customer the first time their offer is sent (idempotent thereafter).
+// The special-day offer (sent from My Customers) may go to a customer only ONCE
+// per OCCASION per YEAR — so a customer can receive both a birthday offer and an
+// anniversary offer, but never two birthday offers (or two anniversary offers) in
+// the same year, no matter which salesperson or device sends it. That shared lock
+// lives in an "OFFERS SENT" tab in the OPS spreadsheet: one row per
+// phone+occasion+year, so any device reading it sees the same locked set. GET
+// returns the whole set; the POST claims a (phone, occasion, year) the first time
+// it is sent and reports already:true for every later attempt (idempotent), which
+// is what stops a duplicate going out in a same-day race between salespeople.
 var OFFERS_SHEET_NAME = 'OFFERS SENT';
 
 // Normalise a phone to the 10-digit key used everywhere (last 10 digits).
@@ -3842,33 +3845,34 @@ function _offersSheet(create) {
   var sh = ss.getSheetByName(OFFERS_SHEET_NAME);
   if (!sh && create) {
     sh = ss.insertSheet(OFFERS_SHEET_NAME);
-    sh.appendRow(['PHONE', 'CUSTOMER', 'OCCASION', 'SENT BY', 'DATE']);
-    try { sh.getRange(1, 1, 1, 5).setFontWeight('bold'); sh.setFrozenRows(1); } catch (e) {}
+    sh.appendRow(['PHONE', 'OCCASION', 'YEAR', 'CUSTOMER', 'SENT BY', 'DATE']);
+    try { sh.getRange(1, 1, 1, 6).setFontWeight('bold'); sh.setFrozenRows(1); } catch (e) {}
   }
   return sh;
 }
 
-// GET: the list of customers who have already been sent the one-time offer.
-// Shape: { ok:true, offers:[{ phone, customer, occasion, by, date }], scriptVersion }
+// GET: the list of offers already sent (each row is one phone+occasion+year).
+// Shape: { ok:true, offers:[{ phone, occasion, year, customer, by, date }], scriptVersion }
 function handleOffersSent() {
   try {
     var sh = _offersSheet(false);
     var offers = [];
     if (sh && sh.getLastRow() >= 2) {
       var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
-      var vals = sh.getRange(2, 1, sh.getLastRow() - 1, 5).getValues();
+      var vals = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
       for (var i = 0; i < vals.length; i++) {
         var r = vals[i];
         var phone = _offerPhoneKey(r[0]);
         if (!phone) continue;
-        var dv = r[4];
+        var dv = r[5];
         var dateStr = (dv instanceof Date && !isNaN(dv.getTime()))
           ? Utilities.formatDate(dv, tz, 'yyyy-MM-dd') : String(dv == null ? '' : dv).trim();
         offers.push({
           phone: phone,
-          customer: String(r[1] == null ? '' : r[1]).trim(),
-          occasion: String(r[2] == null ? '' : r[2]).trim(),
-          by: String(r[3] == null ? '' : r[3]).trim(),
+          occasion: String(r[1] == null ? '' : r[1]).trim(),
+          year: String(r[2] == null ? '' : r[2]).trim(),
+          customer: String(r[3] == null ? '' : r[3]).trim(),
+          by: String(r[4] == null ? '' : r[4]).trim(),
           date: dateStr
         });
       }
@@ -3879,15 +3883,19 @@ function handleOffersSent() {
   }
 }
 
-// POST: record that a customer has been sent their one-time offer. Idempotent —
-// if the customer's phone is already present the row is left as-is and the reply
-// reports already:true. body: { phone, customer?, occasion?, by? }
+// POST: claim a customer's special-day offer for one occasion+year. Idempotent —
+// if that phone+occasion+year is already present the row is left as-is and the
+// reply reports already:true (the caller must then NOT send the message).
+// body: { phone, occasion?, year?, customer?, by? }
 function handleMarkOfferSent(body) {
   var phone = _offerPhoneKey(body && body.phone);
   if (!phone) return { ok: false, error: 'A valid customer phone is required to record the offer.' };
-  var customer = String((body && body.customer) || '').trim();
+  var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
   var occasion = String((body && body.occasion) || '').trim();
+  var year     = String((body && body.year) || '').trim() || Utilities.formatDate(new Date(), tz, 'yyyy');
+  var customer = String((body && body.customer) || '').trim();
   var by       = String((body && (body.by || body.sentBy)) || '').trim();
+  var occLc    = occasion.toLowerCase();
 
   var lock = LockService.getScriptLock();
   var haveLock = false;
@@ -3895,19 +3903,20 @@ function handleMarkOfferSent(body) {
   try {
     var sh = _offersSheet(true);
     if (!sh) return { ok: false, error: 'Cannot open OPS sheet: ' + OPS_SHEET_ID };
-    // Already recorded? Then it stays locked — never send twice.
+    // Already claimed for this occasion + year? Then it stays locked — never twice.
     if (sh.getLastRow() >= 2) {
-      var existing = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues();
+      var existing = sh.getRange(2, 1, sh.getLastRow() - 1, 3).getValues();
       for (var i = 0; i < existing.length; i++) {
-        if (_offerPhoneKey(existing[i][0]) === phone) {
-          return { ok: true, already: true, phone: phone };
+        if (_offerPhoneKey(existing[i][0]) === phone &&
+            String(existing[i][1] == null ? '' : existing[i][1]).trim().toLowerCase() === occLc &&
+            String(existing[i][2] == null ? '' : existing[i][2]).trim() === year) {
+          return { ok: true, already: true, phone: phone, occasion: occasion, year: year };
         }
       }
     }
-    var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
     var dateStr = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
-    sh.appendRow([phone, customer, occasion, by, dateStr]);
-    return { ok: true, already: false, phone: phone };
+    sh.appendRow([phone, occasion, year, customer, by, dateStr]);
+    return { ok: true, already: false, phone: phone, occasion: occasion, year: year };
   } catch (e) {
     return { ok: false, error: e.message };
   } finally {
