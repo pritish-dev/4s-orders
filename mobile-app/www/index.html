@@ -2197,6 +2197,22 @@ function isFourSOrder(o) {
 function isPendingWon(o) {
   return !!o && !o.won && o.status !== 'draft' && !isFourSOrder(o);
 }
+// Whether the order still has at least one franchise (non-4S) line that has NOT
+// yet been attached to a Godrej SO / WON. One SO is stamped per item, but a
+// single order can carry several SO numbers across its items — so the "+ SO"
+// prompt must stay visible only while some franchise line is still unattached.
+// Once every franchise line carries its own SO the order is fully attached and
+// must not be prompted to add another. 4S warehouse lines never get an SO and
+// are ignored. Legacy orders whose item lines weren't reconstructed keep the
+// old order-level rule so their behaviour is unchanged.
+function hasUnattachedSO(o) {
+  if (!o || o.status === 'draft') return false;        // drafts aren't booked yet
+  const its = o.items || [];
+  if (!its.length) return !!o.won || isPendingWon(o);
+  const franchise = its.filter(it => !_isFourS(it && it.whTag));
+  if (!franchise.length) return false;                 // pure 4S order → never gets a SO
+  return franchise.some(it => !String((it && it.won) || '').trim());
+}
 // Urgency colour for an order by its delivery progress. The same colour is used
 // on every screen so an order reads the same everywhere until it moves on:
 //   • Red    — overdue: the scheduled delivery date has passed and the order is
@@ -7258,9 +7274,10 @@ function HistoryScreen({ctx}) {
                 <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
                 {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:null}
                 {/* SO / WON is generated only for the franchise channel — a pure 4S
-                    order (or a mixed order once its franchise line already carries an
-                    SO) is never prompted to add one. isPendingWon() encodes that rule. */}
-                {(o.won || isPendingWon(o)) && <span onClick={e=>{e.stopPropagation();setWonOrder(o);}} style={{display:'inline-flex',alignItems:'center',height:16,padding:'0 6px',borderRadius:4,background:T.warnSoft,color:T.warn,border:'1px solid #e6cc95',fontSize:10,fontWeight:700,cursor:'pointer'}}>{o.won?'+ SO':'+ ADD SO'}</span>}
+                    order is never prompted to add one. The prompt also disappears once
+                    every franchise line already carries its own SO (nothing left to
+                    attach). hasUnattachedSO() encodes both rules. */}
+                {hasUnattachedSO(o) && <span onClick={e=>{e.stopPropagation();setWonOrder(o);}} style={{display:'inline-flex',alignItems:'center',height:16,padding:'0 6px',borderRadius:4,background:T.warnSoft,color:T.warn,border:'1px solid #e6cc95',fontSize:10,fontWeight:700,cursor:'pointer'}}>{o.won?'+ SO':'+ ADD SO'}</span>}
               </div>
               <div style={{fontSize:14,fontWeight:700,color:T.ink}}>{o.customer}</div>
               <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.salesExec}</div>
