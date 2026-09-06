@@ -2949,7 +2949,7 @@ function App() {
     }
     setLoading(true);
     try {
-      const res = await apiPost({ action:'resetOffersSent', by: user?.username||'' });
+      const res = await apiPost({ action:'resetOffersSent', by: user?.code, updatedBy: user?.name });
       if (res && res.ok) {
         setOffersSent({});
         try { localStorage.setItem('4s_offers_sent', JSON.stringify({})); } catch(e) {}
