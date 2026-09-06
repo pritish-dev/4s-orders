@@ -2138,34 +2138,33 @@ function prettyDate(iso) {
 }
 
 // ─── CUSTOMER OCCASIONS (birthday / anniversary) ──────────────────────────────
-// Birthdays & anniversaries are stored day+month only ("DD/MM"). These helpers
-// work out when the NEXT occurrence lands so "My Customers" and the occasion
-// notifications can surface the ones coming up within the next week.
-const OCCASION_WINDOW_DAYS = 7;   // show/notify occasions within this many days
+// Birthdays & anniversaries are stored day+month only ("DD/MM"). The store runs
+// its special-day offer per calendar MONTH: every customer whose birthday /
+// anniversary falls in the CURRENT month is surfaced in "My Customers" (and the
+// occasion notifications) for the whole month, and the offer they receive is
+// valid for that birthday / anniversary month.
 // Format a stored day+month value as "DD/MM" (or '' if incomplete).
 function dmFmt(v){ const p = parseDayMonth(v); return (p.d && p.m) ? (String(p.d).padStart(2,'0')+'/'+String(p.m).padStart(2,'0')) : ''; }
-// The ISO date (yyyy-mm-dd) of the next occurrence of a stored "DD/MM", counting
-// from today in IST. A 29-Feb date clamps to 28 Feb in non-leap years. '' if unset.
-function dayMonthNextISO(dm){
+// The ISO date (yyyy-mm-dd) of this year's occurrence of a stored "DD/MM" WHEN it
+// falls in the current calendar month (IST); '' when it is not this month or is
+// unset. A 29-Feb date clamps to 28 Feb in non-leap years.
+function dayMonthThisMonthISO(dm){
   const p = parseDayMonth(dm); if(!p.d || !p.m) return '';
   const d = Number(p.d), m = Number(p.m);
   if(!(d>=1 && d<=31 && m>=1 && m<=12)) return '';
   const nowStr = new Date().toLocaleDateString('en-CA', { timeZone: IST_TZ });  // yyyy-mm-dd today (IST)
-  const parts = nowStr.split('-').map(Number); const ty=parts[0], tm=parts[1], td=parts[2];
-  const today = new Date(ty, tm-1, td);
-  function occ(y){ let day=d; const max=new Date(y, m, 0).getDate(); if(day>max) day=max; return new Date(y, m-1, day); }
-  let nx = occ(ty); if(nx.getTime() < today.getTime()) nx = occ(ty+1);
-  return nx.getFullYear()+'-'+String(nx.getMonth()+1).padStart(2,'0')+'-'+String(nx.getDate()).padStart(2,'0');
+  const parts = nowStr.split('-').map(Number); const ty=parts[0], tm=parts[1];
+  if(m !== tm) return '';                                     // not in the current month
+  const max = new Date(ty, m, 0).getDate(); const day = Math.min(d, max);
+  return ty+'-'+String(m).padStart(2,'0')+'-'+String(day).padStart(2,'0');
 }
-// Whole days until the next occurrence (0 = today), or null if unset.
-function daysUntilDayMonth(dm){ const iso = dayMonthNextISO(dm); return iso ? daysFromToday(iso) : null; }
 
-// Build the upcoming birthday / anniversary events from the order book. One entry
-// per customer (deduped by phone) per occasion whose next occurrence is within
-// `windowDays` (0 = today). Pass { salesExec:'Name' } to scope to one salesperson;
+// Build this month's birthday / anniversary events from the order book. One entry
+// per customer (deduped by phone) per occasion whose day+month falls in the
+// current calendar month — for the whole month, whether the day is still to come,
+// today, or already past. Pass { salesExec:'Name' } to scope to one salesperson;
 // pass { all:true } to include every customer regardless of who booked them.
-function buildCustomerEvents(orders, windowDays, opts){
-  const w = (windowDays==null) ? OCCASION_WINDOW_DAYS : windowDays;
+function buildCustomerEvents(orders, opts){
   const o = opts||{};
   const wantExec = String(o.salesExec||'').trim().toLowerCase();
   const byPhone = new Map();
@@ -2182,13 +2181,15 @@ function buildCustomerEvents(orders, windowDays, opts){
   byPhone.forEach((od, ph)=>{
     [['Birthday', od.dob], ['Anniversary', od.anniversary]].forEach(pair=>{
       const occ = pair[0], dm = pair[1];
-      const days = daysUntilDayMonth(dm);
-      if(days==null || days<0 || days>w) return;
+      const iso = dayMonthThisMonthISO(dm);
+      if(!iso) return;                          // only occasions in the current month
       evs.push({ occasion: occ, customer: od.customer||'', phone: ph, dm: dmFmt(dm),
-        salesExec: od.salesExec||'', days: days, iso: dayMonthNextISO(dm), orderNo: od.no||'', order: od });
+        salesExec: od.salesExec||'', days: daysFromToday(iso), dom: Number(iso.slice(8,10)),
+        iso: iso, orderNo: od.no||'', order: od });
     });
   });
-  evs.sort((a,b)=> (a.days-b.days) || String(a.customer).localeCompare(String(b.customer)));
+  // Chronological within the month (by day-of-month), then by customer name.
+  evs.sort((a,b)=> (a.dom-b.dom) || String(a.customer).localeCompare(String(b.customer)));
   return evs;
 }
 
@@ -2221,16 +2222,16 @@ function customerWishMessage(occasion, customerName, senderName){
     : ('Dear ' + name + ',\n\nWishing you a very Happy Birthday! 🎂🎉 May this year bring you great health, happiness and everything your heart desires. Thank you for being a valued part of the Interio by Godrej, Patia family.');
   return body + occasionSignOff(senderName);
 }
-// The one-time SPECIAL OFFER message. The offer is valid only on the customer's
-// birthday / anniversary itself ("that day only"). `sameDay` tailors the wording
-// for when it is being sent on the day vs. a little ahead.
+// The one-time SPECIAL OFFER message. The offer is valid for the whole of the
+// customer's birthday / anniversary MONTH. `sameDay` tailors the wording for when
+// it is being sent on the special day itself vs. elsewhere in the month.
 function customerOfferMessage(occasion, customerName, senderName, sameDay){
   const name = String(customerName||'').trim() || 'there';
   const reason = (occasion==='Anniversary') ? 'Anniversary' : 'Birthday';
   const validity = sameDay
-    ? 'Do note: this offer is valid TODAY only — on your special day.'
-    : ('Do note: this offer is valid only on your ' + reason + ' — your special day.');
-  const body = 'Dear ' + name + ',\n\nHappy ' + reason + '! 🎉 To make your special day even better, here is an exclusive ' + reason + ' offer, just for you from Interio by Godrej, Patia — a special discount + a surprise gift on your favourite furniture. 🎁\n\n' + validity + ' Simply visit our showroom or reply to this message to claim it. We would love to be a part of your celebrations!';
+    ? ('Do note: this offer is valid all through your ' + reason + ' month — and today is your special day! 🎉')
+    : ('Do note: this offer is valid all through your ' + reason + ' month.');
+  const body = 'Dear ' + name + ',\n\nHappy ' + reason + '! 🎉 To make your special ' + reason.toLowerCase() + ' month even better, here is an exclusive ' + reason + ' offer, just for you from Interio by Godrej, Patia — a special discount + a surprise gift on your favourite furniture. 🎁\n\n' + validity + ' Simply visit our showroom or reply to this message to claim it. We would love to be a part of your celebrations!';
   return body + occasionSignOff(senderName);
 }
 
@@ -2419,20 +2420,23 @@ function buildNotifications(orders, mis, user) {
       });
     }
   });
-  // 4) Customer birthday / anniversary coming up within the next week — a nudge
-  // to open My Customers and send them a wish (and, once ever, the special offer).
-  // Scoped to the logged-in salesperson's own customers so nobody is nudged about
-  // someone else's; a manager still only gets their own to keep the list focused.
+  // 4) Customer birthday / anniversary falling in the CURRENT month — a nudge to
+  // open My Customers and send them a wish (and, once ever, the special-month
+  // offer). Scoped to the logged-in salesperson's own customers so nobody is
+  // nudged about someone else's; a manager still only gets their own to keep the
+  // list focused.
   const meName = String((user && user.name) || '').trim();
   if (meName) {
-    buildCustomerEvents(orders, OCCASION_WINDOW_DAYS, { salesExec: meName }).forEach(ev => {
+    buildCustomerEvents(orders, { salesExec: meName }).forEach(ev => {
       const occLc = ev.occasion.toLowerCase();
+      const whenTxt = ev.days === 0 ? ' is today!'
+        : (ev.days > 0 ? ' in ' + ev.days + ' day' + (ev.days > 1 ? 's' : '')
+                       : ' this month (' + ev.dm + ')');
       out.push({
         id: 'occ|' + ev.occasion + '|' + ev.phone + '|' + ev.dm,
         kind: 'occasion', tone: ev.days === 0 ? 'green' : 'warn', orderNo: ev.orderNo || '', order: ev.order || null,
-        title: (ev.occasion === 'Birthday' ? '🎂 ' : '💍 ') + (ev.customer || 'A customer') + "'s " + occLc +
-               (ev.days === 0 ? ' is today!' : ' in ' + ev.days + ' day' + (ev.days > 1 ? 's' : '')),
-        body: (ev.days === 0 ? 'Send them a wish' : 'Coming up') + ' from My Customers' + (ev.phone ? ' · ' + ev.phone : ''),
+        title: (ev.occasion === 'Birthday' ? '🎂 ' : '💍 ') + (ev.customer || 'A customer') + "'s " + occLc + whenTxt,
+        body: (ev.days === 0 ? 'Send them a wish' : 'Offer valid this month') + ' from My Customers' + (ev.phone ? ' · ' + ev.phone : ''),
         sortDate: ev.iso,
       });
     });
@@ -4228,8 +4232,8 @@ async function sendOfferWithLock(o){
 // every device — a customer who already got the offer shows "Offer sent".
 function CustomerEventCard({ev, offerSent, onWish, onOffer, showWish, showOffer}){
   const isBday = ev.occasion==='Birthday';
-  const when = ev.days===0 ? 'Today 🎉' : (ev.days===1 ? 'Tomorrow' : 'In '+ev.days+' days');
-  const whenTone = ev.days===0 ? T.green : (ev.days<=2 ? T.warn : T.ink4);
+  const when = ev.days===0 ? 'Today 🎉' : (ev.days===1 ? 'Tomorrow' : (ev.days>1 ? 'In '+ev.days+' days' : 'This month'));
+  const whenTone = ev.days===0 ? T.green : (ev.days>0 && ev.days<=2 ? T.warn : T.ink4);
   return (
     <div style={{background:'#fff',border:`1px solid ${ev.days===0?T.green:T.line}`,borderRadius:10,padding:'12px 13px',position:'relative',overflow:'hidden'}}>
       {ev.days===0 && <div style={{position:'absolute',left:0,top:0,bottom:0,width:3,background:T.green}}/>}
@@ -4267,7 +4271,7 @@ function useCustomerEvents(ctx, showAll){
   const { orders, user } = ctx;
   const senderName = String(user?.name||'').trim();
   return React.useMemo(
-    ()=> buildCustomerEvents(orders, OCCASION_WINDOW_DAYS, showAll ? { all:true } : { salesExec: senderName }),
+    ()=> buildCustomerEvents(orders, showAll ? { all:true } : { salesExec: senderName }),
     [orders, showAll, senderName]
   );
 }
@@ -4295,7 +4299,7 @@ function MyCustomerScreen({ctx}){
           </div>
           <button onClick={()=>{loadOrders();loadOffersSent();}} title="Refresh" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.refresh('#fff',15)}</button>
         </div>
-        <div style={{fontSize:11,opacity:.85,marginTop:8}}>Customers with a birthday or anniversary in the next {OCCASION_WINDOW_DAYS} days{showAll?' · all salespeople':(senderName?' · '+senderName:'')}.</div>
+        <div style={{fontSize:11,opacity:.85,marginTop:8}}>Customers with a birthday or anniversary this month{showAll?' · all salespeople':(senderName?' · '+senderName:'')}.</div>
         {isManager && (
           <div style={{display:'flex',gap:6,marginTop:10}}>
             <button onClick={()=>setShowAll(false)} style={{flex:1,padding:'7px 10px',borderRadius:99,border:`1.5px solid ${!showAll?'#fff':'rgba(255,255,255,.3)'}`,background:!showAll?'#fff':'rgba(255,255,255,.08)',color:!showAll?'#0e5c4f':'#fff',fontSize:12,fontWeight:800,cursor:'pointer'}}>My customers</button>
@@ -4307,7 +4311,7 @@ function MyCustomerScreen({ctx}){
       <div className="scroll" style={{background:T.paper}}>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,padding:'12px 16px 4px'}}>
           <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px'}}>
-            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>UPCOMING (7 DAYS)</div>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>THIS MONTH</div>
             <div style={{fontSize:24,fontWeight:800,color:T.ink,lineHeight:1.1,marginTop:2}}>{events.length}</div>
           </div>
           <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px'}}>
@@ -4316,18 +4320,18 @@ function MyCustomerScreen({ctx}){
           </div>
         </div>
 
-        <div style={{padding:'8px 16px 4px',fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:1,textTransform:'uppercase'}}>🎁 Offer Zone · wish &amp; special-day offer</div>
+        <div style={{padding:'8px 16px 4px',fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:1,textTransform:'uppercase'}}>🎁 Offer Zone · wish &amp; special-month offer</div>
         {events.length>0 && (
           <div style={{margin:'2px 16px 6px',padding:'9px 12px',background:T.greenSoft,border:`1px solid ${T.greenLine||T.line}`,borderRadius:8,fontSize:11,color:T.ink3,lineHeight:1.5}}>
-            <b style={{color:T.ink2}}>Wish</b> sends a greeting · <b style={{color:T.ink2}}>Offer</b> sends the one-time special-day offer. The offer can be sent just once per customer per occasion each year — once sent it locks on every device, for every salesperson, so nobody sends a duplicate.
+            <b style={{color:T.ink2}}>Wish</b> sends a greeting · <b style={{color:T.ink2}}>Offer</b> sends the one-time special offer, valid all through the customer's birthday / anniversary month. The offer can be sent just once per customer per occasion each year — once sent it locks on every device, for every salesperson, so nobody sends a duplicate.
           </div>
         )}
         <div style={{padding:'0 16px 20px',display:'flex',flexDirection:'column',gap:8}}>
           {events.length===0 ? (
             <div style={{background:'#fff',border:`1px dashed ${T.line}`,borderRadius:10,padding:'28px 16px',textAlign:'center'}}>
               <div style={{fontSize:30,marginBottom:6}}>🎂</div>
-              <div style={{fontSize:14,fontWeight:700,color:T.ink2}}>No birthdays or anniversaries in the next {OCCASION_WINDOW_DAYS} days</div>
-              <div style={{fontSize:12,color:T.ink4,marginTop:3}}>They appear here automatically as the date nears — captured from the customer profile on each order.</div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2}}>No birthdays or anniversaries this month</div>
+              <div style={{fontSize:12,color:T.ink4,marginTop:3}}>They appear here automatically for their birthday / anniversary month — captured from the customer profile on each order.</div>
             </div>
           ) : events.map((ev,i)=>(
             <CustomerEventCard key={ev.occasion+'|'+ev.phone+'|'+i} ev={ev} offerSent={!!(offersSent&&offersSent[offerKeyFor(ev)])} onWish={wish} onOffer={offer} showWish={true} showOffer={true}/>
@@ -4843,7 +4847,7 @@ function HomeScreen({ctx}) {
   // ── The premium coloured menu (one rectangle per destination) ──────────────
   const leadTotal  = Object.keys(ctx.leads||{}).reduce((s,k)=>s+((ctx.leads[k]||[]).length),0);
   const custScope  = hasManagerAccess(user) ? {all:true} : {salesExec:user?.name||''};
-  const custEvs    = buildCustomerEvents(orders, OCCASION_WINDOW_DAYS, custScope);
+  const custEvs    = buildCustomerEvents(orders, custScope);
   const custToday  = custEvs.filter(e=>e.days===0).length;
   const dueTotal   = (orders||[]).filter(o=>o&&o.status!=='draft').reduce((s,o)=>s+orderReceived(o).balance,0);
   const openSvc    = orders.filter(o=>o.serviceFlag&&!/resolved/i.test(o.serviceStatus||'')).length;
@@ -4854,7 +4858,7 @@ function HomeScreen({ctx}) {
     { key:'reports', label:'Sales Summary',        sub:'Month-to-date report',      emoji:'📊', bg:'linear-gradient(135deg,#0e7490 0%,#155e75 100%)', onClick:()=>nav('reports') },
     { key:'league',  label:'4S Premier League',    sub:'Live scoreboard',           emoji:'🏆', bg:'linear-gradient(135deg,#1e3a8a 0%,#7a1420 100%)', onClick:()=>nav('league') },
     { key:'leads',   label:'Leads',                sub:leadTotal+(leadTotal===1?' lead':' leads'), emoji:'🎯', bg:'linear-gradient(135deg,#b45309 0%,#92400e 100%)', onClick:()=>nav('leads') },
-    { key:'cust',    label:'My Customers',         sub:custToday>0?(custToday+' today'):(custEvs.length+' in 7 days'), emoji:'🎉', bg:'linear-gradient(135deg,#be185d 0%,#9d174d 100%)', onClick:()=>nav('mycustomers') },
+    { key:'cust',    label:'My Customers',         sub:custToday>0?(custToday+' today'):(custEvs.length+' this month'), emoji:'🎉', bg:'linear-gradient(135deg,#be185d 0%,#9d174d 100%)', onClick:()=>nav('mycustomers') },
     { key:'collect', label:'Outstanding Payments', sub:dueTotal>0?('₹'+Math.round(dueTotal).toLocaleString('en-IN')+' to collect'):'All clear', emoji:'💰', bg:'linear-gradient(135deg,#9f1239 0%,#7a1420 100%)', onClick:()=>nav('collect') },
     { key:'service', label:'Service Requests',     sub:openSvc?(openSvc+' open'):'None open', emoji:'🛠️', bg:'linear-gradient(135deg,#4338ca 0%,#3730a3 100%)', onClick:()=>nav('service') },
   ].filter(Boolean);
