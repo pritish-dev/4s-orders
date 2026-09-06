@@ -2834,21 +2834,30 @@ function App() {
     } catch(e) { /* offline / not deployed yet — keep the local cache */ }
     return false;
   }
-  // Record that a customer has now been sent the offer. Optimistic: the lock is set
-  // locally (and cached) immediately so the button disables on this device at once,
-  // then persisted to the backend so it holds on every other device too.
+  // Claim a customer's one-time offer and record it. The claim is authoritative on
+  // the shared backend so it holds for EVERY device and EVERY salesperson — the
+  // first caller to reach the server wins, and every later caller is told the
+  // offer was already sent (so the customer never gets a duplicate). Returns
+  // { proceed, already, offline }:
+  //   proceed=true  → this device won the claim (or we're offline) → send the message
+  //   already=true  → someone else already sent it → do NOT send again
+  // The local lock is set immediately either way so the button disables at once.
   async function doMarkOfferSent(ev) {
     const key = offerKeyFor(ev);
-    if (!key) return false;
+    if (!key) return { proceed:false };
     setOffersSent(prev => {
       const next = { ...(prev||{}), [key]: true };
       try { localStorage.setItem('4s_offers_sent', JSON.stringify(next)); } catch(e) {}
       return next;
     });
     try {
-      await apiPost({ action:'markOfferSent', phone:key, customer:(ev&&ev.customer)||'', occasion:(ev&&ev.occasion)||'', by:user?.name||user?.username||'' });
-    } catch(e) { /* stays locked locally; loadOffersSent will reconcile later */ }
-    return true;
+      const res = await apiPost({ action:'markOfferSent', phone:key, customer:(ev&&ev.customer)||'', occasion:(ev&&ev.occasion)||'', by:user?.name||user?.username||'' });
+      if (res && res.ok) return { proceed: !res.already, already: !!res.already };
+      // Backend reachable but the action isn't live yet — send optimistically.
+      return { proceed:true, offline:true };
+    } catch(e) {
+      return { proceed:true, offline:true };   // offline — optimistic; reconciled on next sync
+    }
   }
 
   // Ask the backend for the exact next app Receipt No (authoritative — it reads the
@@ -4124,6 +4133,30 @@ function _openWhatsApp(phone, text){
   try { window.open('https://wa.me/'+(p?'91'+p:'')+'?text='+encodeURIComponent(text||''), '_blank'); } catch(e) {}
 }
 
+// Send a customer's ONE-TIME offer with a cross-device / cross-salesperson
+// duplicate guard. The WhatsApp tab is opened first, inside the click gesture, so
+// it is not popup-blocked; then the once-only claim is confirmed with the backend.
+// If another device or salesperson already sent this customer's offer, the tab is
+// closed and nothing goes out — the customer can never receive the offer twice.
+async function sendOfferWithLock(o){
+  const ev = o.ev;
+  const k = offerKeyFor(ev);
+  if (o.offersSent && o.offersSent[k]) { o.showToast && o.showToast('This customer has already received their offer','warn'); return; }
+  if (!window.confirm('Send '+(ev.customer||'this customer')+' their one-time '+ev.occasion+' offer?\n\nIt can be sent just once — it then stays disabled on every device, for every salesperson, so the customer never gets a duplicate.')) return;
+  let w = null; try { w = window.open('about:blank','_blank'); } catch(e) {}
+  const res = await o.doMarkOfferSent(ev);
+  if (res && res.already) {
+    try { w && w.close(); } catch(e) {}
+    o.showToast && o.showToast((ev.customer||'This customer')+' was already sent their offer from another device','warn');
+    return;
+  }
+  const msg = customerOfferMessage(ev.occasion, ev.customer, o.senderName, ev.days===0);
+  const ph = _normPhone(ev.phone);
+  const url = 'https://wa.me/'+(ph?'91'+ph:'')+'?text='+encodeURIComponent(msg);
+  if (w) { try { w.location.href = url; } catch(e) { _openWhatsApp(ev.phone, msg); } }
+  else { _openWhatsApp(ev.phone, msg); }
+}
+
 // One customer-occasion row, shared by My Customers and the Offer Zone. A Wish
 // button (when showWish) opens a warm greeting; the one-time Offer button (when
 // showOffer) opens the special-offer message and then locks itself for good on
@@ -4184,13 +4217,7 @@ function MyCustomerScreen({ctx}){
   const todayCount = events.filter(e=>e.days===0).length;
 
   const wish = ev => _openWhatsApp(ev.phone, customerWishMessage(ev.occasion, ev.customer, senderName));
-  const offer = ev => {
-    const k = offerKeyFor(ev);
-    if (offersSent && offersSent[k]) { showToast && showToast('This customer has already received their offer','warn'); return; }
-    if (!window.confirm('Send '+(ev.customer||'this customer')+' their one-time '+ev.occasion+' offer?\n\nIt is valid today only and can be sent just once — the button then stays disabled on every device.')) return;
-    doMarkOfferSent(ev);
-    _openWhatsApp(ev.phone, customerOfferMessage(ev.occasion, ev.customer, senderName, ev.days===0));
-  };
+  const offer = ev => sendOfferWithLock({ ev, senderName, offersSent, doMarkOfferSent, showToast });
 
   return (
     <div className="screen">
@@ -4252,13 +4279,7 @@ function OfferZoneScreen({ctx}){
   const events = useCustomerEvents(ctx, showAll);
   const sentCount = events.filter(e=>offersSent&&offersSent[offerKeyFor(e)]).length;
 
-  const offer = ev => {
-    const k = offerKeyFor(ev);
-    if (offersSent && offersSent[k]) { showToast && showToast('This customer has already received their offer','warn'); return; }
-    if (!window.confirm('Send '+(ev.customer||'this customer')+' their one-time '+ev.occasion+' offer?\n\nIt is valid today only and can be sent just once — the button then stays disabled on every device.')) return;
-    doMarkOfferSent(ev);
-    _openWhatsApp(ev.phone, customerOfferMessage(ev.occasion, ev.customer, senderName, ev.days===0));
-  };
+  const offer = ev => sendOfferWithLock({ ev, senderName, offersSent, doMarkOfferSent, showToast });
 
   return (
     <div className="screen">
