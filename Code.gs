@@ -167,6 +167,7 @@ function doPost(e) {
       case 'setAppSerial':    result = handleSetAppSerial(body);      break;
       case 'saveLeagueScore': result = handleLeagueSaveScore(body);   break;
       case 'saveLeagueConfig':result = handleLeagueSaveConfig(body);  break;
+      case 'saveOfferConfig': result = handleSaveOfferConfig(body);   break;
       case 'addLead':         result = handleAddLead(body);           break;
       case 'editLead':        result = handleEditLead(body);          break;
       case 'sendWhatsApp':    result = handleSendWhatsApp(body);      break;
@@ -738,7 +739,7 @@ function handlePriceList(p) {
   var cacheKey  = 'pricelist_' + SCRIPT_VERSION;
   if (!wantFresh) {
     var hit = _cacheGet(cacheKey);
-    if (hit && hit.ok && hit.items && hit.items.length) { hit.cached = true; return hit; }
+    if (hit && hit.ok && hit.items && hit.items.length) { hit.cached = true; hit.offerEndDate = _getOfferEndDate(); return hit; }
   }
 
   var opsSS = _openOPS();
@@ -933,7 +934,7 @@ function handlePriceList(p) {
 
   var result = { ok: true, scriptVersion: SCRIPT_VERSION, mode: usedFallback ? 'auto-scan' : 'config', items: all, counts: counts, totalTabs: Object.keys(counts).length,
                  annotated: { discontinued: annDiscontinued, altCode: annAltCode, addedFromDiscontinued: addedDiscontinued },
-                 catalog: catalogMap, sweeteners: sweeteners,
+                 catalog: catalogMap, sweeteners: sweeteners, offerEndDate: _getOfferEndDate(),
                  catalogStats: { matched: catMatched, total: all.length, products: Object.keys(catalogMap).length, sample: catUnmatched } };
   if (errors.length) result.tabErrors = errors;
   _cachePut(cacheKey, result);   // speed up the next load
@@ -4237,6 +4238,35 @@ function handleLeagueSaveConfig(body) {
     }
     _appendLog(by, '', 'LEAGUE_CONFIG', 'monthly=' + (body && body.monthlyTarget) + ' weekly=' + (body && body.weeklyTarget) + ' som=' + (body && body.salesmanOfMonth));
     return { ok: true, scriptVersion: SCRIPT_VERSION };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+// ─── Offer / Sweetener scheme end date ────────────────────────────────────────
+// A single shared end date (yyyy-mm-dd, IST) after which every offer expires:
+// the app's Offer Zone reads "No offers" and the SWEETENER scheme tag stops
+// showing on items. Stored in Script Properties so it is global across devices
+// and returned on every priceList response (stamped fresh, even from cache).
+function _getOfferEndDate() {
+  try { return PropertiesService.getScriptProperties().getProperty('OFFER_END_DATE') || ''; }
+  catch (e) { return ''; }
+}
+
+// Set (or clear) the offer end date. Admin/manager only. An empty value clears
+// the window, so offers/tags behave as before (no expiry).
+function handleSaveOfferConfig(body) {
+  var by = String((body && body.by) || '').trim();
+  var role = _lookupRole(by);
+  if (role !== 'admin' && role !== 'manager') {
+    return { ok: false, error: 'Only a manager or admin can change the offer end date.' };
+  }
+  try {
+    var v = String((body && body.offerEndDate) || '').trim();
+    if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) return { ok: false, error: 'Date must be in yyyy-mm-dd format.' };
+    var props = PropertiesService.getScriptProperties();
+    if (v) props.setProperty('OFFER_END_DATE', v);
+    else   props.deleteProperty('OFFER_END_DATE');
+    _appendLog(by, '', 'OFFER_END_DATE', v || '(cleared)');
+    return { ok: true, offerEndDate: v, scriptVersion: SCRIPT_VERSION };
   } catch (e) { return { ok: false, error: e.message }; }
 }
 
