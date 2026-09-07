@@ -483,6 +483,32 @@ function mergePriceItems(embedded, serverItems, sweeteners) {
   return out;
 }
 
+// ── Offer / Sweetener scheme validity window ─────────────────────────────────
+// A single admin-settable end date (yyyy-mm-dd, IST) governs every offer. While
+// it is unset, or set to today or a future day, the Offer Zone lists the offers
+// and each scheme item shows its SWEETENER tag — exactly as before. Once today
+// passes the end date, the Offer Zone reads "No offers" and every SWEETENER tag
+// is hidden until the admin sets a new date. The value is shared by the backend
+// (Script Properties, returned on every priceList response) and mirrored here in
+// localStorage so it is correct instantly and offline.
+let OFFER_END_DATE = '';
+try { OFFER_END_DATE = localStorage.getItem('4s_offer_end_date') || ''; } catch (e) {}
+function setOfferEndDateGlobal(v) {
+  OFFER_END_DATE = String(v == null ? '' : v);
+  try { localStorage.setItem('4s_offer_end_date', OFFER_END_DATE); } catch (e) {}
+}
+// Today as yyyy-mm-dd in IST, safe to compare lexicographically with the stored
+// end date (en-CA formats as yyyy-mm-dd).
+function istTodayISO() {
+  try { return new Date().toLocaleDateString('en-CA', { timeZone: IST_TZ }); }
+  catch (e) { return new Date().toISOString().slice(0, 10); }
+}
+// True while offers are live (no end date set, or today is on/before it).
+function offersLive() {
+  if (!OFFER_END_DATE) return true;
+  return istTodayISO() <= OFFER_END_DATE;
+}
+
 async function loadPriceListItems(forceFresh = false, skipLocalCache = false) {
   const CACHE_KEY = '4s_price_items_v12';
   const CACHE_TS  = '4s_price_items_v12_ts';
@@ -514,6 +540,9 @@ async function loadPriceListItems(forceFresh = false, skipLocalCache = false) {
       if (res && res.ok) {
         if (Array.isArray(res.items)) serverItems = res.items;
         if (res.sweeteners && typeof res.sweeteners === 'object') sweeteners = res.sweeteners;
+        // Shared offer end date (yyyy-mm-dd or '' to clear) — mirror it locally so
+        // the Offer Zone and the SWEETENER tags reflect it instantly and offline.
+        if (res.offerEndDate !== undefined && res.offerEndDate !== null) setOfferEndDateGlobal(String(res.offerEndDate));
         // Product Catalog (photos + specs), looked up by catKey in Browse Items.
         try {
           localStorage.setItem('4s_catalog_v1', JSON.stringify(res.catalog || {}));
@@ -2549,6 +2578,10 @@ function App() {
   // many are left; the given quantity is deducted from the sheet on save.
   const [gifts,         setGifts]        = useState(() => { try { return JSON.parse(localStorage.getItem('4s_gift_items')||'[]'); } catch { return []; } });
   const [priceItems,    setPriceItems]   = useState(() => { try { const c = JSON.parse(localStorage.getItem('4s_price_items_v12')||'[]'); if (c && c.length) return c; } catch {} try { return buildEmbeddedPriceItems(); } catch { return []; } });
+  // Shared offer end date (yyyy-mm-dd, '' = no expiry). Seeded from localStorage,
+  // refreshed from the module mirror whenever the price list re-syncs.
+  const [offerEndDate,  setOfferEndDate]  = useState(() => { try { return localStorage.getItem('4s_offer_end_date')||''; } catch { return ''; } });
+  useEffect(() => { setOfferEndDate(OFFER_END_DATE); }, [priceItems]);
   const [orders,        setOrders]       = useState(() => { try { return normalizeSalesNames(JSON.parse(localStorage.getItem('4s_orders')||'[]')); } catch { return []; } });
   // Manual (paper-order) service requests — standalone requests for pre-app
   // bookings, tracked in their own backend tab, loaded alongside the orders.
@@ -2890,6 +2923,24 @@ function App() {
     try {
       const res = await apiPost({ action:'saveLeagueConfig', by:user?.username||user?.name||'', ...cfg });
       if (res && res.ok) { await loadLeague({silent:true}); showToast('Settings saved ✓'); return true; }
+      showToast((res && res.error) || 'Save failed','bad'); return false;
+    } catch(e) { showToast(e.message,'bad'); return false; }
+  }
+
+  // ── Offer end date ─────────────────────────────────────────────
+  // Set (or clear, with '') the shared offer/sweetener end date. Admin/manager
+  // only (the backend enforces it too). Updates the local mirror + state so the
+  // Offer Zone and every SWEETENER tag reflect the change immediately.
+  async function doSaveOfferConfig(endDate) {
+    const v = String(endDate == null ? '' : endDate).trim();
+    try {
+      const res = await apiPost({ action:'saveOfferConfig', offerEndDate:v, by:user?.username||user?.name||'' });
+      if (res && res.ok) {
+        setOfferEndDateGlobal(res.offerEndDate !== undefined ? String(res.offerEndDate) : v);
+        setOfferEndDate(OFFER_END_DATE);
+        showToast(OFFER_END_DATE ? 'Offer end date saved ✓' : 'Offer window cleared ✓');
+        return true;
+      }
       showToast((res && res.error) || 'Save failed','bad'); return false;
     } catch(e) { showToast(e.message,'bad'); return false; }
   }
@@ -3294,7 +3345,8 @@ function App() {
     mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen,
     league, leagueLoading, loadLeague, doSaveLeagueScore, doSaveLeagueConfig,
     leads, leadsLoading, loadLeads, doAddLead, doEditLead,
-    offersSent, loadOffersSent, doMarkOfferSent, doResetOffersSent };
+    offersSent, loadOffersSent, doMarkOfferSent, doResetOffersSent,
+    offerEndDate, doSaveOfferConfig };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -3317,6 +3369,7 @@ function App() {
     league:  <LeagueScreen ctx={ctx}/>,
     leads:   <LeadsScreen ctx={ctx}/>,
     mycustomers: <MyCustomerScreen ctx={ctx}/>,
+    offerzone: <OfferZoneScreen ctx={ctx}/>,
   };
 
   return (
@@ -4923,6 +4976,218 @@ function CollectiblesScreen({ctx}) {
 }
 
 // ─── Home ───────────────────────────────────────────────────
+// ─── Offer Zone ──────────────────────────────────────────────
+// A home-page destination that lists every item currently under an offer (i.e.
+// carrying a sweetener-scheme discount), with a search bar to find one by name
+// or item code. A single admin-settable end date governs the whole scheme: once
+// today passes it, the zone reads "No offers" and every SWEETENER tag across the
+// app is hidden (see offersLive). Admins/managers set or clear that date here.
+function OfferZoneScreen({ctx}) {
+  const {user, items, priceItems, syncedAt, priceSyncedAt, offerEndDate, doSaveOfferConfig,
+         order, setOrder, nav, syncPriceList, loading, showToast} = ctx;
+  const isManager = hasManagerAccess(user);
+  const live      = offersLive();
+  const hasPriceList = priceItems && priceItems.length > 0;
+
+  const [q, setQ]               = useState('');
+  const [dateDraft, setDateDraft] = useState(offerEndDate || '');
+  const [saving, setSaving]     = useState(false);
+  useEffect(() => { setDateDraft(offerEndDate || ''); }, [offerEndDate]);
+
+  const catalog = React.useMemo(() => { try { return JSON.parse(localStorage.getItem('4s_catalog_v1')||'{}'); } catch { return {}; } }, [priceSyncedAt, priceItems.length]);
+
+  // Every item under an offer, enriched with live stock so availability + OOS
+  // read exactly like Browse Items. An item is "under an offer" when it carries
+  // a sweetener-scheme discount.
+  const offerItems = React.useMemo(() => {
+    if (!hasPriceList) return [];
+    const stockMap = {};
+    (items||[]).forEach(it => { stockMap[it.code] = it; });
+    return priceItems
+      .filter(pi => pi && pi.sweetenerDiscount)
+      .map(pi => {
+        const si = stockMap[pi.code];
+        const it = si ? {...pi, stock:si.stock||[], mrp:si.mrp||pi.mrp||0, cpl:si.cpl||pi.cpl||0} : {...pi};
+        it._s = ([it.cat, it.item, it.name].filter(Boolean).join(' ')).toLowerCase();
+        it._c = (it.code || '').toLowerCase();
+        return it;
+      });
+  }, [priceItems, items, hasPriceList]);
+
+  const deferredQ = React.useDeferredValue(q);
+  const filtered  = React.useMemo(() => {
+    if (!live) return [];
+    const { results } = fuzzySearch(offerItems, deferredQ);
+    return results;
+  }, [offerItems, deferredQ, live]);
+  const RENDER_CAP = 80;
+  const shown = filtered.length > RENDER_CAP ? filtered.slice(0, RENDER_CAP) : filtered;
+
+  const cartCount = (order.items||[]).reduce((s,i)=>s+(i.qty||0),0);
+
+  // Add an offer item to the current order draft — identical line shape to Browse
+  // Items so totals and the PDF stay consistent.
+  function addToOrder(item) {
+    const disc = '', basePrice = item.mrp||item.cpl||0, unitPrice = basePrice;
+    const effCode = item.altCode || item.code;
+    const exists  = (order.items||[]).findIndex(x=>x.code===effCode);
+    let newItems;
+    if (exists>=0) {
+      newItems = order.items.map((x,idx)=>idx===exists?{...x,qty:x.qty+1,total:(x.qty+1)*(x.unitPrice||x.mrp||x.cpl||0)}:x);
+    } else {
+      newItems = [...(order.items||[]),{
+        code:effCode, priceCode:item.code, name:item.name, cat:item.cat, item:item.item||'',
+        qty:1, mrp:item.mrp||item.cpl||0, cpl:item.cpl||item.mrp||0,
+        unitPrice, total:unitPrice, disc,
+        ageing:false, sweetner:false,
+        discontinued:!!item.discontinued, discSince:item.discSince||'',
+        branch:((item.stock||[]).filter(s=>s.q>0)[0]||{}).b||'',
+        inStock:(item.stock||[]).reduce((s,x)=>s+x.q,0),
+        whOptions:warehouseOptionsOf(item.stock),
+        whTag:warehouseDefaultOf(item.stock),
+        manual:false,
+      }];
+    }
+    setOrder({...order,items:newItems});
+    const oos = (item.stock||[]).reduce((s,x)=>s+x.q,0)===0;
+    showToast(oos?item.name.slice(0,22)+'… added (OOS)':item.name.slice(0,30)+'… added', oos?'warn':'ok');
+  }
+
+  async function saveDate(v) {
+    setSaving(true);
+    await doSaveOfferConfig(v);
+    setSaving(false);
+  }
+
+  const fmtDate = v => { try { return new Date(v+'T00:00:00').toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric',timeZone:IST_TZ}); } catch(e){ return v; } };
+
+  return (
+    <div className="screen">
+      {/* Header */}
+      <div style={{flexShrink:0,background:'linear-gradient(120deg,#6d28d9 0%,#4c1d95 100%)',color:'#fff',padding:'12px 16px 14px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.home('#fff',18)}</button>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,opacity:.85}}>🔥 OFFER ZONE</div>
+            <div style={{fontSize:20,fontWeight:900,letterSpacing:-0.5}}>Bestfest &amp; Sweetener offers</div>
+          </div>
+          {cartCount>0 && <button onClick={()=>nav('order')} title="Open order" style={{flexShrink:0,height:32,padding:'0 12px',borderRadius:6,background:'rgba(255,255,255,.16)',border:'1px solid rgba(255,255,255,.3)',color:'#fff',fontSize:12,fontWeight:800,cursor:'pointer'}}>Order · {cartCount}</button>}
+          <button onClick={syncPriceList} title="Refresh" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.refresh('#fff',15)}</button>
+        </div>
+        <div style={{fontSize:11,opacity:.9,marginTop:8,lineHeight:1.5}}>
+          {live
+            ? <>Limited stock — till stocks last.{offerEndDate?<> Offer valid till <b>{fmtDate(offerEndDate)}</b>.</>:''}</>
+            : <>The offer window closed{offerEndDate?<> on <b>{fmtDate(offerEndDate)}</b></>:''}. No offers are live right now.</>}
+        </div>
+      </div>
+
+      <div className="scroll" style={{background:T.paper}}>
+        {/* Admin: set / extend / clear the shared offer end date */}
+        {isManager && (
+          <div style={{margin:'12px 16px 4px',padding:'12px 14px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:10}}>
+            <div style={{fontSize:10,fontWeight:800,color:T.purple,letterSpacing:.8,textTransform:'uppercase',marginBottom:6}}>Admin · offer end date</div>
+            <div style={{fontSize:11,color:T.ink3,lineHeight:1.5,marginBottom:10}}>
+              After this date the Offer Zone shows <b>No offers</b> and the SWEETENER tag is hidden on every item. Leave it blank for no expiry.
+            </div>
+            <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+              <input type="date" value={dateDraft} onChange={e=>setDateDraft(e.target.value)}
+                style={{flex:'1 1 150px',minWidth:0,padding:'9px 11px',border:`1.5px solid ${T.line}`,borderRadius:8,fontSize:14,color:T.ink,background:'#fff',fontFamily:T.sans}}/>
+              <button onClick={()=>saveDate(dateDraft)} disabled={saving||dateDraft===(offerEndDate||'')}
+                style={{flexShrink:0,padding:'9px 16px',borderRadius:8,background:(saving||dateDraft===(offerEndDate||''))?T.line2:T.purple,color:'#fff',border:'none',fontSize:13,fontWeight:800,cursor:(saving||dateDraft===(offerEndDate||''))?'default':'pointer'}}>{saving?'…':'Save'}</button>
+              {offerEndDate && <button onClick={()=>saveDate('')} disabled={saving}
+                style={{flexShrink:0,padding:'9px 12px',borderRadius:8,background:'#fff',color:T.ink3,border:`1px solid ${T.line}`,fontSize:13,fontWeight:700,cursor:'pointer'}}>Clear</button>}
+            </div>
+          </div>
+        )}
+
+        {/* Search bar */}
+        {live && hasPriceList && (
+          <div style={{padding:'12px 16px 8px'}}>
+            <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',background:'#fff',border:`1.5px solid ${T.purple}`,borderRadius:8,boxShadow:`0 0 0 4px ${T.purpleSoft}`}}>
+              {Icon.search(T.ink3)}
+              <input value={q} onChange={e=>setQ(e.target.value)} onInput={e=>setQ(e.target.value)}
+                placeholder="Search offers by name or item code…"
+                style={{flex:1,border:'none',outline:'none',fontSize:15,color:T.ink,background:'transparent'}}/>
+              {q&&<span onClick={()=>setQ('')} style={{cursor:'pointer',lineHeight:1,padding:'0 2px'}}>{Icon.close(T.ink4)}</span>}
+            </div>
+            <div style={{fontSize:11,color:T.ink4,marginTop:8,paddingLeft:2}}>
+              {shown.length} {shown.length===1?'item':'items'} on offer{filtered.length>RENDER_CAP?` · showing first ${RENDER_CAP}`:''}
+            </div>
+          </div>
+        )}
+
+        {/* Offers list */}
+        <div style={{padding:'0 16px 20px'}}>
+          {!live ? (
+            <div style={{background:'#fff',border:`1px dashed ${T.line}`,borderRadius:10,padding:'34px 16px',textAlign:'center'}}>
+              <div style={{fontSize:34,marginBottom:8}}>🙁</div>
+              <div style={{fontSize:15,fontWeight:800,color:T.ink2}}>No offers</div>
+              <div style={{fontSize:12,color:T.ink4,marginTop:4,lineHeight:1.5}}>The offer window has ended. {isManager?'Set a new end date above to bring offers back.':'Check back after the next scheme is announced.'}</div>
+            </div>
+          ) : !hasPriceList ? (
+            <div style={{background:'#fff',border:`1px dashed ${T.line}`,borderRadius:10,padding:'30px 16px',textAlign:'center'}}>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2}}>Price list not loaded</div>
+              <div style={{fontSize:12,color:T.ink4,marginTop:4}}>Tap the refresh icon above to load offers.</div>
+            </div>
+          ) : shown.length===0 ? (
+            <div style={{background:'#fff',border:`1px dashed ${T.line}`,borderRadius:10,padding:'30px 16px',textAlign:'center'}}>
+              <div style={{fontSize:30,marginBottom:6}}>🔎</div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2}}>{q?'No offers matched':'No items are on offer right now'}</div>
+              {q&&<div style={{fontSize:12,color:T.ink4,marginTop:4}}>Try a different name or item code.</div>}
+            </div>
+          ) : shown.map((it,fi)=>{
+            const availStock = (it.stock||[]).filter(s=>s.q>0);
+            const stockTotal = availStock.reduce((s,x)=>s+x.q,0);
+            const hasStock   = (it.stock||[]).length > 0;
+            const mto        = isMTOItem(it);
+            const oos        = hasStock && stockTotal===0 && !mto;
+            const base       = Number(it.cpl)||Number(it.mrp)||0;
+            const mrpIncl    = base>0 ? Math.round(base*(1+GST_RATE)) : 0;
+            const pctNum     = parseFloat(String(it.sweetenerDiscount).replace(/[^\d.]/g,'')) || 0;
+            const discIncl   = (mrpIncl>0 && pctNum>0) ? Math.round(mrpIncl*(1-pctNum/100)) : mrpIncl;
+            const thumb      = (catalog[it.catKey]&&catalog[it.catKey].images&&catalog[it.catKey].images[0]);
+            return (
+              <div key={(it.code||it.name||'')+'|'+fi} style={{background:'#fff',border:`1px solid ${T.purpleLine}`,borderRadius:12,padding:'12px 14px',marginBottom:9}}>
+                <div style={{display:'flex',gap:10}}>
+                  <ProductThumb src={thumb} size={56}/>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:13,fontWeight:700,color:T.ink,lineHeight:1.35,marginBottom:4}}>{it.name}</div>
+                    <div style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap',marginBottom:4}}>
+                      {(it.altCode||it.code) && <span style={{fontFamily:T.mono,fontSize:10,color:it.altCode?T.green:T.ink4,fontWeight:700}}>{it.altCode||it.code}</span>}
+                      {it.item && <Pill tone="neutral" size="sm">{it.item}</Pill>}
+                      <Pill tone="neutral" size="sm">{(it.sheet||it.cat||'').toUpperCase()}</Pill>
+                      {oos && <Pill tone="bad" size="sm">OUT OF STOCK</Pill>}
+                      <Pill tone="purple" size="sm">SWEETENER {it.sweetenerDiscount} OFF</Pill>
+                    </div>
+                    {it.extra && <div style={{fontSize:10,color:T.ink4,marginBottom:4}}>{it.extra}</div>}
+                    <div style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap'}}>
+                      {availStock.length>0
+                        ? availStock.map(s=><StockChip key={s.b} branch={s.b} count={s.q} low={s.q<3}/>)
+                        : <span style={{fontSize:10,color:T.ink4}}>{mto?'Made to order':(hasStock?'No stock available':'Sync stock to see availability')}</span>}
+                    </div>
+                  </div>
+                  <div style={{flexShrink:0,textAlign:'right',display:'flex',flexDirection:'column',alignItems:'flex-end',gap:8,paddingLeft:4}}>
+                    <div>
+                      {pctNum>0 && mrpIncl>0 && <div style={{fontSize:10,color:T.ink4,textDecoration:'line-through',fontFamily:T.mono}}>₹{mrpIncl.toLocaleString('en-IN')}</div>}
+                      <div style={{fontFamily:T.mono,fontSize:15,fontWeight:800,color:discIncl>0?T.purple:T.ink4}}>{discIncl>0?'₹'+discIncl.toLocaleString('en-IN'):'—'}</div>
+                      {discIncl>0 && <div style={{fontSize:8,color:T.ink4,fontWeight:600,marginTop:1}}>incl. 18% GST</div>}
+                    </div>
+                    <button onClick={()=>addToOrder(it)} style={{height:32,padding:'0 12px',borderRadius:6,background:oos?T.warn:T.purple,color:'#fff',border:'none',fontSize:13,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:4}}>
+                      {Icon.plus('#fff',14)}{oos?'Book':'Add'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{height:20}}/>
+      </div>
+      <BottomNav screen="home" nav={nav}/>
+    </div>
+  );
+}
+
 function HomeScreen({ctx}) {
   const {user,orders,syncedAt,priceItems,priceSyncError,nav,loadOrders,syncPriceList,loading,unreadCount,loadMis} = ctx;
   const role        = normRole(user?.role);
@@ -4942,6 +5207,7 @@ function HomeScreen({ctx}) {
 
   const tiles = [
     { key:'book',    label:'Book an Order',        sub:'New customer order',        emoji:'🛒', bg:'linear-gradient(135deg,#0b6b3a 0%,#0e5c4f 100%)', onClick:()=>{ctx.setOrder({...BLANK_ORDER(),salesExec:user?.name||''});nav('order');} },
+    { key:'offerzone',label:'Offer Zone',           sub:offersLive()?'Bestfest & Sweetener deals':'No live offers', emoji:'🔥', bg:'linear-gradient(135deg,#6d28d9 0%,#4c1d95 100%)', onClick:()=>nav('offerzone') },
     canManual && { key:'manual', label:'Manual Order', sub:'Admin & owner only',    emoji:'📝', bg:'linear-gradient(135deg,#334155 0%,#1e293b 100%)', onClick:()=>{ctx.setOrder({...BLANK_ORDER(),manualOrder:true,salesExec:user?.name||''});nav('order');} },
     { key:'reports', label:'Sales Summary',        sub:'Month-to-date report',      emoji:'📊', bg:'linear-gradient(135deg,#0e7490 0%,#155e75 100%)', onClick:()=>nav('reports') },
     { key:'league',  label:'4S Premier League',    sub:'Live scoreboard',           emoji:'🏆', bg:'linear-gradient(135deg,#1e3a8a 0%,#7a1420 100%)', onClick:()=>nav('league') },
@@ -5147,7 +5413,7 @@ function ProductSheet({item, cat, onClose, onAdd}) {
             <div style={{display:'flex',alignItems:'center',gap:8,marginTop:4,flexWrap:'wrap'}}>
               {catLabel && <span style={{fontFamily:T.mono,fontSize:10,letterSpacing:1,textTransform:'uppercase',color:T.ink4}}>{catLabel}</span>}
               {(item.altCode||item.code) && <span style={{fontFamily:T.mono,fontSize:10.5,fontWeight:700,color:item.altCode?T.green:T.ink4}}>{item.altCode||item.code}</span>}
-              {item.sweetenerDiscount && <Pill tone="purple" size="sm">SWEETENER {item.sweetenerDiscount} OFF</Pill>}
+              {item.sweetenerDiscount && offersLive() && <Pill tone="purple" size="sm">SWEETENER {item.sweetenerDiscount} OFF</Pill>}
             </div>
           </div>
 
@@ -5650,7 +5916,7 @@ function SearchScreen({ctx}) {
                     {oos && <Pill tone="bad" size="sm">OUT OF STOCK</Pill>}
                     {it.discontinued && <Pill tone="bad" size="sm">DISCONTINUED{it.discSince?' since '+it.discSince:''}</Pill>}
                     {it.altCode && <Pill tone="warn" size="sm">REPLACES {it.code}</Pill>}
-                    {it.sweetenerDiscount && <Pill tone="purple" size="sm">SWEETENER {it.sweetenerDiscount} OFF</Pill>}
+                    {it.sweetenerDiscount && offersLive() && <Pill tone="purple" size="sm">SWEETENER {it.sweetenerDiscount} OFF</Pill>}
                   </div>
                   {/* Extra info (e.g. mattress thickness) */}
                   {it.extra && <div style={{fontSize:10,color:T.ink4,marginBottom:4}}>{it.extra}</div>}
