@@ -683,6 +683,13 @@ function handlePriceList(p) {
     try {
       var tabItems = _parsePriceTab(sh, cfg.tab, cfg.cat);
       if (tabItems.length > 0) {
+        // Flag mattress rows so the app swaps its bundled mattress list for these
+        // sheet-sourced ones (real LN codes + inch sizes). The Mattress tab is in
+        // the normalized ITEM_CODE/DESCRIPTION format, so it is parsed by
+        // _parseNormTab (not _parseMattressTab) — mark by tab name / category here.
+        if (/mattress/i.test(cfg.tab) || /mattress/i.test(cfg.cat || '')) {
+          for (var mi = 0; mi < tabItems.length; mi++) tabItems[mi].mat = true;
+        }
         all = all.concat(tabItems);
         counts[cfg.tab] = tabItems.length;
       } else {
