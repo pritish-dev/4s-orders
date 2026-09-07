@@ -367,36 +367,77 @@ function buildEmbeddedPriceItems() {
   return rawPriceBook().map(priceBookItem).filter(x => x.code || x.name);
 }
 
-// Re-key the OPS sheet's discontinued / alt-code / catalog metadata onto the
-// price-book items by item code, and keep discontinued-only items (present in
-// the OPS "Discontinued Products" tab but not the price book) so the
-// discontinued feature surfaces exactly as before.
-function mergePriceItems(embedded, serverItems) {
+// A sheet-sourced mattress row (OPS Godrej mattress tab, flagged mat:true on the
+// server) mapped to the app's price-item shape. These carry the real LN item code
+// and inch-based sizes/thickness — unlike the bundled price book's mattress rows
+// (short reference codes, cm sizes) — so they replace them when present.
+function serverMattressItem(s) {
+  const base = Math.round(Number(s.cpl) || Number(s.mrp) || 0);
+  return {
+    code:  String(s.code || '').toUpperCase().trim(),
+    name:  s.name || s.item || 'Mattress',
+    cat:   s.cat || 'Mattress',   // drives the category chip
+    item:  s.item || '',          // the group / model pill
+    mrp:   base,
+    cpl:   base,
+    extra: s.extra || '',         // thickness in inches etc.
+    sheet: 'Mattress',
+    room:  'Mattress',            // browse-ordering hint (roomRank → bedroom group)
+    mat:   true,
+  };
+}
+
+// Re-key the OPS sheet's discontinued / alt-code / catalog metadata and the
+// sweetener-scheme discount onto the price-book items by item code, keep
+// discontinued-only items (present in the OPS "Discontinued Products" tab but not
+// the price book) so that feature surfaces exactly as before, and swap the bundled
+// mattress rows for the sheet-sourced ones (real LN codes + inch sizes) whenever
+// the OPS sheet supplies a mattress tab. If it doesn't, the bundled mattress rows
+// stay as a fallback so mattress ordering never breaks.
+function mergePriceItems(embedded, serverItems, sweeteners) {
+  const sw = sweeteners || {};
+
+  // Mattresses: prefer the sheet-sourced rows; fall back to the bundled ones.
+  const serverMattress = (serverItems || []).filter(s => s && s.mat);
+  let base = embedded;
+  if (serverMattress.length) {
+    base = embedded.filter(e => e.sheet !== 'Mattress')
+                   .concat(serverMattress.map(serverMattressItem));
+  }
+
   const meta = {};
   (serverItems || []).forEach(s => {
     const k = String(s.code || '').toUpperCase().trim();
     if (k) meta[k] = { discontinued: !!s.discontinued, discSince: s.discSince || '', altCode: s.altCode || '', catKey: s.catKey };
   });
-  const out = embedded.map(e => {
+  const out = base.map(e => {
     const m = meta[e.code];
-    if (!m) return e;
+    const d = sw[e.code];
+    if (!m && !d) return e;
     const o = { ...e };
-    if (m.discontinued) { o.discontinued = true; o.discSince = m.discSince; }
-    if (m.altCode)      o.altCode = m.altCode;
-    if (m.catKey != null) o.catKey = m.catKey;
+    if (m) {
+      if (m.discontinued) { o.discontinued = true; o.discSince = m.discSince; }
+      if (m.altCode)      o.altCode = m.altCode;
+      if (m.catKey != null) o.catKey = m.catKey;
+    }
+    if (d) o.sweetenerDiscount = d;
     return o;
   });
-  const have = new Set(embedded.map(e => e.code));
+  const have = new Set(base.map(e => e.code));
   (serverItems || []).forEach(s => {
     const k = String(s.code || '').toUpperCase().trim();
-    if (s.discontinued && k && !have.has(k)) out.push(s);
+    if (s.discontinued && k && !have.has(k)) {
+      const o = { ...s };
+      if (sw[k]) o.sweetenerDiscount = sw[k];
+      out.push(o);
+    }
   });
   return out;
 }
 
 async function loadPriceListItems(forceFresh = false, skipLocalCache = false) {
-  const CACHE_KEY = '4s_price_items_v10';
-  const CACHE_TS  = '4s_price_items_v10_ts';
+  const CACHE_KEY = '4s_price_items_v11';
+  const CACHE_TS  = '4s_price_items_v11_ts';
   const AGE_MS    = 6 * 60 * 60 * 1000; // 6 hours
 
   // Serve the merged list from the local cache if fresh (skipped on a manual
@@ -416,7 +457,7 @@ async function loadPriceListItems(forceFresh = false, skipLocalCache = false) {
   // Best-effort enrichment: pull discontinued flags, alt codes and catalog
   // photos from the OPS sheet. A failure here never blocks ordering — the price
   // book still stands on its own.
-  let serverItems = [];
+  let serverItems = [], sweeteners = {};
   try {
     const apiUrl = getApiUrl();
     if (apiUrl) {
@@ -424,6 +465,7 @@ async function loadPriceListItems(forceFresh = false, skipLocalCache = false) {
       const res = await apiGet('priceList', params, 60000, 2);
       if (res && res.ok) {
         if (Array.isArray(res.items)) serverItems = res.items;
+        if (res.sweeteners && typeof res.sweeteners === 'object') sweeteners = res.sweeteners;
         // Product Catalog (photos + specs), looked up by catKey in Browse Items.
         try {
           localStorage.setItem('4s_catalog_v1', JSON.stringify(res.catalog || {}));
@@ -433,7 +475,7 @@ async function loadPriceListItems(forceFresh = false, skipLocalCache = false) {
     }
   } catch (e) { /* enrichment is best-effort; prices come from the price book */ }
 
-  const merged = mergePriceItems(embedded, serverItems);
+  const merged = mergePriceItems(embedded, serverItems, sweeteners);
   try {
     localStorage.setItem(CACHE_KEY, JSON.stringify(merged));
     localStorage.setItem(CACHE_TS,  String(Date.now()));
@@ -2458,13 +2500,13 @@ function App() {
   // tab. Lets the salesperson pick a complimentary gift for an order and see how
   // many are left; the given quantity is deducted from the sheet on save.
   const [gifts,         setGifts]        = useState(() => { try { return JSON.parse(localStorage.getItem('4s_gift_items')||'[]'); } catch { return []; } });
-  const [priceItems,    setPriceItems]   = useState(() => { try { const c = JSON.parse(localStorage.getItem('4s_price_items_v10')||'[]'); if (c && c.length) return c; } catch {} try { return buildEmbeddedPriceItems(); } catch { return []; } });
+  const [priceItems,    setPriceItems]   = useState(() => { try { const c = JSON.parse(localStorage.getItem('4s_price_items_v11')||'[]'); if (c && c.length) return c; } catch {} try { return buildEmbeddedPriceItems(); } catch { return []; } });
   const [orders,        setOrders]       = useState(() => { try { return normalizeSalesNames(JSON.parse(localStorage.getItem('4s_orders')||'[]')); } catch { return []; } });
   // Manual (paper-order) service requests — standalone requests for pre-app
   // bookings, tracked in their own backend tab, loaded alongside the orders.
   const [svcRequests,   setSvcRequests]  = useState(() => { try { return JSON.parse(localStorage.getItem('4s_svc_requests')||'[]'); } catch { return []; } });
   const [syncedAt,      setSyncedAt]     = useState(null);
-  const [priceSyncedAt, setPriceSyncedAt]= useState(() => localStorage.getItem('4s_price_items_v10_ts') ? new Date(Number(localStorage.getItem('4s_price_items_v10_ts'))).toISOString() : null);
+  const [priceSyncedAt, setPriceSyncedAt]= useState(() => localStorage.getItem('4s_price_items_v11_ts') ? new Date(Number(localStorage.getItem('4s_price_items_v11_ts'))).toISOString() : null);
   const [priceSyncError, setPriceSyncError] = useState(null);
   const [order,         setOrder]        = useState(BLANK_ORDER());
   const [selOrder,      setSelOrder]     = useState(null);
@@ -2552,7 +2594,7 @@ function App() {
     if (cached) try { setItems(JSON.parse(cached)); } catch {}
     syncFourSStock();
     syncGifts();
-    const cachedPL = localStorage.getItem('4s_price_items_v10');
+    const cachedPL = localStorage.getItem('4s_price_items_v11');
     let hadCachedPL = false;
     if (cachedPL) try { const p = JSON.parse(cachedPL); setPriceItems(p); hadCachedPL = p.length > 0; } catch {}
     syncStock({ silent: true });
@@ -2564,7 +2606,7 @@ function App() {
       .then(pi => {
         if (pi.length > 0) {
           setPriceItems(pi);
-          const ts = localStorage.getItem('4s_price_items_v10_ts');
+          const ts = localStorage.getItem('4s_price_items_v11_ts');
           if (ts) setPriceSyncedAt(new Date(Number(ts)).toISOString());
         }
       })
@@ -2602,7 +2644,7 @@ function App() {
         .then(pi => {
           if (pi && pi.length) {
             setPriceItems(pi);
-            const ts = localStorage.getItem('4s_price_items_v10_ts');
+            const ts = localStorage.getItem('4s_price_items_v11_ts');
             if (ts) setPriceSyncedAt(new Date(Number(ts)).toISOString());
           }
         })
@@ -2703,15 +2745,15 @@ function App() {
   }
 
   async function syncPriceList() {
-    localStorage.removeItem('4s_price_items_v10');
-    localStorage.removeItem('4s_price_items_v10_ts');
+    localStorage.removeItem('4s_price_items_v11');
+    localStorage.removeItem('4s_price_items_v11_ts');
     setPriceSyncError(null);
     setLoading(true);
     try {
       const pi = await loadPriceListItems(true);   // force fresh from the sheet
       setPriceItems(pi);
       setPriceSyncedAt(new Date().toISOString());
-      localStorage.setItem('4s_price_items_v10_ts', String(Date.now()));
+      localStorage.setItem('4s_price_items_v11_ts', String(Date.now()));
       showToast(pi.length + ' items loaded ✓', 'ok');
     } catch(e) {
       setPriceSyncError(e.message);
@@ -5056,6 +5098,7 @@ function ProductSheet({item, cat, onClose, onAdd}) {
             <div style={{display:'flex',alignItems:'center',gap:8,marginTop:4,flexWrap:'wrap'}}>
               {catLabel && <span style={{fontFamily:T.mono,fontSize:10,letterSpacing:1,textTransform:'uppercase',color:T.ink4}}>{catLabel}</span>}
               {(item.altCode||item.code) && <span style={{fontFamily:T.mono,fontSize:10.5,fontWeight:700,color:item.altCode?T.green:T.ink4}}>{item.altCode||item.code}</span>}
+              {item.sweetenerDiscount && <Pill tone="purple" size="sm">SWEETENER {item.sweetenerDiscount} OFF</Pill>}
             </div>
           </div>
 
@@ -5558,6 +5601,7 @@ function SearchScreen({ctx}) {
                     {oos && <Pill tone="bad" size="sm">OUT OF STOCK</Pill>}
                     {it.discontinued && <Pill tone="bad" size="sm">DISCONTINUED{it.discSince?' since '+it.discSince:''}</Pill>}
                     {it.altCode && <Pill tone="warn" size="sm">REPLACES {it.code}</Pill>}
+                    {it.sweetenerDiscount && <Pill tone="purple" size="sm">SWEETENER {it.sweetenerDiscount} OFF</Pill>}
                   </div>
                   {/* Extra info (e.g. mattress thickness) */}
                   {it.extra && <div style={{fontSize:10,color:T.ink4,marginBottom:4}}>{it.extra}</div>}
