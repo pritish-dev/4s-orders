@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v58';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v59';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -44,6 +44,7 @@ var PRICE_SKIP = [
   'Stock', 'APP_ORDERING_CREDS', 'Staff',
   'Orders_Master', 'Change_Log', 'Price_Lists',
   'Product Catalog', 'Product Catalogue',
+  'sweetener_scheme', 'Sweetener Scheme',
   'Sheet1', 'Sheet2', 'Sheet3', 'Sheet4', 'Sheet5',
 ];
 
@@ -822,9 +823,24 @@ function handlePriceList(p) {
     }
   } catch (e) { /* catalog join is non-fatal — items still load without photos */ }
 
+  // Sweetener scheme discounts (OPS "sweetener_scheme" tab), keyed by item code.
+  // Shipped as a map so the app can badge any matching item (bundled or sheet-
+  // sourced) with its scheme discount, and annotated onto the server items too.
+  var sweeteners = {};
+  try {
+    var swMap = _getSweetenerMap(opsSS);
+    if (swMap) {
+      sweeteners = swMap;
+      for (var sw = 0; sw < all.length; sw++) {
+        var sd = swMap[all[sw].code];
+        if (sd) all[sw].sweetenerDiscount = sd;
+      }
+    }
+  } catch (e) { /* sweetener annotation is non-fatal */ }
+
   var result = { ok: true, scriptVersion: SCRIPT_VERSION, mode: usedFallback ? 'auto-scan' : 'config', items: all, counts: counts, totalTabs: Object.keys(counts).length,
                  annotated: { discontinued: annDiscontinued, altCode: annAltCode, addedFromDiscontinued: addedDiscontinued },
-                 catalog: catalogMap,
+                 catalog: catalogMap, sweeteners: sweeteners,
                  catalogStats: { matched: catMatched, total: all.length, products: Object.keys(catalogMap).length, sample: catUnmatched } };
   if (errors.length) result.tabErrors = errors;
   _cachePut(cacheKey, result);   // speed up the next load
@@ -1039,7 +1055,9 @@ function _parseMattressTab(rows, headerRow, tabName, catOverride) {
     var tcm   = cTcm  >= 0 ? String(row[cTcm]  || '').trim()          : '';
     var extra = tin   ? (tin + '"' + (tcm ? ' / ' + tcm + 'cm' : '')) : ref;
 
-    items.push(_makeItem(tabName, catOverride || 'Mattress', currentModel, code, desc, cpl, extra));
+    var mitem = _makeItem(tabName, catOverride || 'Mattress', currentModel, code, desc, cpl, extra);
+    mitem.mat = true;   // lets the app swap the bundled mattress list for these sheet-sourced rows
+    items.push(mitem);
   }
   return items;
 }
@@ -1100,6 +1118,50 @@ function _fmtDate(v) {
   if (v === null || v === undefined || v === '') return '';
   if (Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v)) {
     return Utilities.formatDate(v, Session.getScriptTimeZone(), 'dd MMM yyyy');
+  }
+  return String(v).trim();
+}
+
+// ─── Sweetener scheme lookup ──────────────────────────────────────────────────
+// OPS tab "sweetener_scheme" headers: ITEM CODE | ITEM DESCRIPTION | DSICOUNT
+// (the DISCOUNT column is read by several spellings, including the sheet's own
+// "DSICOUNT" typo). Returns { <UPPER item code>: "<discount>" } where the value
+// is a display-ready string — usually a percentage like "20%". The app surfaces
+// it on the matching item like the out-of-stock / discontinued badges.
+function _getSweetenerMap(opsSS) {
+  var sh = null;
+  var candidates = ['sweetener_scheme', 'Sweetener_Scheme', 'Sweetener Scheme', 'sweetener scheme', 'SWEETENER_SCHEME'];
+  for (var c = 0; c < candidates.length; c++) { sh = opsSS.getSheetByName(candidates[c]); if (sh) break; }
+  if (!sh) return null;
+  var rows = sh.getDataRange().getValues();
+  if (rows.length < 2) return {};
+
+  var hdr   = rows[0].map(function(c){ return String(c || '').toUpperCase().trim(); });
+  var cCode = _hdrIdx(hdr, ['ITEM CODE', 'ITEM_CODE', 'CODE', 'LN CODE']);
+  var cDisc = _hdrIdx(hdr, ['DSICOUNT', 'DISCOUNT', 'DISC', 'DISCOUNT %', 'DISCOUNT%', 'SWEETENER', 'SWEETENER DISCOUNT']);
+  if (cCode < 0) cCode = 0;   // documented column order: ITEM CODE | DESC | DISCOUNT
+  if (cDisc < 0) cDisc = 2;
+
+  var map = {};
+  for (var i = 1; i < rows.length; i++) {
+    var code = String(rows[i][cCode] || '').toUpperCase().trim();
+    if (!code) continue;
+    var disc = _fmtDiscount(rows[i][cDisc]);
+    if (!disc) continue;
+    map[code] = disc;
+  }
+  return map;
+}
+
+// Normalise a discount cell to a display string. A percent-formatted cell arrives
+// as a fraction (0.2 → "20%"); a bare number is read as whole percent (20 → "20%");
+// any text (e.g. "20%", "₹2000 off") is kept as-is.
+function _fmtDiscount(v) {
+  if (v === null || v === undefined || v === '') return '';
+  if (typeof v === 'number') {
+    if (!v) return '';
+    var pct = (v > 0 && v < 1) ? Math.round(v * 100) : Math.round(v);
+    return pct + '%';
   }
   return String(v).trim();
 }
