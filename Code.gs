@@ -463,8 +463,94 @@ function handleStock() {
     }
   }
 
+  // ─── Merge RPL stock (ZBF34S) as a fallback availability source ──────────────
+  // When an item has NO stock in the KB warehouse (ZBF11T), surface any RPL stock
+  // destined for the 34S warehouse (ZBF34S) so the salesperson still sees it as
+  // available. Items that appear only in the RPL feed are added too. Per the
+  // showroom requirement, ONLY the ZBF34S destination is considered — every other
+  // "Destination Warehouse" code is ignored (see _rplStockByCode).
+  var rplByCode = _rplStockByCode(opsSS);
+  for (var rc in rplByCode) {
+    if (!rplByCode.hasOwnProperty(rc)) continue;
+    var rpl = rplByCode[rc];
+    if (!rpl || rpl.qty <= 0) continue;
+    var itR = byCode[rc];
+    // KB (ZBF11T) availability for this item, if any.
+    var kbQty = 0;
+    if (itR) {
+      for (var si = 0; si < itR.stock.length; si++) {
+        if (String(itR.stock[si].b || '').toUpperCase().indexOf('11T') >= 0) kbQty += (Number(itR.stock[si].q) || 0);
+      }
+    }
+    // Only surface RPL stock when the KB warehouse can't supply the item.
+    if (kbQty > 0) continue;
+    if (!itR) { itR = byCode[rc] = { code: rc, name: rpl.name || '', mrp: 0, cpl: 0, stock: [], _wh: {} }; order.push(rc); }
+    if (!itR.name && rpl.name) itR.name = rpl.name;
+    // The chip label carries "34S" so the delivery-warehouse tag/default map it to
+    // ZBF34S, while "RPL" makes the alternate source clear to the salesperson.
+    if (itR._wh['RPL 34S'] === undefined) { itR._wh['RPL 34S'] = itR.stock.length; itR.stock.push({ b: 'RPL 34S', q: rpl.qty }); }
+    else { itR.stock[itR._wh['RPL 34S']].q += rpl.qty; }
+  }
+
   var items = order.map(function(code){ var it = byCode[code]; delete it._wh; return it; });
   return { ok: true, items: items, syncedAt: syncedAt || new Date().toISOString() };
+}
+
+// ─── RPL STOCK (alternate ZBF34S availability feed) ──────────────────────────
+// Reads the OPS spreadsheet → "RPL Stock" tab. This is a secondary availability
+// feed: it tells the salesperson that an item the KB warehouse (ZBF11T) can't
+// supply is still obtainable from RPL stock destined for the 34S warehouse
+// (ZBF34S). Only rows whose "Destination Warehouse" is ZBF34S are considered —
+// any other destination code is deliberately ignored per the showroom's
+// requirement. The surfaced quantity is that row's "Warehouse Inventory
+// Commitment QTY".
+//
+// Returns a map { <ITEM CODE>: { qty:<number>, name:<string> } } that sums all
+// ZBF34S rows for a code. Returns {} when the tab is absent or unreadable so
+// callers can merge unconditionally.
+function _rplStockByCode(opsSS) {
+  var out = {};
+  if (!opsSS) return out;
+
+  var names = ['RPL Stock', 'RPL STOCK', 'RPL_Stock', 'RPLStock', 'RPL', 'Rpl Stock'];
+  var sh = null;
+  for (var n = 0; n < names.length; n++) { sh = opsSS.getSheetByName(names[n]); if (sh) break; }
+  if (!sh) {
+    // Last resort: case/space-insensitive scan across all tabs.
+    var all = opsSS.getSheets();
+    for (var a = 0; a < all.length; a++) {
+      if (String(all[a].getName() || '').replace(/\s+/g, '').toUpperCase() === 'RPLSTOCK') { sh = all[a]; break; }
+    }
+  }
+  if (!sh) return out;
+
+  var rows = sh.getDataRange().getValues();
+  if (rows.length < 2) return out;
+
+  var hdr = rows[0];
+  var cCode = _hdrKeyIdx(hdr, ['ITEM CODE', 'CODE', 'ITEM_CODE', 'LN CODE', 'MATERIAL', 'MATERIAL CODE', 'MATERIAL NUMBER']);
+  var cDest = _hdrKeyIdx(hdr, ['DESTINATION WAREHOUSE', 'DEST WAREHOUSE', 'DESTINATION WH', 'DEST WH', 'DESTINATION']);
+  var cQty  = _hdrKeyIdx(hdr, ['WAREHOUSE INVENTORY COMMITMENT QTY', 'WAREHOUSE INVENTORY COMMITMENT QUANTITY', 'INVENTORY COMMITMENT QTY', 'WAREHOUSE COMMITMENT QTY', 'INV COMMITMENT QTY', 'COMMITMENT QTY', 'COMMITTED QTY', 'COMMITMENT QUANTITY']);
+  var cName = _hdrKeyIdx(hdr, ['ITEM DESCRIPTION', 'DESCRIPTION', 'ITEM NAME', 'NAME', 'MATERIAL DESCRIPTION']);
+
+  // The item code plus the two required columns must all be present; without them
+  // the sheet can't be interpreted, so we return nothing rather than guess.
+  if (cCode < 0 || cDest < 0 || cQty < 0) return out;
+
+  for (var i = 1; i < rows.length; i++) {
+    var r = rows[i];
+    var code = String(r[cCode] || '').toUpperCase().trim();
+    if (!code) continue;
+    // ONLY the ZBF34S destination warehouse is relevant.
+    var dest = String(r[cDest] || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (dest !== 'ZBF34S') continue;
+    var qty = parseInt(String(r[cQty] != null ? r[cQty] : 0).replace(/[^\d-]/g, ''), 10) || 0;
+    if (qty <= 0) continue;
+    if (!out[code]) out[code] = { qty: 0, name: '' };
+    out[code].qty += qty;
+    if (!out[code].name && cName >= 0) out[code].name = String(r[cName] || '').trim();
+  }
+  return out;
 }
 
 // ─── 4S STOCK ──────────────────────────────────────────────────────────────────
