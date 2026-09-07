@@ -484,8 +484,8 @@ function mergePriceItems(embedded, serverItems, sweeteners) {
 }
 
 async function loadPriceListItems(forceFresh = false, skipLocalCache = false) {
-  const CACHE_KEY = '4s_price_items_v11';
-  const CACHE_TS  = '4s_price_items_v11_ts';
+  const CACHE_KEY = '4s_price_items_v12';
+  const CACHE_TS  = '4s_price_items_v12_ts';
   const AGE_MS    = 6 * 60 * 60 * 1000; // 6 hours
 
   // Serve the merged list from the local cache if fresh (skipped on a manual
@@ -2548,13 +2548,13 @@ function App() {
   // tab. Lets the salesperson pick a complimentary gift for an order and see how
   // many are left; the given quantity is deducted from the sheet on save.
   const [gifts,         setGifts]        = useState(() => { try { return JSON.parse(localStorage.getItem('4s_gift_items')||'[]'); } catch { return []; } });
-  const [priceItems,    setPriceItems]   = useState(() => { try { const c = JSON.parse(localStorage.getItem('4s_price_items_v11')||'[]'); if (c && c.length) return c; } catch {} try { return buildEmbeddedPriceItems(); } catch { return []; } });
+  const [priceItems,    setPriceItems]   = useState(() => { try { const c = JSON.parse(localStorage.getItem('4s_price_items_v12')||'[]'); if (c && c.length) return c; } catch {} try { return buildEmbeddedPriceItems(); } catch { return []; } });
   const [orders,        setOrders]       = useState(() => { try { return normalizeSalesNames(JSON.parse(localStorage.getItem('4s_orders')||'[]')); } catch { return []; } });
   // Manual (paper-order) service requests — standalone requests for pre-app
   // bookings, tracked in their own backend tab, loaded alongside the orders.
   const [svcRequests,   setSvcRequests]  = useState(() => { try { return JSON.parse(localStorage.getItem('4s_svc_requests')||'[]'); } catch { return []; } });
   const [syncedAt,      setSyncedAt]     = useState(null);
-  const [priceSyncedAt, setPriceSyncedAt]= useState(() => localStorage.getItem('4s_price_items_v11_ts') ? new Date(Number(localStorage.getItem('4s_price_items_v11_ts'))).toISOString() : null);
+  const [priceSyncedAt, setPriceSyncedAt]= useState(() => localStorage.getItem('4s_price_items_v12_ts') ? new Date(Number(localStorage.getItem('4s_price_items_v12_ts'))).toISOString() : null);
   const [priceSyncError, setPriceSyncError] = useState(null);
   const [order,         setOrder]        = useState(BLANK_ORDER());
   const [selOrder,      setSelOrder]     = useState(null);
@@ -2642,7 +2642,7 @@ function App() {
     if (cached) try { setItems(JSON.parse(cached)); } catch {}
     syncFourSStock();
     syncGifts();
-    const cachedPL = localStorage.getItem('4s_price_items_v11');
+    const cachedPL = localStorage.getItem('4s_price_items_v12');
     let hadCachedPL = false;
     if (cachedPL) try { const p = JSON.parse(cachedPL); setPriceItems(p); hadCachedPL = p.length > 0; } catch {}
     syncStock({ silent: true });
@@ -2654,7 +2654,7 @@ function App() {
       .then(pi => {
         if (pi.length > 0) {
           setPriceItems(pi);
-          const ts = localStorage.getItem('4s_price_items_v11_ts');
+          const ts = localStorage.getItem('4s_price_items_v12_ts');
           if (ts) setPriceSyncedAt(new Date(Number(ts)).toISOString());
         }
       })
@@ -2692,7 +2692,7 @@ function App() {
         .then(pi => {
           if (pi && pi.length) {
             setPriceItems(pi);
-            const ts = localStorage.getItem('4s_price_items_v11_ts');
+            const ts = localStorage.getItem('4s_price_items_v12_ts');
             if (ts) setPriceSyncedAt(new Date(Number(ts)).toISOString());
           }
         })
@@ -2793,15 +2793,15 @@ function App() {
   }
 
   async function syncPriceList() {
-    localStorage.removeItem('4s_price_items_v11');
-    localStorage.removeItem('4s_price_items_v11_ts');
+    localStorage.removeItem('4s_price_items_v12');
+    localStorage.removeItem('4s_price_items_v12_ts');
     setPriceSyncError(null);
     setLoading(true);
     try {
       const pi = await loadPriceListItems(true);   // force fresh from the sheet
       setPriceItems(pi);
       setPriceSyncedAt(new Date().toISOString());
-      localStorage.setItem('4s_price_items_v11_ts', String(Date.now()));
+      localStorage.setItem('4s_price_items_v12_ts', String(Date.now()));
       showToast(pi.length + ' items loaded ✓', 'ok');
     } catch(e) {
       setPriceSyncError(e.message);
