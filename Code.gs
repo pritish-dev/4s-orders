@@ -1460,6 +1460,9 @@ function handleOrders(p) {
   // Per-receipt amounts for receipts 2 & 3 (receipt 1's amount is the earnest /
   // ADV RECEIVED). Let the running balance reflect part-payments made after booking.
   var cMr2a=colOf(['MONEY RECEIPT AMT 2','MONEY RECEIPT AMOUNT 2']), cMr3a=colOf(['MONEY RECEIPT AMT 3','MONEY RECEIPT AMOUNT 3']);
+  // Delivery-challan no + date for B2B orders (challan amount is the earnest / ADV RECEIVED).
+  var cChalNo=colOf(['CHALLAN NO','CHALLAN NO.','DELIVERY CHALLAN NO','CHALLAN NUMBER']);
+  var cChalDate=colOf(['CHALLAN DATE','DELIVERY CHALLAN DATE']);
   // Finance-scheme reimbursement + installation happy code (order-level).
   var cGReimb  = colOf(['GODREJ REIMBURSEMENT','REIMBURSEMENT FROM GODREJ']);
   var cGReimbDt= colOf(['GODREJ REIMBURSEMENT DATE','REIMBURSEMENT FROM GODREJ DATE']);
@@ -1600,6 +1603,9 @@ function handleOrders(p) {
           { no: sval(r, cMr2n), date: dstr(r, cMr2d), amt: cMr2a >= 0 ? Number(r[cMr2a]) || 0 : 0 },
           { no: sval(r, cMr3n), date: dstr(r, cMr3d), amt: cMr3a >= 0 ? Number(r[cMr3a]) || 0 : 0 },
         ],
+        // Delivery challan (B2B orders) — the amount is the earnest / ADV RECEIVED.
+        challanNo: sval(r, cChalNo),
+        challanDate: dstr(r, cChalDate),
         date: sval(r, cDate),
         // After-sales service / issue tracking.
         serviceFlag: /^(yes|true|1)$/i.test(sval(r, cSvcFlag)),
@@ -2854,6 +2860,10 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['MONEY RECEIPT NO 3'], mr3.no || '');
     put(['MONEY RECEIPT DATE 3'], mr3.date || '');
     put(['MONEY RECEIPT AMT 3'], Number(mr3.amt) || 0);
+    // Delivery challan (B2B orders) — no + date. The challan amount is the earnest
+    // (ADV RECEIVED), written alongside the money-receipt amount above.
+    put(['CHALLAN NO', 'CHALLAN NO.', 'DELIVERY CHALLAN NO', 'CHALLAN NUMBER'], o.challanNo || '');
+    put(['CHALLAN DATE', 'DELIVERY CHALLAN DATE'], o.challanDate || '');
     // Finance-scheme (Bajaj / Pine Labs EMI) Godrej reimbursement (order-level — first row only).
     if (i === 0) {
       put(['GODREJ REIMBURSEMENT', 'REIMBURSEMENT FROM GODREJ'], Number(o.godrejReimbursement) || 0);
