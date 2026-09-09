@@ -31,7 +31,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '77';
+  var V = '78';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -2612,6 +2612,12 @@ function App() {
   // Leads — per-salesperson lead register, grouped by person ({ SWATI:[…], … }).
   const [leads,         setLeads]        = useState(() => { try { return JSON.parse(localStorage.getItem('4s_leads')||'{}'); } catch { return {}; } });
   const [leadsLoading,  setLeadsLoading] = useState(false);
+  // GMB / LDM order tags — de-duped caller-number sets from the OPS "GMB CONTACTS"
+  // and "LDM CONTACTS" call logs. An order whose contact number matches one of
+  // these is tagged a GMB (or LDM) order. Cached locally so tagging is instant.
+  const [gmbPhones,     setGmbPhones]    = useState(() => { try { return JSON.parse(localStorage.getItem('4s_gmb_phones')||'[]'); } catch { return []; } });
+  const [ldmPhones,     setLdmPhones]    = useState(() => { try { return JSON.parse(localStorage.getItem('4s_ldm_phones')||'[]'); } catch { return []; } });
+  const [contactTagsLoading, setContactTagsLoading] = useState(false);
   // Customers who have already been sent the once-per-customer birthday/anniversary
   // OFFER. Keyed by normalised phone → true. Hydrated synchronously from the local
   // cache so the Offer buttons render disabled instantly, then reconciled with the
@@ -2707,6 +2713,7 @@ function App() {
     loadMis({ silent: true });
     loadLeague({ silent: true });
     loadLeads({ silent: true });
+    loadContactTags({ silent: true });
     loadOffersSent();
   }, [user]);
 
@@ -2967,6 +2974,26 @@ function App() {
       } else if (!silent) showToast((res && res.error) || 'Failed to load leads','bad');
     } catch(e) { if (!silent) showToast('Could not reach the server','warn'); }
     finally { if (!silent) setLeadsLoading(false); }
+    return null;
+  }
+  // ── GMB / LDM contact tags ─────────────────────────────────────
+  // Pull the caller-number sets from the OPS "GMB CONTACTS" / "LDM CONTACTS"
+  // call logs. Cached locally so GMB/LDM order tagging shows instantly on open.
+  async function loadContactTags(opts) {
+    const silent = opts && opts.silent;
+    if (!silent) setContactTagsLoading(true);
+    try {
+      const res = await apiGet('contactTags', {}, 30000, 2);
+      if (res && res.ok) {
+        const gmb = Array.isArray(res.gmb) ? res.gmb : [];
+        const ldm = Array.isArray(res.ldm) ? res.ldm : [];
+        setGmbPhones(gmb); setLdmPhones(ldm);
+        localStorage.setItem('4s_gmb_phones', JSON.stringify(gmb));
+        localStorage.setItem('4s_ldm_phones', JSON.stringify(ldm));
+        return res;
+      } else if (!silent) showToast((res && res.error) || 'Failed to load GMB/LDM contacts','bad');
+    } catch(e) { if (!silent) showToast('Could not reach the server','warn'); }
+    finally { if (!silent) setContactTagsLoading(false); }
     return null;
   }
   // Add one lead to a salesperson's register; refreshes the local cache on success.
@@ -3351,6 +3378,7 @@ function App() {
     mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen,
     league, leagueLoading, loadLeague, doSaveLeagueScore, doSaveLeagueConfig,
     leads, leadsLoading, loadLeads, doAddLead, doEditLead,
+    gmbPhones, ldmPhones, contactTagsLoading, loadContactTags,
     offersSent, loadOffersSent, doMarkOfferSent, doResetOffersSent,
     offerEndDate, doSaveOfferConfig };
 
@@ -7750,7 +7778,7 @@ function ServiceScreen({ctx}){
 
 // ─── Order History ───────────────────────────────────────────
 function HistoryScreen({ctx}) {
-  const {orders,mis,nav,loadOrders,loadMis,doUpdateDelivery,doDeleteOrder,user,misLoading,loading} = ctx;
+  const {orders,mis,nav,loadOrders,loadMis,doUpdateDelivery,doDeleteOrder,user,misLoading,loading,gmbPhones,ldmPhones} = ctx;
   const isAdmin = normRole(user?.role) === 'admin';
   // Default view: Pending orders of ALL salespersons.
   const [tab,setTab] = useState('pending');
@@ -7777,6 +7805,12 @@ function HistoryScreen({ctx}) {
   const [financeFrom,setFinanceFrom] = useState('');       // ISO yyyy-mm-dd range start for Finance Scheme Orders ('' = no lower bound)
   const [financeTo,setFinanceTo]     = useState('');       // ISO yyyy-mm-dd range end for Finance Scheme Orders ('' = no upper bound)
   const [financeScheme,setFinanceScheme] = useState('');   // financier filter for Finance Scheme Orders ('' = both, else 'Bajaj Finance' | 'Pine Labs')
+  const [gmbView,setGmbView] = useState(false);            // false=ledger · true=GMB Orders drill-down
+  const [gmbFrom,setGmbFrom] = useState('');               // ISO yyyy-mm-dd booking-date range start for GMB Orders ('' = no lower bound)
+  const [gmbTo,setGmbTo]     = useState('');               // ISO yyyy-mm-dd booking-date range end for GMB Orders ('' = no upper bound)
+  const [ldmView,setLdmView] = useState(false);            // false=ledger · true=LDM Orders drill-down
+  const [ldmFrom,setLdmFrom] = useState('');               // ISO yyyy-mm-dd booking-date range start for LDM Orders
+  const [ldmTo,setLdmTo]     = useState('');               // ISO yyyy-mm-dd booking-date range end for LDM Orders
   useEffect(()=>{ loadOrders(); loadMis({silent:true}); },[]);
   // Delivery-status category helpers. "rescheduled for delivery" also contains
   // "scheduled", so anchor both with ^ to keep the two buckets separate.
@@ -7866,6 +7900,26 @@ function HistoryScreen({ctx}) {
   const financeOrders = financeBase.filter(financeSchemeMatch);
   const financeCount = orders.filter(isFinanceScheme).length;
   const financeTotalValue = financeOrders.reduce((s,o)=>s+financeOrderValue(o),0);
+
+  // ── GMB / LDM Orders ─────────────────────────────────────────────────────────
+  // An order is a GMB (or LDM) order when any of its contact numbers (main / alt /
+  // delivery contact) matches a caller number from the OPS "GMB CONTACTS" /
+  // "LDM CONTACTS" call log. Value shown is the NET BASIC (ex-GST) order value.
+  // The optional date range filters on the order's BOOKING date (when it was
+  // converted). Search + salesperson filters from the ledger still apply.
+  const gmbSet = React.useMemo(()=>new Set((gmbPhones||[]).map(_normPhone).filter(p=>p&&p.length>=10)),[gmbPhones]);
+  const ldmSet = React.useMemo(()=>new Set((ldmPhones||[]).map(_normPhone).filter(p=>p&&p.length>=10)),[ldmPhones]);
+  const orderContactPhones = o => [o&&o.phone,o&&o.alt,o&&o.contactNumber].map(_normPhone).filter(p=>p&&p.length>=10);
+  const isGmbOrder = o => o && o.status!=='draft' && orderContactPhones(o).some(p=>gmbSet.has(p));
+  const isLdmOrder = o => o && o.status!=='draft' && orderContactPhones(o).some(p=>ldmSet.has(p));
+  const netBasicOf = o => _exGst(o && o.amt);              // net basic (ex-GST) order value
+  const bookingInRange = (o,from,to) => { if(!from&&!to) return true; const iso=_toISO(o.date); if(!iso) return false; if(from&&iso<from) return false; if(to&&iso>to) return false; return true; };
+  const gmbOrders = orders.filter(isGmbOrder).filter(matchesQuery).filter(matchesSales).filter(o=>bookingInRange(o,gmbFrom,gmbTo));
+  const gmbTotalValue = gmbOrders.reduce((s,o)=>s+netBasicOf(o),0);
+  const gmbCount = orders.filter(isGmbOrder).length;
+  const ldmOrders = orders.filter(isLdmOrder).filter(matchesQuery).filter(matchesSales).filter(o=>bookingInRange(o,ldmFrom,ldmTo));
+  const ldmTotalValue = ldmOrders.reduce((s,o)=>s+netBasicOf(o),0);
+  const ldmCount = orders.filter(isLdmOrder).length;
 
   // ── Delivery Watch data ────────────────────────────────────────────────────
   // Orders whose delivery is due tomorrow, due today, or already overdue AND that
@@ -8545,6 +8599,92 @@ function HistoryScreen({ctx}) {
     );
   }
 
+  // ── GMB / LDM Orders drill-down ────────────────────────────────────────────
+  // Orders matched to the GMB / LDM call log, each shown with its NET BASIC
+  // (ex-GST) order value. Reached from the "GMB Orders" / "LDM Orders" boxes on
+  // the ledger. One shared renderer — both views differ only in label, icon,
+  // order set and date-range state. Salesperson + search filters still apply.
+  const renderTagOrders = (cfg) => {
+    const money = n => '₹'+Math.round(n||0).toLocaleString('en-IN');
+    const tagInp = {padding:'8px 10px',borderRadius:8,border:`1px solid ${T.line}`,background:'#fff',color:T.ink,fontSize:13,fontFamily:T.mono,width:'100%',WebkitAppearance:'none',appearance:'none'};
+    const tagLbl = {fontSize:10,color:T.ink4,fontWeight:700,letterSpacing:.5,marginBottom:4};
+    const anyRange = !!(cfg.from||cfg.to);
+    return (
+      <div className="screen">
+        <div style={{flexShrink:0}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 14px 8px'}}>
+            <button onClick={cfg.onBack} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>ORDERS · {cfg.tag}</div>
+              <div style={{fontSize:20,fontWeight:700,letterSpacing:-0.4}}>{cfg.title}</div>
+            </div>
+          </div>
+          <div style={{fontSize:12,color:T.ink4,padding:'0 18px 8px'}}>{cfg.subtitle} <b>Net basic</b> (ex-GST) order value. Date range filters on the <b>booking date</b>.</div>
+          {/* From–to booking-date range. Empty by default ⇒ all matched orders. */}
+          <div style={{padding:'0 18px 10px'}}>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr auto',gap:8,alignItems:'end'}}>
+              <div><div style={tagLbl}>FROM</div><input type="date" value={cfg.from} max={cfg.to||undefined} onChange={e=>cfg.setFrom(e.target.value)} style={tagInp}/></div>
+              <div><div style={tagLbl}>TO</div><input type="date" value={cfg.to} min={cfg.from||undefined} onChange={e=>cfg.setTo(e.target.value)} style={tagInp}/></div>
+              <button onClick={()=>{cfg.setFrom('');cfg.setTo('');}} disabled={!anyRange} style={{padding:'8px 12px',borderRadius:8,border:`1px solid ${T.line}`,background:anyRange?'#fff':T.paper2,color:anyRange?T.ink2:T.ink4,fontSize:12,fontWeight:600,cursor:anyRange?'pointer':'default'}}>Clear</button>
+            </div>
+          </div>
+          <div style={{padding:'0 18px 10px'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'12px 14px',background:T.ink,color:'#fff',borderRadius:10}}>
+              <div><div style={{fontSize:11,opacity:.7}}>{cfg.list.length} order{cfg.list.length===1?'':'s'}{anyRange?' in range':''} · net basic value (ex-GST)</div><div style={{fontSize:20,fontWeight:800,fontFamily:T.mono,marginTop:2}}>{money(cfg.total)}</div></div>
+              <div style={{fontSize:26}}>{cfg.icon}</div>
+            </div>
+          </div>
+          {/* Salesperson filter — shared with the ledger's salesperson filter. */}
+          <div style={{padding:'0 18px 8px',display:'flex',gap:6,overflowX:'auto',alignItems:'center'}}>
+            <span style={{fontSize:11,color:T.ink4,fontWeight:700,flexShrink:0}}>SALES</span>
+            <span onClick={()=>setSalesFilter('')} style={{padding:'5px 10px',borderRadius:99,background:!salesFilter?T.green:'#fff',color:!salesFilter?'#fff':T.ink2,border:`1px solid ${!salesFilter?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0}}>All</span>
+            {salespeople.map(sp=>(
+              <span key={sp} onClick={()=>setSalesFilter(sp)} style={{padding:'5px 10px',borderRadius:99,background:salesFilter===sp?T.green:'#fff',color:salesFilter===sp?'#fff':T.ink2,border:`1px solid ${salesFilter===sp?T.green:T.line}`,fontSize:12,fontWeight:600,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>{sp}</span>
+            ))}
+          </div>
+        </div>
+        <div className="scroll">
+          {cfg.list.map(o=>(
+            <div key={o.no} onClick={()=>openOrder(o)} style={{background:'#fff',borderBottom:`1px solid ${T.line}`,borderLeft:`4px solid ${T.ink}`,padding:'12px 18px',display:'grid',gridTemplateColumns:'1fr auto',gap:10,cursor:'pointer'}}>
+              <div style={{minWidth:0}}>
+                <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3,flexWrap:'wrap'}}>
+                  <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
+                  <Pill tone="ink" size="sm">{cfg.tag}</Pill>
+                  {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:null}
+                </div>
+                <div style={{fontSize:14,fontWeight:700,color:T.ink}}>{o.customer}</div>
+                <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.salesExec}{o.date?' · '+o.date:''}</div>
+              </div>
+              <div style={{textAlign:'right'}}>
+                <div style={{fontSize:16,fontFamily:T.mono,fontWeight:700,color:T.ink,letterSpacing:-0.4}}>{money(netBasicOf(o))}</div>
+                <div style={{fontSize:10,color:T.ink4,marginTop:2}}>net basic</div>
+              </div>
+            </div>
+          ))}
+          {cfg.list.length===0 && (
+            <div style={{padding:'48px 24px',textAlign:'center'}}>
+              <div style={{width:52,height:52,borderRadius:14,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:12,fontSize:24}}>{cfg.icon}</div>
+              <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>No {cfg.tag} orders</div>
+              <div style={{fontSize:12,color:T.ink4,lineHeight:1.5}}>{anyRange?'None booked in this date range — try widening or clearing it.':(query||salesFilter)?'None match the current search / salesperson filter.':cfg.empty}</div>
+            </div>
+          )}
+          <div style={{height:24}}/>
+        </div>
+        <BottomNav screen="history" nav={nav}/>
+      </div>
+    );
+  };
+  if (gmbView) return renderTagOrders({ tag:'GMB', title:'GMB Orders', icon:'📞',
+    subtitle:'Orders matched to the GMB call log (Google My Business enquiries).',
+    empty:'Orders whose contact number appears in the GMB call log appear here.',
+    onBack:()=>setGmbView(false), from:gmbFrom, to:gmbTo, setFrom:setGmbFrom, setTo:setGmbTo,
+    list:gmbOrders, total:gmbTotalValue });
+  if (ldmView) return renderTagOrders({ tag:'LDM', title:'LDM Orders', icon:'📇',
+    subtitle:'Orders matched to the LDM call log.',
+    empty:'Orders whose contact number appears in the LDM call log appear here.',
+    onBack:()=>setLdmView(false), from:ldmFrom, to:ldmTo, setFrom:setLdmFrom, setTo:setLdmTo,
+    list:ldmOrders, total:ldmTotalValue });
+
   // ── Orders by Date drill-down ──────────────────────────────────────────────
   // Groups orders by their booking date (Today, Yesterday, then each earlier day)
   // and offers a from–to range filter. Reached from the "Orders by Date" box on
@@ -8832,6 +8972,30 @@ function HistoryScreen({ctx}) {
             </div>
             {financeCount>0
               ? <span style={{minWidth:26,height:26,padding:'0 8px',borderRadius:99,background:'#fff',color:T.ink,fontSize:14,fontWeight:800,display:'inline-flex',alignItems:'center',justifyContent:'center'}}>{financeCount}</span>
+              : <span style={{fontSize:18,opacity:.8}}>›</span>}
+          </div>
+        </div>
+        {/* GMB Orders entry — orders matched to the GMB call log, net basic value */}
+        <div style={{padding:'2px 18px 8px'}}>
+          <div onClick={()=>setGmbView(true)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'14px 16px',background:T.ink,color:'#fff',borderRadius:10,cursor:'pointer'}}>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              <div style={{width:34,height:34,borderRadius:8,background:'rgba(255,255,255,.14)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>📞</div>
+              <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>GMB Orders</div><div style={{fontSize:11,opacity:.7}}>Matched to the GMB call log · net basic value</div></div>
+            </div>
+            {gmbCount>0
+              ? <span style={{minWidth:26,height:26,padding:'0 8px',borderRadius:99,background:'#fff',color:T.ink,fontSize:14,fontWeight:800,display:'inline-flex',alignItems:'center',justifyContent:'center'}}>{gmbCount}</span>
+              : <span style={{fontSize:18,opacity:.8}}>›</span>}
+          </div>
+        </div>
+        {/* LDM Orders entry — orders matched to the LDM call log, net basic value */}
+        <div style={{padding:'2px 18px 8px'}}>
+          <div onClick={()=>setLdmView(true)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'14px 16px',background:T.ink,color:'#fff',borderRadius:10,cursor:'pointer'}}>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              <div style={{width:34,height:34,borderRadius:8,background:'rgba(255,255,255,.14)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>📇</div>
+              <div><div style={{fontSize:14,fontWeight:700,letterSpacing:-0.2}}>LDM Orders</div><div style={{fontSize:11,opacity:.7}}>Matched to the LDM call log · net basic value</div></div>
+            </div>
+            {ldmCount>0
+              ? <span style={{minWidth:26,height:26,padding:'0 8px',borderRadius:99,background:'#fff',color:T.ink,fontSize:14,fontWeight:800,display:'inline-flex',alignItems:'center',justifyContent:'center'}}>{ldmCount}</span>
               : <span style={{fontSize:18,opacity:.8}}>›</span>}
           </div>
         </div>

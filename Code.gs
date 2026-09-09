@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v60';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v61';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -129,6 +129,7 @@ function doGet(e) {
       case 'lookupCustomer': result = handleLookupCustomer(p);  break;
       case 'serviceRequests':result = handleListServiceRequests(); break;
       case 'leads':          result = handleLeads(p);           break;
+      case 'contactTags':    result = handleContactTags(p);     break;
       case 'offersSent':     result = handleOffersSent();       break;
       case 'debugPriceList': result = handleDebugPriceList();   break;
       default:               result = { ok: false, error: 'Unknown action: ' + (p.action || '(none)') };
@@ -3837,6 +3838,72 @@ function handleLeads(p) {
       byPerson[person] = rows;
     });
     return { ok: true, leads: byPerson, people: LEADS_PEOPLE, scriptVersion: SCRIPT_VERSION };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+// ─── GMB / LDM call-tracking contacts ─────────────────────────────────────────
+// Two OPS tabs — "GMB CONTACTS" and "LDM CONTACTS" — are call logs, each with a
+// CALL DATE and a CALLER NUMBER column. An order whose customer contact number
+// matches one of these caller numbers is a GMB (or LDM) order. This action
+// returns the de-duped set of caller numbers (normalised to their last 10 digits)
+// for each tab; the app tags orders by matching each order's phone numbers
+// against these sets. Open to any logged-in user (read-only).
+var GMB_CONTACTS_SHEET = 'GMB CONTACTS';
+var LDM_CONTACTS_SHEET = 'LDM CONTACTS';
+
+// Last-10-digit phone normalisation, matching the app's _normPhone so both sides
+// agree on what "the same number" means (strips +91 / 0 / spaces / punctuation).
+function _normPhoneGS(v) {
+  var d = String(v == null ? '' : v).replace(/\D/g, '');
+  return d.length > 10 ? d.slice(-10) : d;
+}
+
+// Read one call-log tab and return { phones:[unique last-10 caller numbers], count }.
+// The caller-number column is located by header wording
+// ("caller"/"number"/"phone"/"mobile"/"contact"); with the sheet's fixed
+// "CALL DATE | CALLER NUMBER" layout it falls back to the 2nd column.
+function _readCallerNumbers(ss, sheetName) {
+  var out = { phones: [], count: 0 };
+  if (!ss) return out;
+  var sh = ss.getSheetByName(sheetName);
+  if (!sh) return out;
+  var last = sh.getLastRow();
+  var lastCol = sh.getLastColumn();
+  if (last < 2 || lastCol < 1) return out;
+  var hdr  = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+  var norm = hdr.map(function (h) { return String(h || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); });
+  var numCol = -1;
+  for (var i = 0; i < norm.length; i++) {
+    if (norm[i] && (norm[i].indexOf('caller') >= 0 || norm[i].indexOf('number') >= 0 ||
+                    norm[i].indexOf('phone')  >= 0 || norm[i].indexOf('mobile') >= 0 ||
+                    norm[i].indexOf('contact') >= 0)) { numCol = i; break; }
+  }
+  if (numCol < 0) numCol = Math.min(1, lastCol - 1);   // "CALLER NUMBER" is the 2nd column
+  var vals = sh.getRange(2, 1, last - 1, lastCol).getValues();
+  var seen = {};
+  for (var r = 0; r < vals.length; r++) {
+    var ph = _normPhoneGS(vals[r][numCol]);
+    if (ph.length < 10 || seen[ph]) continue;
+    seen[ph] = true;
+    out.phones.push(ph);
+  }
+  out.count = out.phones.length;
+  return out;
+}
+
+// Return the GMB and LDM caller-number sets for the app to tag orders with.
+function handleContactTags(p) {
+  try {
+    var ss = _openOPS();
+    if (!ss) return { ok: false, error: 'Cannot open OPS sheet: ' + OPS_SHEET_ID };
+    var gmb = _readCallerNumbers(ss, GMB_CONTACTS_SHEET);
+    var ldm = _readCallerNumbers(ss, LDM_CONTACTS_SHEET);
+    return {
+      ok: true,
+      gmb: gmb.phones, ldm: ldm.phones,
+      gmbCount: gmb.count, ldmCount: ldm.count,
+      scriptVersion: SCRIPT_VERSION
+    };
   } catch (e) { return { ok: false, error: e.message }; }
 }
 
