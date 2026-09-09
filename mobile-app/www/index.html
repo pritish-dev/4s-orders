@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '79';
+  var V = '80';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -87,7 +87,7 @@
      load and whenever the app is brought to the foreground. -->
 <script>
 (function(){
-  var RUNV = 'gmbldm904';   // keep in sync with V above and version.json
+  var RUNV = 'gmbldm905';   // keep in sync with V above and version.json
   function checkUpdate(){
     try {
       fetch('version.json?ts=' + Date.now(), { cache: 'no-store' })
@@ -7951,16 +7951,25 @@ function HistoryScreen({ctx}) {
   const financeTotalValue = financeOrders.reduce((s,o)=>s+financeOrderValue(o),0);
 
   // ── GMB / LDM Orders ─────────────────────────────────────────────────────────
-  // An order is a GMB (or LDM) order when any of its contact numbers (main / alt /
-  // delivery contact) matches a caller number from the OPS "GMB CONTACTS" /
-  // "LDM CONTACTS" call log. Value shown is the NET BASIC (ex-GST) order value.
-  // The optional date range filters on the order's BOOKING date (when it was
-  // converted). Search + salesperson filters from the ledger still apply.
+  // An order is a GMB (or LDM) order when its PHONE matches a caller number from
+  // the OPS "GMB CONTACTS" / "LDM CONTACTS" call log; if the Phone doesn't match,
+  // its ALT. PHONE is tried as a fallback. (The delivery contact number is not
+  // matched.) Value shown is the NET BASIC (ex-GST) order value. The optional date
+  // range filters on the order's BOOKING date (when it was converted). Search +
+  // salesperson filters from the ledger still apply.
   const gmbSet = React.useMemo(()=>new Set((gmbPhones||[]).map(_normPhone).filter(p=>p&&p.length>=10)),[gmbPhones]);
   const ldmSet = React.useMemo(()=>new Set((ldmPhones||[]).map(_normPhone).filter(p=>p&&p.length>=10)),[ldmPhones]);
-  const orderContactPhones = o => [o&&o.phone,o&&o.alt,o&&o.contactNumber].map(_normPhone).filter(p=>p&&p.length>=10);
-  const isGmbOrder = o => o && o.status!=='draft' && orderContactPhones(o).some(p=>gmbSet.has(p));
-  const isLdmOrder = o => o && o.status!=='draft' && orderContactPhones(o).some(p=>ldmSet.has(p));
+  // Phone first, then Alt. Phone as a fallback — matched against a caller-number set.
+  const orderMatchesCallers = (o,set) => {
+    if(!o || o.status==='draft' || !set || !set.size) return false;
+    const phone = _normPhone(o.phone);
+    if(phone && phone.length>=10 && set.has(phone)) return true;   // Phone match (primary)
+    const alt = _normPhone(o.alt);
+    if(alt && alt.length>=10 && set.has(alt)) return true;         // Alt. Phone match (fallback)
+    return false;
+  };
+  const isGmbOrder = o => orderMatchesCallers(o,gmbSet);
+  const isLdmOrder = o => orderMatchesCallers(o,ldmSet);
   const netBasicOf = o => _exGst(o && o.amt);              // net basic (ex-GST) order value
   const bookingInRange = (o,from,to) => { if(!from&&!to) return true; const iso=_toISO(o.date); if(!iso) return false; if(from&&iso<from) return false; if(to&&iso>to) return false; return true; };
   const gmbOrders = orders.filter(isGmbOrder).filter(matchesQuery).filter(matchesSales).filter(o=>bookingInRange(o,gmbFrom,gmbTo));
