@@ -3022,7 +3022,8 @@ function handleUpdateDelivery(body) {
   var happyCode  = String(body.happyCode || '').trim();
   if (!status) return { ok: false, error: 'Delivery status is required.' };
   // Moving an order to "Installation Done" (i.e. marking it Completed) requires a
-  // Happy Code — the code the customer shares once installation is complete.
+  // Happy Code — the code the customer shares once installation is complete —
+  // EXCEPT for a pure-4S order, which is marked Installed directly (see below).
   var needsHappy = /installation done/i.test(status);
 
   // Partial Delivery: the app sends `deliveredItems` — the list of item signatures
@@ -3058,6 +3059,8 @@ function handleUpdateDelivery(body) {
   var cPlanned = colOf(['CUSTOMER DELIVERY DATE (TO BE)']);
   var cHappy   = colOf(['HAPPY CODE', 'INSTALLATION HAPPY CODE', 'ORDER HAPPY CODE']);
   var cHappyDt = colOf(['HAPPY CODE DATE', 'INSTALLATION HAPPY CODE DATE']);
+  // Per-item delivery warehouse — used to detect a pure-4S order below.
+  var cIWh     = colOf(['WAREHOUSE', 'DELIVERY WAREHOUSE', 'ITEM WAREHOUSE']);
   var _tzD = (function(){ try { return sh.getParent().getSpreadsheetTimeZone() || Session.getScriptTimeZone(); } catch (e) { return Session.getScriptTimeZone(); } })();
   var todayD = Utilities.formatDate(new Date(), _tzD, 'yyyy-MM-dd');
   if (cDeliv < 0) return { ok: false, error: 'No "Delivery Remarks" column found in the CRM sheet.' };
@@ -3065,6 +3068,22 @@ function handleUpdateDelivery(body) {
   var lastRow = sh.getLastRow();
   if (lastRow < 2) return { ok: false, error: 'Order not found: ' + orderNo };
   var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
+
+  // A pure-4S order (every line shipped from the 4Sinteriors '4S' warehouse) is
+  // marked "Installation Done" directly — no Happy Code required. Mirrors the
+  // client isFourSOrder() gate so the two stay in lock-step. Any 34S / KB line
+  // makes it a franchise order, which still needs a Happy Code as before.
+  if (needsHappy) {
+    var fourSLines = 0, allFourS = true;
+    for (var q = 0; q < data.length; q++) {
+      var qO = cOrderNo >= 0 && orderNo    && String(data[q][cOrderNo] || '').trim() === orderNo;
+      var qI = cIntNo   >= 0 && internalNo && Number(data[q][cIntNo]) === internalNo;
+      if (!(qO || qI)) continue;
+      fourSLines++;
+      if (!(cIWh >= 0 && _isFourS(data[q][cIWh]))) allFourS = false;
+    }
+    if (fourSLines > 0 && allFourS) needsHappy = false;
+  }
 
   // Gate "Installation Done": require a Happy Code (supplied now, or already stored
   // on the order). Without it the delivery status is NOT allowed to change.
