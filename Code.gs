@@ -3242,6 +3242,8 @@ function handleUpdateDelivery(body) {
   var cHappyDt = colOf(['HAPPY CODE DATE', 'INSTALLATION HAPPY CODE DATE']);
   // Per-item delivery warehouse — used to detect a pure-4S order below.
   var cIWh     = colOf(['WAREHOUSE', 'DELIVERY WAREHOUSE', 'ITEM WAREHOUSE']);
+  // Order type (B2C / B2B) — a B2B order skips the Happy Code, like a pure-4S order.
+  var cOrdType = colOf(['ORDER TYPE', 'B2C/B2B', 'ORDER CATEGORY']);
   var _tzD = (function(){ try { return sh.getParent().getSpreadsheetTimeZone() || Session.getScriptTimeZone(); } catch (e) { return Session.getScriptTimeZone(); } })();
   var todayD = Utilities.formatDate(new Date(), _tzD, 'yyyy-MM-dd');
   if (cDeliv < 0) return { ok: false, error: 'No "Delivery Remarks" column found in the CRM sheet.' };
@@ -3250,20 +3252,23 @@ function handleUpdateDelivery(body) {
   if (lastRow < 2) return { ok: false, error: 'Order not found: ' + orderNo };
   var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
 
-  // A pure-4S order (every line shipped from the 4Sinteriors '4S' warehouse) is
-  // marked "Installation Done" directly — no Happy Code required. Mirrors the
-  // client isFourSOrder() gate so the two stay in lock-step. Any 34S / KB line
-  // makes it a franchise order, which still needs a Happy Code as before.
+  // Two kinds of order are marked "Installation Done" directly — no Happy Code:
+  //   • a pure-4S order (every line shipped from the 4Sinteriors '4S' warehouse), and
+  //   • a B2B order (ORDER TYPE = B2B).
+  // Mirrors the client isFourSOrder() / isB2B() gate so the two stay in lock-step.
+  // Any 34S / KB line makes a non-B2B order a franchise order, which still needs a
+  // Happy Code as before.
   if (needsHappy) {
-    var fourSLines = 0, allFourS = true;
+    var fourSLines = 0, allFourS = true, isB2BOrder = false;
     for (var q = 0; q < data.length; q++) {
       var qO = cOrderNo >= 0 && orderNo    && String(data[q][cOrderNo] || '').trim() === orderNo;
       var qI = cIntNo   >= 0 && internalNo && Number(data[q][cIntNo]) === internalNo;
       if (!(qO || qI)) continue;
       fourSLines++;
       if (!(cIWh >= 0 && _isFourS(data[q][cIWh]))) allFourS = false;
+      if (cOrdType >= 0 && String(data[q][cOrdType] || '').trim().toUpperCase() === 'B2B') isB2BOrder = true;
     }
-    if (fourSLines > 0 && allFourS) needsHappy = false;
+    if (isB2BOrder || (fourSLines > 0 && allFourS)) needsHappy = false;
   }
 
   // Gate "Installation Done": require a Happy Code (supplied now, or already stored

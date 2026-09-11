@@ -32,7 +32,7 @@
 <!-- Hard version gate — unregisters stale SW and forces fresh load when code changes -->
 <script>
 (function(){
-  var V = '83';
+  var V = '84';
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
@@ -6120,9 +6120,10 @@ function OrderFormScreen({ctx, viewOnly}) {
     if(/partial/i.test(val)){ setPartialPicker(true); return; }
     if(/rescheduled/i.test(val)){ setReschedulePicker(true); return; }
     // "Installation Done" (Completed) requires a Happy Code — unless one is already
-    // on record for this order, or the order ships entirely from the 4S warehouse
-    // (a pure-4S order is marked Installed directly, no Happy Code asked).
-    if(/installation done/i.test(val) && !String(o.happyCode||'').trim() && !isFourSOrder(o)){ setHappyPrompt(true); return; }
+    // on record for this order, the order ships entirely from the 4S warehouse
+    // (a pure-4S order is marked Installed directly), or it is a B2B order. Pure-4S
+    // and B2B orders are marked Installed directly, with no Happy Code asked.
+    if(/installation done/i.test(val) && !String(o.happyCode||'').trim() && !isFourSOrder(o) && !isB2B(o)){ setHappyPrompt(true); return; }
     setOrder(prev=>({...prev,deliveryStatus:val}));
   }
   async function confirmInstallHappy(code){
@@ -8035,9 +8036,9 @@ function HistoryScreen({ctx}) {
     // Rescheduled for Delivery needs a new date.
     if(/rescheduled/i.test(val)){ setRescheduleOrder(o); return; }
     // "Installation Done" (Completed) needs a Happy Code — unless one is on record,
-    // or the order ships entirely from the 4S warehouse (pure-4S orders skip it and
-    // are marked Installed directly).
-    if(/installation done/i.test(val) && !String(o.happyCode||'').trim() && !isFourSOrder(o)){ setHappyOrder(o); return; }
+    // the order ships entirely from the 4S warehouse (pure-4S), or it is a B2B order.
+    // Pure-4S and B2B orders skip the Happy Code and are marked Installed directly.
+    if(/installation done/i.test(val) && !String(o.happyCode||'').trim() && !isFourSOrder(o) && !isB2B(o)){ setHappyOrder(o); return; }
     await doUpdateDelivery(o.no, o.internalNo, val);
   }
   async function confirmPartial(deliveredItems){
