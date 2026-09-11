@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v62';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v63';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -129,6 +129,7 @@ function _makeToken(user) {
     n:   user.name || '',
     r:   user.role || 'sales',
     b:   user.branch || '',
+    v:   _tokenVersion(),
     exp: Date.now() + TOKEN_TTL_MS,
   };
   var pB64 = _b64url(JSON.stringify(payload));
@@ -147,7 +148,13 @@ function _verifyToken(token) {
     payload = JSON.parse(json);
   } catch (e) { return null; }
   if (!payload || !payload.exp || Date.now() > payload.exp) return null;   // expired
+  if (String(payload.v || '1') !== _tokenVersion()) return null;           // globally revoked
   return payload;
+}
+// Global token version — bump the TOKEN_VERSION Script Property to instantly
+// invalidate EVERY issued token (a free "sign everyone out" / revoke switch).
+function _tokenVersion() {
+  return PropertiesService.getScriptProperties().getProperty('TOKEN_VERSION') || '1';
 }
 // Attach a fresh token to a successful login result.
 function _withToken(result) {
@@ -157,6 +164,46 @@ function _withToken(result) {
 function _authFail() {
   return { ok: false, error: 'Session expired — please sign in again.', code: 'AUTH_REQUIRED' };
 }
+
+// ─── Salted password hashing (iterated HMAC-SHA256, PBKDF2-style) ──────────────
+// Apps Script has no bcrypt, so we iterate HMAC-SHA256 with a per-user salt.
+// Stored form:  pbkdf2$<iterations>$<salt>$<base64 hash>
+// Verification prefers this; existing plaintext / MD5 creds still work and are
+// transparently upgraded to a salted hash on the next successful login (no
+// lockout). The plaintext column is deliberately LEFT IN PLACE so a rollback
+// can never lock anyone out — run purgePlaintextPasswords() once you're happy.
+var PWHASH_ITER = 4096;
+function _pwHash(password, salt, iter) {
+  var mac = Utilities.computeHmacSha256Signature(password, salt);
+  for (var i = 1; i < iter; i++) mac = Utilities.computeHmacSha256Signature(mac, salt);
+  return Utilities.base64Encode(mac);
+}
+function _pwMake(password) {
+  var salt = Utilities.getUuid();
+  return 'pbkdf2$' + PWHASH_ITER + '$' + salt + '$' + _pwHash(password, salt, PWHASH_ITER);
+}
+function _pwVerify(password, stored) {
+  var parts = String(stored || '').split('$');
+  if (parts.length !== 4 || parts[0] !== 'pbkdf2') return false;
+  var iter = parseInt(parts[1], 10) || PWHASH_ITER;
+  return _pwHash(password, parts[2], iter) === parts[3];
+}
+
+// ─── Login rate-limiting (per username, ephemeral via CacheService) ────────────
+var LOGIN_MAX_FAILS  = 8;      // lock after this many failures…
+var LOGIN_WINDOW_SEC = 900;    // …within a rolling 15-minute window
+function _loginKey(u)     { return 'lk_' + u; }
+function _loginBlocked(u) {
+  try { return (parseInt(CacheService.getScriptCache().get(_loginKey(u)), 10) || 0) >= LOGIN_MAX_FAILS; }
+  catch (e) { return false; }
+}
+function _loginFail(u) {
+  try {
+    var c = CacheService.getScriptCache();
+    c.put(_loginKey(u), String((parseInt(c.get(_loginKey(u)), 10) || 0) + 1), LOGIN_WINDOW_SEC);
+  } catch (e) {}
+}
+function _loginOk(u) { try { CacheService.getScriptCache().remove(_loginKey(u)); } catch (e) {} }
 
 // ─── Entry points ─────────────────────────────────────────────────────────────
 function doGet(e) {
@@ -179,8 +226,10 @@ function doGet(e) {
 
   // ── Auth gate ─── everything except the public actions needs a valid token ──
   var action = p.action || '';
-  if (!PUBLIC_GET_ACTIONS[action] && !_verifyToken(p.token)) {
-    return _jsonOut(callback, _authFail());
+  if (!PUBLIC_GET_ACTIONS[action]) {
+    var auth = _verifyToken(p.token);
+    if (!auth) return _jsonOut(callback, _authFail());
+    p.by = auth.u;   // bind the actor to the verified token (no role spoofing via ?by=)
   }
 
   var result;
@@ -229,8 +278,10 @@ function doPost(e) {
 
   // ── Auth gate ─── everything except the public actions needs a valid token ──
   var action = body.action || '';
-  if (!PUBLIC_POST_ACTIONS[action] && !_verifyToken(body.token)) {
-    return _jsonPost(_authFail());
+  if (!PUBLIC_POST_ACTIONS[action]) {
+    var auth = _verifyToken(body.token);
+    if (!auth) return _jsonPost(_authFail());
+    body.by = auth.u;   // bind the actor to the verified token (no role spoofing via by:)
   }
 
   var result;
@@ -306,20 +357,35 @@ function handleLogin(p) {
   var password = (p.password || '').trim();
   if (!username || !password) return { ok: false, error: 'Username and password are required.' };
 
+  // Rate-limit: lock a username out after too many recent failures.
+  if (_loginBlocked(username)) {
+    return { ok: false, error: 'Too many failed attempts. Please wait a few minutes and try again.' };
+  }
+
+  var result = _resolveLogin(username, password);
+  if (result && result.ok) { _loginOk(username); return _withToken(result); }
+
+  _loginFail(username);
+  return result || { ok: false, error: 'Username not found. Check your credentials or contact your manager.' };
+}
+
+// Resolve credentials against the three sources; returns a result object
+// (ok, or a found-but-rejected error) or null if the username is unknown.
+function _resolveLogin(username, password) {
   // 1. Try APP_ORDERING_CREDS in OPS sheet
   var opsSS = _openOPS();
   if (opsSS) {
     var credsSh = opsSS.getSheetByName('APP_ORDERING_CREDS');
     if (credsSh) {
       var result = _loginWithCreds(credsSh, username, password);
-      if (result !== null) return _withToken(result);   // found the username (matched or rejected)
+      if (result !== null) return result;   // found the username (matched or rejected)
     }
 
     // 2. Try Staff tab in OPS sheet
     var staffSh = opsSS.getSheetByName('Staff');
     if (staffSh) {
       var r2 = _loginWithStaff(staffSh, username, password);
-      if (r2 !== null) return _withToken(r2);
+      if (r2 !== null) return r2;
     }
   }
 
@@ -328,11 +394,36 @@ function handleLogin(p) {
     var masterStaff = _getSheet('Staff');
     if (masterStaff) {
       var r3 = _loginWithStaff(masterStaff, username, password);
-      if (r3 !== null) return _withToken(r3);
+      if (r3 !== null) return r3;
     }
   } catch(e) {}
 
-  return { ok: false, error: 'Username not found. Check your credentials or contact your manager.' };
+  return null;
+}
+
+// ─── One-time maintenance: clear the plaintext Password column ─────────────────
+// Run this from the Apps Script editor AFTER confirming everyone can log in and
+// their rows show a pbkdf2$… password_hash. It blanks the plaintext Password
+// column in APP_ORDERING_CREDS so no readable passwords remain in the sheet.
+function purgePlaintextPasswords() {
+  var ss = _openOPS();
+  if (!ss) { Logger.log('OPS sheet not accessible.'); return; }
+  var sh = ss.getSheetByName('APP_ORDERING_CREDS');
+  if (!sh) { Logger.log('APP_ORDERING_CREDS not found.'); return; }
+  var rows = sh.getDataRange().getValues();
+  if (rows.length < 2) { Logger.log('No credential rows.'); return; }
+  var hdr   = rows[0].map(function(c){ return String(c || '').toLowerCase().trim(); });
+  var cPass = _hdrIdx(hdr, ['password']); if (cPass < 0) cPass = 2;
+  var cHash = _hdrIdx(hdr, ['password_hash', 'passwordhash', 'hash']); if (cHash < 0) cHash = 3;
+  var cleared = 0, skipped = 0;
+  for (var i = 1; i < rows.length; i++) {
+    var hasHash = String(rows[i][cHash] || '').slice(0, 7) === 'pbkdf2$';
+    var hasPass = String(rows[i][cPass] || '').trim() !== '';
+    if (hasHash && hasPass) { sh.getRange(i + 1, cPass + 1).setValue(''); cleared++; }
+    else if (!hasHash && hasPass) { skipped++; }   // not yet upgraded — leave it
+  }
+  Logger.log('Cleared ' + cleared + ' plaintext password(s); left ' + skipped +
+             ' not-yet-upgraded row(s) untouched (have those users log in first).');
 }
 
 // Login against APP_ORDERING_CREDS sheet.
@@ -376,8 +467,12 @@ function _loginWithCreds(sh, username, password) {
     var storedHash = cHash  < r.length ? String(r[cHash]  || '').trim() : '';
     var nameVal    = cName  < r.length ? String(r[cName]  || '').trim() : '';
 
-    var matched = false;
-    if (storedHash) {
+    var matched  = false;
+    var isPbkdf2 = storedHash.slice(0, 7) === 'pbkdf2$';
+    if (isPbkdf2) {
+      // Preferred: salted, iterated hash.
+      matched = _pwVerify(password, storedHash);
+    } else if (storedHash) {
       // Bcrypt hashes ($2b$/$2a$) cannot be verified in Apps Script — fall through to plaintext
       var isBcrypt = storedHash.slice(0, 4) === '$2b$' || storedHash.slice(0, 4) === '$2a$';
       if (!isBcrypt) {
@@ -387,6 +482,13 @@ function _loginWithCreds(sh, username, password) {
     }
     if (!matched && storedPass) {
       matched = (storedPass === password);
+    }
+
+    // Upgrade legacy plaintext/MD5 creds to a salted hash on successful login.
+    // Plaintext is intentionally left as-is (rollback safety); clear it later
+    // with purgePlaintextPasswords() once the app is confirmed stable.
+    if (matched && !isPbkdf2) {
+      try { sh.getRange(i + 1, cHash + 1).setValue(_pwMake(password)); } catch (e) {}
     }
 
     if (matched) {
