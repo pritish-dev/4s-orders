@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v61';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v62';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -93,6 +93,71 @@ function _jsonPost(obj) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
+// ─── Session tokens (HMAC-signed, stateless) ──────────────────────────────────
+// A signed session token is issued on login and required on every other API
+// call. No third-party service and no storage: the token carries the user +
+// an expiry, signed with a secret kept in Script Properties (auto-created once,
+// so there is nothing to configure manually). Verifying only re-computes the
+// signature — no per-request quota, no cost.
+var TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days
+
+// Actions that are reachable WITHOUT a token.
+var PUBLIC_GET_ACTIONS  = { ping: 1, login: 1 };
+var PUBLIC_POST_ACTIONS = { login: 1 };
+
+function _authSecret() {
+  var props = PropertiesService.getScriptProperties();
+  var s = props.getProperty('AUTH_SECRET');
+  if (!s) {
+    s = Utilities.getUuid() + Utilities.getUuid();   // 256+ bits of randomness
+    props.setProperty('AUTH_SECRET', s);
+  }
+  return s;
+}
+function _b64url(strOrBytes) {
+  var b = (typeof strOrBytes === 'string')
+    ? Utilities.base64EncodeWebSafe(strOrBytes, Utilities.Charset.UTF_8)
+    : Utilities.base64EncodeWebSafe(strOrBytes);
+  return b.replace(/=+$/, '');
+}
+function _sign(payloadB64) {
+  return _b64url(Utilities.computeHmacSha256Signature(payloadB64, _authSecret()));
+}
+function _makeToken(user) {
+  var payload = {
+    u:   user.code || user.name || '',
+    n:   user.name || '',
+    r:   user.role || 'sales',
+    b:   user.branch || '',
+    exp: Date.now() + TOKEN_TTL_MS,
+  };
+  var pB64 = _b64url(JSON.stringify(payload));
+  return pB64 + '.' + _sign(pB64);
+}
+function _verifyToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  var dot = token.indexOf('.');
+  if (dot < 1) return null;
+  var pB64 = token.slice(0, dot);
+  var sig  = token.slice(dot + 1);
+  if (_sign(pB64) !== sig) return null;                       // bad / forged signature
+  var payload;
+  try {
+    var json = Utilities.newBlob(Utilities.base64DecodeWebSafe(pB64)).getDataAsString();
+    payload = JSON.parse(json);
+  } catch (e) { return null; }
+  if (!payload || !payload.exp || Date.now() > payload.exp) return null;   // expired
+  return payload;
+}
+// Attach a fresh token to a successful login result.
+function _withToken(result) {
+  if (result && result.ok && result.user) result.token = _makeToken(result.user);
+  return result;
+}
+function _authFail() {
+  return { ok: false, error: 'Session expired — please sign in again.', code: 'AUTH_REQUIRED' };
+}
+
 // ─── Entry points ─────────────────────────────────────────────────────────────
 function doGet(e) {
   var p        = (e && e.parameter) ? e.parameter : {};
@@ -111,9 +176,16 @@ function doGet(e) {
   }
 
   var callback = p.callback || 'cb';
+
+  // ── Auth gate ─── everything except the public actions needs a valid token ──
+  var action = p.action || '';
+  if (!PUBLIC_GET_ACTIONS[action] && !_verifyToken(p.token)) {
+    return _jsonOut(callback, _authFail());
+  }
+
   var result;
   try {
-    switch (p.action || '') {
+    switch (action) {
       case 'ping':           result = handlePing();             break;
       case 'login':          result = handleLogin(p);           break;
       case 'stock':          result = handleStock();            break;
@@ -155,9 +227,16 @@ function doPost(e) {
     return ContentService.createTextOutput('EVENT_RECEIVED');
   }
 
+  // ── Auth gate ─── everything except the public actions needs a valid token ──
+  var action = body.action || '';
+  if (!PUBLIC_POST_ACTIONS[action] && !_verifyToken(body.token)) {
+    return _jsonPost(_authFail());
+  }
+
   var result;
   try {
-    switch (body.action || '') {
+    switch (action) {
+      case 'login':           result = handleLogin(body);             break;
       case 'saveOrder':       result = handleSaveOrder(body.order);   break;
       case 'updateWON':       result = handleUpdateWON(body);         break;
       case 'updateDelivery':  result = handleUpdateDelivery(body);    break;
@@ -233,14 +312,14 @@ function handleLogin(p) {
     var credsSh = opsSS.getSheetByName('APP_ORDERING_CREDS');
     if (credsSh) {
       var result = _loginWithCreds(credsSh, username, password);
-      if (result !== null) return result;   // found the username (matched or rejected)
+      if (result !== null) return _withToken(result);   // found the username (matched or rejected)
     }
 
     // 2. Try Staff tab in OPS sheet
     var staffSh = opsSS.getSheetByName('Staff');
     if (staffSh) {
       var r2 = _loginWithStaff(staffSh, username, password);
-      if (r2 !== null) return r2;
+      if (r2 !== null) return _withToken(r2);
     }
   }
 
@@ -249,7 +328,7 @@ function handleLogin(p) {
     var masterStaff = _getSheet('Staff');
     if (masterStaff) {
       var r3 = _loginWithStaff(masterStaff, username, password);
-      if (r3 !== null) return r3;
+      if (r3 !== null) return _withToken(r3);
     }
   } catch(e) {}
 

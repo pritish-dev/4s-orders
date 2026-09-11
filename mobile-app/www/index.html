@@ -36,7 +36,7 @@
   if (localStorage.getItem('4s_code_v') !== V) {
     // Preserve user config / session / unsynced work across the cache-busting
     // wipe. Only re-syncable caches (items, orders) are dropped.
-    var KEEP = ['4s_api_url','4s_api_pin','4s_review_url','4s_user','4s_queue','4s_draft'];
+    var KEEP = ['4s_api_url','4s_api_pin','4s_review_url','4s_user','4s_token','4s_queue','4s_draft'];
     var saved = {};
     for (var ki = 0; ki < KEEP.length; ki++) {
       try { var kv = localStorage.getItem(KEEP[ki]); if (kv !== null) saved[KEEP[ki]] = kv; } catch(e) {}
@@ -277,6 +277,17 @@ function makeQrDataUrl(text, size = 160) {
 // API LAYER
 // ═══════════════════════════════════════════════════════════
 function getApiUrl() { return localStorage.getItem('4s_api_url') || ''; }
+function getAuthToken() { try { return localStorage.getItem('4s_token') || ''; } catch (e) { return ''; } }
+
+// If the backend reports the session token is missing/expired, drop it and ask
+// the app (via a global event) to send the user back to the login screen.
+function _checkAuth(data) {
+  if (data && data.ok === false && data.code === 'AUTH_REQUIRED') {
+    try { localStorage.removeItem('4s_token'); } catch (e) {}
+    try { window.dispatchEvent(new Event('4s-auth-expired')); } catch (e) {}
+  }
+  return data;
+}
 
 // JSONP GET with a generous timeout and automatic retries, so a slow Apps Script
 // cold-start (which can take 20-30s on the first hit of the day) never surfaces as
@@ -287,7 +298,8 @@ function _apiGetOnce(action, params, timeoutMs) {
   const url = getApiUrl();
   if (!url) return Promise.reject(new Error('API URL not configured. Go to Settings.'));
   const cb = 'cb' + Date.now() + '_' + Math.random().toString(36).slice(2);
-  const qs = new URLSearchParams({ action, callback: cb, ...params }).toString();
+  const token = getAuthToken();
+  const qs = new URLSearchParams({ action, callback: cb, ...(token ? { token } : {}), ...params }).toString();
   return new Promise((res, rej) => {
     const script = document.createElement('script');
     const timeout = setTimeout(() => { cleanup(); rej(new Error('Request timed out after ' + Math.round(timeoutMs/1000) + 's.')); }, timeoutMs);
@@ -301,7 +313,7 @@ function _apiGetOnce(action, params, timeoutMs) {
 async function apiGet(action, params = {}, timeoutMs = 30000, retries = 2) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
-    try { return await _apiGetOnce(action, params, timeoutMs); }
+    try { return _checkAuth(await _apiGetOnce(action, params, timeoutMs)); }
     catch (e) {
       lastErr = e;
       if (attempt < retries) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));  // backoff, then retry
@@ -320,7 +332,7 @@ async function apiPost(body, tries = 3) {
       const t = setTimeout(() => ctrl.abort(), 45000);
       const r = await fetch(url, {
         method: 'POST',
-        body: JSON.stringify(body),
+        body: JSON.stringify({ ...body, token: getAuthToken() }),
         headers: { 'Content-Type': 'text/plain' }, // avoid CORS preflight
         redirect: 'follow',
         signal: ctrl.signal,
@@ -337,7 +349,7 @@ async function apiPost(body, tries = 3) {
       if (data && data.ok === false && data.error === 'offline') {
         throw new Error('offline');
       }
-      return data;
+      return _checkAuth(data);
     } catch (e) {
       lastErr = e;
       if (attempt < tries) await new Promise(res => setTimeout(res, 800 * attempt)); // backoff, then retry
@@ -2717,14 +2729,23 @@ function App() {
   // Restore session
   useEffect(() => {
     const saved = localStorage.getItem('4s_user');
+    const token = getAuthToken();
     // The backend URL is always pre-configured in the background, so we never
-    // route to a setup/URL screen — signed-in users go home, everyone else logs in.
-    if (saved) {
+    // route to a setup/URL screen — signed-in users WITH a valid session token
+    // go home; anyone missing a token must sign in again to obtain one.
+    if (saved && token) {
       try { setUser(JSON.parse(saved)); setScreen('home'); }
       catch { setScreen('login'); }
     } else {
       setScreen('login');
     }
+  }, []);
+
+  // If any API call reports the session token expired/missing, sign out cleanly.
+  useEffect(() => {
+    const onExpired = () => { doSignOut(); showToast('Session expired — please sign in again.','bad'); };
+    window.addEventListener('4s-auth-expired', onExpired);
+    return () => window.removeEventListener('4s-auth-expired', onExpired);
   }, []);
 
   // Load stock + price list on login. Cached data shows instantly for a snappy
@@ -3149,8 +3170,9 @@ function App() {
   async function doLogin(username, password) {
     setLoading(true);
     try {
-      const res = await apiGet('login', { username, password });
+      const res = await apiPost({ action:'login', username, password });
       if (res.ok) {
+        try { localStorage.setItem('4s_token', res.token || ''); } catch(e) {}
         setUser(res.user);
         localStorage.setItem('4s_user', JSON.stringify(res.user));
         showToast('Welcome, '+res.user.name+'!');
@@ -3158,7 +3180,8 @@ function App() {
       } else {
         showToast(res.error||'Login failed','bad');
       }
-    } catch(e) { showToast(e.message,'bad'); }
+      return res;
+    } catch(e) { showToast(e.message,'bad'); return { ok:false, error:e.message }; }
     finally { setLoading(false); }
   }
 
@@ -3312,6 +3335,7 @@ function App() {
 
   function doSignOut() {
     localStorage.removeItem('4s_user');
+    localStorage.removeItem('4s_token');
     setUser(null);
     setOrder(BLANK_ORDER());
     setOrders([]);
@@ -3495,13 +3519,10 @@ function LoginScreen({ctx}) {
   const wrappedLogin = async (u,p) => {
     setLastError('');
     try {
-      const res = await apiGet('login', { username: u, password: p });
-      if (res.ok) {
-        ctx.doLogin(u, p);
-      } else {
-        setLastError(res.error || 'Login failed');
-        ctx.showToast(res.error || 'Login failed', 'bad');
-      }
+      // Single POST login (password stays out of the URL); doLogin stores the
+      // session token and navigates on success.
+      const res = await ctx.doLogin(u, p);
+      if (res && !res.ok) setLastError(res.error || 'Login failed');
     } catch(e) {
       setLastError(e.message);
       ctx.showToast(e.message, 'bad');
