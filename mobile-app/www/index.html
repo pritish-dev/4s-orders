@@ -3336,6 +3336,13 @@ function App() {
   function doSignOut() {
     localStorage.removeItem('4s_user');
     localStorage.removeItem('4s_token');
+    // Clear cached customer PII from the device on sign-out. NOTE: 4s_queue
+    // (unsynced offline orders) is deliberately KEPT so pending work is never
+    // lost — it flushes to the server on the next login/online.
+    ['4s_orders','4s_draft','4s_leads','4s_svc_requests','4s_gmb_phones',
+     '4s_ldm_phones','4s_mis','4s_mis_ts'].forEach(function(k){
+      try { localStorage.removeItem(k); } catch(e) {}
+    });
     setUser(null);
     setOrder(BLANK_ORDER());
     setOrders([]);

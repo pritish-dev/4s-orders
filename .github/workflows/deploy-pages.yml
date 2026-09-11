@@ -48,6 +48,9 @@ jobs:
           mkdir -p _site
           rsync -a --exclude='.git' --exclude='.github' --exclude='_site' ./ _site/
 
+      - name: Inject Subresource Integrity into CDN <script> tags (non-fatal)
+        run: node scripts/inject-sri.mjs _site/index.html _site/mobile-app/www/index.html || echo "::warning::SRI injection step failed; deploying without SRI"
+
       - name: Configure Pages (enables the Actions source if not already)
         uses: actions/configure-pages@v5
         with:
