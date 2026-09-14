@@ -4806,14 +4806,95 @@ function LeadsScreen({ctx}){
   );
 }
 
+// ─── Reports drill-down helpers ──────────────────────────────
+// Shared by the Sales-summary breakdowns: a compact order line, a paginated
+// order list, and an expandable group row. Kept at module scope (not nested in
+// ReportsScreen) so each row/list keeps its own React state across re-renders.
+// Pagination shows a maximum of 5 orders per page; the Prev/Next controls only
+// appear once a list has more than one page of orders.
+const REPORT_PAGE_SIZE = 5;
+// Newest order first; ties broken by order number (desc) so the list is stable.
+function _reportOrderSort(a,b){
+  const ai=_toISO(a&&a.date), bi=_toISO(b&&b.date);
+  if(ai!==bi) return bi.localeCompare(ai);
+  return String((b&&b.no)||'').localeCompare(String((a&&a.no)||''));
+}
+// One order in a breakdown list — tap to open the order. Shows its net-basic
+// (pre-GST) value on the right, matching the rest of the sales summary.
+function ReportOrderMini({o, onOpen}){
+  const amt = _exGst(o && o.amt);
+  return (
+    <div onClick={()=>onOpen&&onOpen(o)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px 10px 28px',borderBottom:`1px solid ${T.line}`,cursor:'pointer',background:'#fff'}}>
+      <div style={{minWidth:0}}>
+        <div style={{display:'flex',alignItems:'center',gap:6}}>
+          <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600,flexShrink:0}}>{o.no||'—'}</span>
+          <span style={{fontSize:13,fontWeight:700,color:T.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{o.customer||'—'}</span>
+        </div>
+        <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{((o.salesExec||'').trim()||'(unassigned)')}{o.date?' · '+o.date:''}</div>
+      </div>
+      <div style={{textAlign:'right',flexShrink:0,paddingLeft:10}}>
+        <div style={{fontSize:13,fontFamily:T.mono,fontWeight:700,color:T.ink}}>{_fmtAmt(amt)}</div>
+      </div>
+    </div>
+  );
+}
+// A paginated list of orders — max 5 per page, Prev/Next once there is more than
+// one page. Each list tracks its own current page.
+function ReportOrderList({orders, onOpen, empty}){
+  const list = orders||[];
+  const [page,setPage] = useState(0);
+  const pages = Math.max(1, Math.ceil(list.length/REPORT_PAGE_SIZE));
+  const cur   = Math.min(page, pages-1);
+  const slice = list.slice(cur*REPORT_PAGE_SIZE, cur*REPORT_PAGE_SIZE+REPORT_PAGE_SIZE);
+  if(!list.length) return <div style={{padding:'12px 14px 12px 28px',fontSize:12,color:T.ink4,background:'#fff'}}>{empty||'No orders.'}</div>;
+  const pgBtn = (dis,onClick,label) => (
+    <button onClick={()=>{ if(!dis) onClick(); }} disabled={dis} style={{padding:'5px 12px',borderRadius:6,border:`1px solid ${dis?T.line:T.ink}`,background:dis?T.paper2:'#fff',color:dis?T.ink4:T.ink,fontSize:12,fontWeight:700,cursor:dis?'default':'pointer'}}>{label}</button>
+  );
+  return (
+    <div style={{background:'#fff'}}>
+      {slice.map((o,i)=><ReportOrderMini key={(o.no||'')+'|'+(cur*REPORT_PAGE_SIZE+i)} o={o} onOpen={onOpen}/>)}
+      {list.length>REPORT_PAGE_SIZE && (
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 14px 8px 28px',borderBottom:`1px solid ${T.line}`}}>
+          {pgBtn(cur<=0, ()=>setPage(cur-1), '‹ Prev')}
+          <span style={{fontSize:10,color:T.ink4,fontFamily:T.mono}}>Page {cur+1} / {pages} · {list.length} orders</span>
+          {pgBtn(cur>=pages-1, ()=>setPage(cur+1), 'Next ›')}
+        </div>
+      )}
+    </div>
+  );
+}
+// A breakdown group row (a salesperson / month / day) that expands to reveal its
+// own paginated order list.
+function ReportExpandRow({label, count, amt, orders, onOpen}){
+  const [open,setOpen] = useState(false);
+  return (
+    <>
+      <div onClick={()=>setOpen(o=>!o)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 14px',borderBottom:`1px solid ${T.line}`,cursor:'pointer',background:'#fff'}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,minWidth:0}}>
+          <span style={{fontSize:11,color:T.ink4,fontFamily:T.mono,width:10,flexShrink:0}}>{open?'▾':'▸'}</span>
+          <div style={{fontSize:13,fontWeight:700,color:T.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{label}</div>
+        </div>
+        <div style={{textAlign:'right',flexShrink:0,paddingLeft:10}}>
+          <div style={{fontSize:14,fontFamily:T.mono,fontWeight:700,color:T.ink}}>{_fmtAmt(amt)}</div>
+          <div style={{fontSize:10,color:T.ink4,marginTop:1}}>{count} order{count===1?'':'s'}</div>
+        </div>
+      </div>
+      {open && <ReportOrderList orders={orders} onOpen={onOpen}/>}
+    </>
+  );
+}
+
 function ReportsScreen({ctx}) {
   const {orders,nav} = ctx;
   const [from,setFrom]     = useState('');
   const [to,setTo]         = useState('');
   const [preset,setPreset] = useState('all');
-  // Collapsible breakdown sections — all collapsed by default (show counts only).
-  const [open,setOpen] = useState({});
+  // Collapsible breakdown sections — today's orders open by default, the rest
+  // collapsed (show counts only) until tapped.
+  const [open,setOpen] = useState({today:true});
   const toggle = id => setOpen(p=>({...p,[id]:!p[id]}));
+  // Open a booked order from any breakdown list.
+  const openOrder = o => { try{ ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)}); }catch(e){} nav('order'); };
 
   const _pad = n => String(n).padStart(2,'0');
   const _iso = d => d.getFullYear()+'-'+_pad(d.getMonth()+1)+'-'+_pad(d.getDate());
@@ -4821,7 +4902,7 @@ function ReportsScreen({ctx}) {
   // Today's Sale — always computed over ALL orders (independent of the date-range
   // filter above) so the highlighted box reflects the current day only.
   const _todayISO = _iso(new Date());
-  const todays    = (orders||[]).filter(o => o && o.status !== 'draft' && _toISO(o.date) === _todayISO);
+  const todays    = (orders||[]).filter(o => o && o.status !== 'draft' && _toISO(o.date) === _todayISO).sort(_reportOrderSort);
   const todayCount = todays.length;
   const todayAmt   = todays.reduce((s,o)=>s+_exGst(o.amt),0);
   // Today's Sale, split the same way as the range totals: Franchise (KB / 34S /
@@ -4855,40 +4936,36 @@ function ReportsScreen({ctx}) {
     if (sp.foursint  > 0) foursCount++;
   });
 
+  // Each breakdown bucket also keeps the actual orders it covers, so the row can
+  // expand into a paginated order list.
   const monthMap = {}, dayMap = {}, salesMap = {}, branchMap = {};
   booked.forEach(o => {
     const p = String(o.date||'').split('.');       // [dd, mm, yy]
     if (p.length === 3) {
       const mk = p[2] + '.' + p[1];                // yy.mm — sorts chronologically
-      if (!monthMap[mk]) monthMap[mk] = { count:0, amt:0, label:(_MONTHS[(parseInt(p[1],10)||1)-1]||p[1])+' 20'+p[2] };
-      monthMap[mk].count++; monthMap[mk].amt += _exGst(o.amt);
+      if (!monthMap[mk]) monthMap[mk] = { count:0, amt:0, orders:[], label:(_MONTHS[(parseInt(p[1],10)||1)-1]||p[1])+' 20'+p[2] };
+      monthMap[mk].count++; monthMap[mk].amt += _exGst(o.amt); monthMap[mk].orders.push(o);
       const dk = p[2] + '.' + p[1] + '.' + p[0];
-      if (!dayMap[dk]) dayMap[dk] = { count:0, amt:0, label:o.date };
-      dayMap[dk].count++; dayMap[dk].amt += _exGst(o.amt);
+      if (!dayMap[dk]) dayMap[dk] = { count:0, amt:0, orders:[], label:o.date };
+      dayMap[dk].count++; dayMap[dk].amt += _exGst(o.amt); dayMap[dk].orders.push(o);
     }
     const sp = (o.salesExec||'').trim() || '(unassigned)';
-    if (!salesMap[sp]) salesMap[sp] = { count:0, amt:0, label:sp };
-    salesMap[sp].count++; salesMap[sp].amt += _exGst(o.amt);
+    if (!salesMap[sp]) salesMap[sp] = { count:0, amt:0, orders:[], label:sp };
+    salesMap[sp].count++; salesMap[sp].amt += _exGst(o.amt); salesMap[sp].orders.push(o);
     const br = (o.branch||'').trim();              // only present if the sheet carries it
-    if (br) { if (!branchMap[br]) branchMap[br] = { count:0, amt:0, label:br }; branchMap[br].count++; branchMap[br].amt += _exGst(o.amt); }
+    if (br) { if (!branchMap[br]) branchMap[br] = { count:0, amt:0, orders:[], label:br }; branchMap[br].count++; branchMap[br].amt += _exGst(o.amt); branchMap[br].orders.push(o); }
   });
+  // Newest order first within every bucket.
+  [monthMap,dayMap,salesMap,branchMap].forEach(m => Object.values(m).forEach(v => v.orders.sort(_reportOrderSort)));
   const byAmt  = (a,b)=> b[1].amt - a[1].amt;
   const months = Object.entries(monthMap).sort((a,b)=>b[0].localeCompare(a[0]));
   const days   = Object.entries(dayMap).sort((a,b)=>b[0].localeCompare(a[0])).slice(0, 60);
   const sales  = Object.entries(salesMap).sort(byAmt);
   const branches = Object.entries(branchMap).sort(byAmt);
 
-  const Row = ({label, sub, count, amt}) => (
-    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 14px',borderBottom:`1px solid ${T.line}`}}>
-      <div><div style={{fontSize:13,fontWeight:700,color:T.ink}}>{label}</div>{sub?<div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:1}}>{sub}</div>:null}</div>
-      <div style={{textAlign:'right'}}>
-        <div style={{fontSize:14,fontFamily:T.mono,fontWeight:700,color:T.ink}}>{_fmtAmt(amt)}</div>
-        <div style={{fontSize:10,color:T.ink4,marginTop:1}}>{count} order{count===1?'':'s'}</div>
-      </div>
-    </div>
-  );
   // Collapsible breakdown section — the header is clickable and shows the group
-  // count; the rows stay hidden until it is expanded.
+  // count; the rows stay hidden until it is expanded. Each row is itself
+  // expandable into that group's paginated order list.
   const Section = ({id, title, rows, empty}) => {
     const isOpen = !!open[id];
     return (
@@ -4899,7 +4976,7 @@ function ReportsScreen({ctx}) {
         </div>
         {isOpen && (
           <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`}}>
-            {rows.map(([k,v]) => <Row key={k} label={v.label} count={v.count} amt={v.amt}/>)}
+            {rows.map(([k,v]) => <ReportExpandRow key={k} label={v.label} count={v.count} amt={v.amt} orders={v.orders} onOpen={openOrder}/>)}
             {rows.length===0 && <div style={{padding:20,textAlign:'center',fontSize:12,color:T.ink4}}>{empty||'No booked orders in this range.'}</div>}
           </div>
         )}
@@ -4981,6 +5058,16 @@ function ReportsScreen({ctx}) {
         </div>
       </div>
       <div className="scroll">
+        {/* Today's orders — every order booked today, paginated (5 per page). */}
+        <div onClick={()=>toggle('today')} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 18px 8px',cursor:'pointer'}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:1.2,textTransform:'uppercase'}}>Today's orders <span style={{color:T.ink3}}>· {todays.length}</span></div>
+          <span style={{fontSize:11,color:T.ink4,fontFamily:T.mono}}>{open.today?'HIDE ▲':'SHOW ▼'}</span>
+        </div>
+        {open.today && (
+          <div style={{background:'#fff',borderTop:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`}}>
+            <ReportOrderList orders={todays} onOpen={openOrder} empty="No orders booked today yet."/>
+          </div>
+        )}
         <Section id="sales" title="By salesperson" rows={sales}/>
         {branches.length>0 && <Section id="branch" title="By branch" rows={branches}/>}
         <Section id="month" title="Month-wise" rows={months}/>
