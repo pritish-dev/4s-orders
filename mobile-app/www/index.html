@@ -693,17 +693,7 @@ function itemUnitPrice(it) {
 const GST_RATE = 0.18;
 // Per-unit MRP = the (possibly edited / discounted) list price with 18% GST in it.
 function gstInclUnit(it) { return Math.round(itemUnitPrice(it) * (1 + GST_RATE)); }
-// Line total = the pre-GST line value rounded to the whole rupee, then 18% GST
-// added and rounded ONCE at the line — exactly how each line's billed AMOUNT is
-// written to the CRM at save time. Rounding GST per unit and then multiplying by
-// qty (gstInclUnit × qty) overstates a multi-qty line by a rupee or two, which
-// made the order subtotal (snapped to the billed total) disagree with the sum of
-// the line amounts shown to the user. GST is still carved back out of this
-// inclusive figure for the CGST/SGST breakup; it is never added on top.
-function gstInclLine(it) {
-  const qty = Number(it.qty) || 0;
-  return Math.round(Math.round(itemUnitPrice(it) * qty) * (1 + GST_RATE));
-}
+function gstInclLine(it) { return gstInclUnit(it) * (Number(it.qty) || 0); }
 
 function orderTotals(o) {
   const items         = o.items || [];
@@ -714,18 +704,15 @@ function orderTotals(o) {
   // Re-derived order value = MRP subtotal less any order-wide discount. GST is NOT
   // added on top — it is already part of every MRP line.
   const derivedTotal  = itemsSubtotal - orderDiscAmt;
-  // The 18% GST is carved OUT of, and folded back INTO, each MRP line at the whole
-  // rupee, so re-deriving the order value from the stored per-unit (GST-exclusive)
-  // MRPs can miss the amount actually billed at save time by up to a rupee or two per
-  // line. The billed total is persisted once (o.amt = sum of the CRM "AMOUNT" column);
-  // when it is within that per-line rounding budget of the re-derived figure it is the
-  // real amount the customer was charged, so trust it — a manually-priced order then
-  // shows its exact total and never a phantom ₹1–₹3 balance. A materially different
-  // o.amt (items edited since the last save) falls outside the budget, so the fresh
-  // re-derived value is used instead.
   const roundBudget   = 2 + 10 * items.length;
   const billedTotal   = Number(o.amt) || 0;
-  const total         = (billedTotal > 0 && Math.abs(billedTotal - derivedTotal) <= roundBudget) ? billedTotal : derivedTotal;
+  // The order total is the sum of the priced line items shown (derivedTotal) — so it
+  // always equals what the user gets by adding up the lines, and never comes out a few
+  // rupees under them because of a stale saved figure. The persisted billed amount
+  // (o.amt = sum of the CRM "AMOUNT" column) is used only for a bare lump-sum order
+  // that carries no priced item lines to add up. A fully-paid order still avoids a
+  // phantom ₹1–₹2 balance via the paid-in-full tolerance below (and orderReceived).
+  const total         = (itemsSubtotal > 0) ? derivedTotal : (billedTotal > 0 ? billedTotal : derivedTotal);
   // Carve the 18% GST already contained in the total back out, so the bill can
   // still show a CGST/SGST breakup without ever inflating the amount payable.
   const gstTotal      = total - Math.round(total / (1 + GST_RATE));
