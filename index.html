@@ -645,7 +645,17 @@ function itemUnitPrice(it) {
 const GST_RATE = 0.18;
 // Per-unit MRP = the (possibly edited / discounted) list price with 18% GST in it.
 function gstInclUnit(it) { return Math.round(itemUnitPrice(it) * (1 + GST_RATE)); }
-function gstInclLine(it) { return gstInclUnit(it) * (Number(it.qty) || 0); }
+// Line total = the pre-GST line value rounded to the whole rupee, then 18% GST
+// added and rounded ONCE at the line — exactly how each line's billed AMOUNT is
+// written to the CRM at save time. Rounding GST per unit and then multiplying by
+// qty (gstInclUnit × qty) overstates a multi-qty line by a rupee or two, which
+// made the order subtotal (snapped to the billed total) disagree with the sum of
+// the line amounts shown to the user. GST is still carved back out of this
+// inclusive figure for the CGST/SGST breakup; it is never added on top.
+function gstInclLine(it) {
+  const qty = Number(it.qty) || 0;
+  return Math.round(Math.round(itemUnitPrice(it) * qty) * (1 + GST_RATE));
+}
 
 function orderTotals(o) {
   const items         = o.items || [];
