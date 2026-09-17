@@ -3905,6 +3905,71 @@ function _lookupRole(username) {
   return 'sales';
 }
 
+// Look up a user's display NAME by username from the same sheets login uses
+// (WITHOUT a password). Returns '' when not found. Mirrors _lookupRole.
+function _lookupName(username) {
+  username = String(username || '').toLowerCase().trim();
+  if (!username) return '';
+
+  function scanByHeaders(sh) {
+    var rows = sh.getDataRange().getValues();
+    if (rows.length < 2) return null;
+    var hdr   = rows[0].map(function(c){ return String(c || '').toLowerCase().trim(); });
+    var cUser = _hdrIdx(hdr, ['username', 'user name', 'user']);
+    var cName = _hdrIdx(hdr, ['name', 'full name', 'display name', 'staff name']);
+    if (cUser < 0) cUser = 1;
+    for (var i = 1; i < rows.length; i++) {
+      if (String(rows[i][cUser] || '').toLowerCase().trim() === username) {
+        return (cName >= 0 && cName < rows[i].length) ? String(rows[i][cName] || '').trim() : '';
+      }
+    }
+    return null;
+  }
+
+  try {
+    var opsSS = _openOPS();
+    if (opsSS) {
+      var credsSh = opsSS.getSheetByName('APP_ORDERING_CREDS');
+      if (credsSh) { var r = scanByHeaders(credsSh); if (r !== null) return r; }
+      var staffSh = opsSS.getSheetByName('Staff');
+      if (staffSh) {
+        var rowsS = staffSh.getDataRange().getValues().slice(1);
+        for (var i = 0; i < rowsS.length; i++) {
+          if (String(rowsS[i][COL_USR.USERNAME] || '').toLowerCase().trim() === username) {
+            return String(rowsS[i][COL_USR.NAME] || '').trim();
+          }
+        }
+      }
+    }
+  } catch (e) {}
+
+  try {
+    var masterStaff = _getSheet('Staff');
+    if (masterStaff) {
+      var rowsM = masterStaff.getDataRange().getValues().slice(1);
+      for (var k = 0; k < rowsM.length; k++) {
+        if (String(rowsM[k][COL_USR.USERNAME] || '').toLowerCase().trim() === username) {
+          return String(rowsM[k][COL_USR.NAME] || '').trim();
+        }
+      }
+    }
+  } catch (e) {}
+
+  return '';
+}
+
+// Resolve which lead register (LEADS_PEOPLE entry) a requester owns, so a
+// salesperson can be authorized to act on their own leads. Matches the same way
+// the client does: the user's display name (or, as a fallback, the raw
+// identifier) contains one of the LEADS_PEOPLE names. Returns '' when none.
+function _leadsPersonForUser(by) {
+  var up = String(_lookupName(by) || by || '').toUpperCase();
+  for (var i = 0; i < LEADS_PEOPLE.length; i++) {
+    if (up.indexOf(LEADS_PEOPLE[i]) >= 0) return LEADS_PEOPLE[i];
+  }
+  return '';
+}
+
 // ─── AUDIT LOG ────────────────────────────────────────────────────────────────
 // Every order create / edit / delete / WON / delivery change is appended here so
 // there's a durable "who changed what, when" trail. Lives as its own tab in the
@@ -4228,12 +4293,13 @@ function handleDeleteLead(body) {
   var slNo   = String((body && body.slNo) || '').trim();
   var by     = String((body && (body.by || body.createdBy)) || '').trim();
 
-  if (_lookupRole(by) !== 'admin')
-    return { ok: false, error: 'Only an admin can delete leads.' };
   if (LEADS_PEOPLE.indexOf(person) < 0)
     return { ok: false, error: 'Unknown sales person: ' + (person || '(blank)') };
   if (!slNo)
     return { ok: false, error: 'Missing lead reference (SL NO).' };
+  // An admin may delete anyone's lead; a salesperson only their own register.
+  if (_lookupRole(by) !== 'admin' && _leadsPersonForUser(by) !== person)
+    return { ok: false, error: 'You can only delete your own leads.' };
 
   var lock = LockService.getScriptLock();
   var haveLock = false;
