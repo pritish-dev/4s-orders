@@ -3030,12 +3030,10 @@ function App() {
       showToast((res && res.error) || 'Could not update lead','bad'); return false;
     } catch(e) { showToast(e.message,'bad'); return false; }
   }
-  // Admin-only: permanently delete a lead from a salesperson's register. Identified
-  // by salesPerson + slNo. The backend re-checks that the requester is an admin.
+  // Permanently delete a lead from a salesperson's register, identified by
+  // salesPerson + slNo. An admin can delete anyone's; a salesperson only their
+  // own — the backend re-checks ownership before deleting.
   async function doDeleteLead(entry) {
-    if (normRole(user?.role) !== 'admin') {
-      showToast('Only an admin can delete leads','bad'); return false;
-    }
     try {
       const res = await apiPost({ action:'deleteLead', by:user?.username||user?.name||'', ...entry });
       if (res && res.ok) { await loadLeads({silent:true}); showToast('Lead deleted ✓'); return true; }
@@ -4563,6 +4561,9 @@ function LeadsScreen({ctx}){
   const myName = String(user?.name||'').trim().toUpperCase();
   const me = LEADS_PEOPLE.find(p=>myName.includes(p)) || (LEADS_PEOPLE.indexOf(myName)>=0?myName:'');
   const [sel,setSel]   = useState(me || LEADS_PEOPLE[0]);
+  // A salesperson "owns" the register that carries their own name — they may edit
+  // and delete only those leads (managers can edit any; admins can delete any).
+  const isOwn = !!me && sel===me;
   const [showAdd,setShowAdd] = useState(false);
   const [editLead,setEditLead] = useState(null);   // the lead being edited (managers/admins)
   useEffect(()=>{ loadLeads(); },[]);
@@ -4731,8 +4732,8 @@ function LeadsScreen({ctx}){
                       {l.amount?<div style={{fontSize:14,fontFamily:T.mono,fontWeight:800,color:T.ink}}>₹{(Number(String(l.amount).replace(/[^\d.]/g,''))||0).toLocaleString('en-IN')}</div>:<div style={{fontSize:11,color:T.ink4}}>—</div>}
                       <div style={{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:10,marginTop:6}}>
                         {isManager && conv && <button onClick={e=>{e.stopPropagation();setAddPrefill({customer:l.customer||'',contact:l.contact||''});setShowAdd(true);}} title="Log new items this customer now wants — starts a fresh lead; the converted one keeps its points" style={{fontSize:11,fontWeight:800,color:T.green,background:'none',border:'none',padding:0,cursor:'pointer'}}>＋ New items</button>}
-                        {isManager && <button onClick={e=>{e.stopPropagation();setEditLead({...l,_person:sel,_converted:conv});}} style={{fontSize:11,fontWeight:700,color:T.ink3,background:'none',border:'none',padding:0,cursor:'pointer'}}>Edit ✎</button>}
-                        {isAdmin && <button onClick={async e=>{e.stopPropagation(); if(!window.confirm('Delete lead #'+(l.slNo||(i+1))+(l.customer?' · '+l.customer:'')+' for '+sel+'? This cannot be undone.')) return; await doDeleteLead({salesPerson:sel,slNo:l.slNo});}} style={{fontSize:11,fontWeight:700,color:T.bad,background:'none',border:'none',padding:0,cursor:'pointer'}}>Delete ✕</button>}
+                        {(isManager||isOwn) && <button onClick={e=>{e.stopPropagation();setEditLead({...l,_person:sel,_converted:conv});}} style={{fontSize:11,fontWeight:700,color:T.ink3,background:'none',border:'none',padding:0,cursor:'pointer'}}>Edit ✎</button>}
+                        {(isAdmin||isOwn) && <button onClick={async e=>{e.stopPropagation(); if(!window.confirm('Delete lead #'+(l.slNo||(i+1))+(l.customer?' · '+l.customer:'')+' for '+sel+'? This cannot be undone.')) return; await doDeleteLead({salesPerson:sel,slNo:l.slNo});}} style={{fontSize:11,fontWeight:700,color:T.bad,background:'none',border:'none',padding:0,cursor:'pointer'}}>Delete ✕</button>}
                         {l.contact && <a href={'https://wa.me/91'+_normPhone(l.contact)} target="_blank" rel="noopener" onClick={e=>e.stopPropagation()} style={{fontSize:11,fontWeight:700,color:T.green,textDecoration:'none'}}>WhatsApp ↗</a>}
                       </div>
                     </div>
