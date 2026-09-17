@@ -3030,6 +3030,18 @@ function App() {
       showToast((res && res.error) || 'Could not update lead','bad'); return false;
     } catch(e) { showToast(e.message,'bad'); return false; }
   }
+  // Admin-only: permanently delete a lead from a salesperson's register. Identified
+  // by salesPerson + slNo. The backend re-checks that the requester is an admin.
+  async function doDeleteLead(entry) {
+    if (normRole(user?.role) !== 'admin') {
+      showToast('Only an admin can delete leads','bad'); return false;
+    }
+    try {
+      const res = await apiPost({ action:'deleteLead', by:user?.username||user?.name||'', ...entry });
+      if (res && res.ok) { await loadLeads({silent:true}); showToast('Lead deleted ✓'); return true; }
+      showToast((res && res.error) || 'Could not delete lead','bad'); return false;
+    } catch(e) { showToast(e.message,'bad'); return false; }
+  }
 
   // ── Birthday / anniversary offer lock ──────────────────────────────────────
   // Pull the list of customers who have already been sent the one-time offer from
@@ -3405,7 +3417,7 @@ function App() {
     svcRequests, loadServiceRequests, doCreateServiceRequest, doUpdateServiceRequest,
     mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen,
     league, leagueLoading, loadLeague, doSaveLeagueScore, doSaveLeagueConfig,
-    leads, leadsLoading, loadLeads, doAddLead, doEditLead,
+    leads, leadsLoading, loadLeads, doAddLead, doEditLead, doDeleteLead,
     gmbPhones, ldmPhones, contactTagsLoading, loadContactTags,
     offersSent, loadOffersSent, doMarkOfferSent, doResetOffersSent,
     offerEndDate, doSaveOfferConfig };
@@ -4545,8 +4557,9 @@ function MyCustomerScreen({ctx}){
 }
 
 function LeadsScreen({ctx}){
-  const {user,orders,leads,leadsLoading,nav,loadLeads,doAddLead,doEditLead} = ctx;
+  const {user,orders,leads,leadsLoading,nav,loadLeads,doAddLead,doEditLead,doDeleteLead} = ctx;
   const isManager = hasManagerAccess(user);
+  const isAdmin = normRole(user?.role) === 'admin';
   const myName = String(user?.name||'').trim().toUpperCase();
   const me = LEADS_PEOPLE.find(p=>myName.includes(p)) || (LEADS_PEOPLE.indexOf(myName)>=0?myName:'');
   const [sel,setSel]   = useState(me || LEADS_PEOPLE[0]);
@@ -4719,6 +4732,7 @@ function LeadsScreen({ctx}){
                       <div style={{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:10,marginTop:6}}>
                         {isManager && conv && <button onClick={e=>{e.stopPropagation();setAddPrefill({customer:l.customer||'',contact:l.contact||''});setShowAdd(true);}} title="Log new items this customer now wants — starts a fresh lead; the converted one keeps its points" style={{fontSize:11,fontWeight:800,color:T.green,background:'none',border:'none',padding:0,cursor:'pointer'}}>＋ New items</button>}
                         {isManager && <button onClick={e=>{e.stopPropagation();setEditLead({...l,_person:sel,_converted:conv});}} style={{fontSize:11,fontWeight:700,color:T.ink3,background:'none',border:'none',padding:0,cursor:'pointer'}}>Edit ✎</button>}
+                        {isAdmin && <button onClick={async e=>{e.stopPropagation(); if(!window.confirm('Delete lead #'+(l.slNo||(i+1))+(l.customer?' · '+l.customer:'')+' for '+sel+'? This cannot be undone.')) return; await doDeleteLead({salesPerson:sel,slNo:l.slNo});}} style={{fontSize:11,fontWeight:700,color:T.bad,background:'none',border:'none',padding:0,cursor:'pointer'}}>Delete ✕</button>}
                         {l.contact && <a href={'https://wa.me/91'+_normPhone(l.contact)} target="_blank" rel="noopener" onClick={e=>e.stopPropagation()} style={{fontSize:11,fontWeight:700,color:T.green,textDecoration:'none'}}>WhatsApp ↗</a>}
                       </div>
                     </div>

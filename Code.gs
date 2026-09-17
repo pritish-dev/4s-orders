@@ -301,6 +301,7 @@ function doPost(e) {
       case 'saveOfferConfig': result = handleSaveOfferConfig(body);   break;
       case 'addLead':         result = handleAddLead(body);           break;
       case 'editLead':        result = handleEditLead(body);          break;
+      case 'deleteLead':      result = handleDeleteLead(body);        break;
       case 'sendWhatsApp':    result = handleSendWhatsApp(body);      break;
       case 'markOfferSent':   result = handleMarkOfferSent(body);     break;
       case 'resetOffersSent': result = handleResetOffersSent(body);   break;
@@ -4211,6 +4212,50 @@ function handleEditLead(body) {
     sh.getRange(rowNum, 1, 1, ncol).setValues([row]);
 
     _appendLog(by, '', 'EDIT_LEAD', person + ' #' + slNo + ' · ' + customer + (contact ? ' · ' + contact : ''));
+    return { ok: true, slNo: slNo, scriptVersion: SCRIPT_VERSION };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
+  }
+}
+
+// Admin-only: permanently delete a lead from a salesperson's tab. The row is
+// located by its SL NO (stable — never changes on add). The requester's role is
+// re-checked server-side so only an admin can delete, mirroring handleDeleteOrder.
+function handleDeleteLead(body) {
+  var person = String((body && (body.salesPerson || body.person)) || '').trim().toUpperCase();
+  var slNo   = String((body && body.slNo) || '').trim();
+  var by     = String((body && (body.by || body.createdBy)) || '').trim();
+
+  if (_lookupRole(by) !== 'admin')
+    return { ok: false, error: 'Only an admin can delete leads.' };
+  if (LEADS_PEOPLE.indexOf(person) < 0)
+    return { ok: false, error: 'Unknown sales person: ' + (person || '(blank)') };
+  if (!slNo)
+    return { ok: false, error: 'Missing lead reference (SL NO).' };
+
+  var lock = LockService.getScriptLock();
+  var haveLock = false;
+  try { haveLock = lock.tryLock(15000); } catch (e) {}
+  try {
+    var sh = _leadsSheet(person, false);
+    if (!sh) return { ok: false, error: 'No leads sheet for ' + person };
+    var last = sh.getLastRow();
+    if (last < 2) return { ok: false, error: 'No leads to delete for ' + person };
+    var C = _leadCols(sh);
+    var ncol = Math.max(C.ncol, LEADS_HEADERS.length);
+    var vals = sh.getRange(2, 1, last - 1, ncol).getValues();
+    var target = -1;
+    for (var i = 0; i < vals.length; i++) {
+      var sv = (C.sl >= 0 && C.sl < vals[i].length) ? String(vals[i][C.sl]).trim() : '';
+      if (sv === slNo) { target = i; break; }
+    }
+    if (target < 0) return { ok: false, error: 'Lead #' + slNo + ' not found for ' + person };
+    var customer = (C.customer >= 0 && C.customer < vals[target].length) ? String(vals[target][C.customer] || '').trim() : '';
+    sh.deleteRow(target + 2);
+
+    _appendLog(by, '', 'DELETE_LEAD', person + ' #' + slNo + (customer ? ' · ' + customer : ''));
     return { ok: true, slNo: slNo, scriptVersion: SCRIPT_VERSION };
   } catch (e) {
     return { ok: false, error: e.message };
