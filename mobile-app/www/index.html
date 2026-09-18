@@ -229,7 +229,12 @@ function _loadImageAsset(key, url, opts) {
         const sx = Math.round(cr.sx * nW), sy = Math.round(cr.sy * nH);
         const sw = Math.round(cr.sw * nW), sh = Math.round(cr.sh * nH);
         const c = document.createElement('canvas'); c.width = sw; c.height = sh;
-        c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+        const cx = c.getContext('2d');
+        // Owner-requested: deepen the logo colours so they print bolder / more
+        // prominent. This is a render-time canvas filter only — the source PNG
+        // file is never modified.
+        if (opts && opts.boost) cx.filter = 'saturate(1.45) contrast(1.10)';
+        cx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
         PDF_ASSETS[key] = { data: c.toDataURL('image/png'), w: sw, h: sh };
       } catch (e) { /* fall through to full embed */ }
     }
@@ -237,7 +242,9 @@ function _loadImageAsset(key, url, opts) {
     if (!PDF_ASSETS[key]) {
       try {
         const c = document.createElement('canvas'); c.width = nW; c.height = nH;
-        c.getContext('2d').drawImage(img, 0, 0);
+        const cx = c.getContext('2d');
+        if (opts && opts.boost) cx.filter = 'saturate(1.45) contrast(1.10)';
+        cx.drawImage(img, 0, 0);
         PDF_ASSETS[key] = { data: c.toDataURL('image/png'), w: nW, h: nH };
       } catch (e) { /* tainted / unsupported — fall back to drawn version */ }
     }
@@ -247,11 +254,11 @@ function _loadImageAsset(key, url, opts) {
 }
 function preloadPdfAssets() {
   const v = '?a=' + ASSET_VERSION;
-  _loadImageAsset('interio', 'interio-logo.png' + v);
+  _loadImageAsset('interio', 'interio-logo.png' + v, {boost:true});
   // fs-logo.png has a wide margin around the orange mark (the artwork sits at
   // x 39-188, y 23-167 of a 211x199 image). Crop to a centred 150x150 square
   // so the logo fills its store-address cell top-to-bottom.
-  _loadImageAsset('fs', 'fs-logo.png' + v, {crop:{sx:39/211, sy:20/199, sw:150/211, sh:150/199}});
+  _loadImageAsset('fs', 'fs-logo.png' + v, {crop:{sx:39/211, sy:20/199, sw:150/211, sh:150/199}, boost:true});
   _loadImageAsset('reviewQR','review-qr.png' + v);
 }
 preloadPdfAssets();
@@ -1346,8 +1353,8 @@ function generatePDF(order, copyType) {
     cpl: { x:ml+cw-50,    w:26, t:'Disc. Price' },
     tot: { x:ml+cw-24,    w:24, t:'Total (Rs.)' },
   };
-  const thH = 8;    // items header height
-  const rH  = 11;   // items row height
+  const thH = 7;    // items header height
+  const rH  = 9.5;  // items row height
 
   // Footer sits at a fixed position on EVERY page; items never cross into it.
   const ftH     = 26;
@@ -1406,11 +1413,13 @@ function generatePDF(order, copyType) {
       if (w > 22) { w = 22; h = w/ar; }
       try { doc.addImage(F.data,'PNG', ml+1, y+5, w, h, 'fslogo', 'MEDIUM'); tx = ml+1+w+2; } catch(e) {}
     }
-    val(tx, y+8, fit1('4S Interiors', c1w-(tx-ml)-2, 7.5), 7.5, true);
-    doc.setFont('helvetica','normal'); doc.setFontSize(5.4); doc.setTextColor(...INK);
+    val(tx, y+7.5, fit1('4S Interiors', c1w-(tx-ml)-2, 9), 9, true);
+    // Larger store-address text so the store block reads clearly in print
+    // (fills the space beside the logo — the logo cell itself is unchanged).
+    doc.setFont('helvetica','normal'); doc.setFontSize(6.6); doc.setTextColor(...INK);
     doc.splitTextToSize('Plot No 193, beside Croma, Gayatri Vihar, Kanan Vihar, Patia, Bhubaneswar, Odisha 751024', c1w-(tx-ml)-2)
-       .slice(0,3).forEach((ln,i)=>doc.text(ln, tx, y+11.5+i*2.8));
-    val(tx, y+r1H-2, 'Ph: 08291957842', 6, true);
+       .slice(0,3).forEach((ln,i)=>doc.text(ln, tx, y+11.2+i*3.2));
+    val(tx, y+r1H-2, 'Ph: 08291957842', 7, true);
     lbl(ml+c1w+1, y+3.5, 'WON No.');
     doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(...DRED);
     doc.text(fit1(order.won||'Pending', c2w-3, 10), ml+c1w+1, y+11);
@@ -1427,84 +1436,118 @@ function generatePDF(order, copyType) {
     y += r1H;
 
     // Billing / Delivery header
-    const bhH = 6;
+    const bhH = 5.5;
     [[ml,cw/2,'Billing Address'],[ml+cw/2,cw/2,'Delivery Address']].forEach(([x,w,txt]) => {
       doc.setFillColor(245,245,245); doc.rect(x,y,w,bhH,'F'); brd(x,y,w,bhH);
       doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-      doc.text(txt, x+w/2, y+4.3, {align:'center'});
+      doc.text(txt, x+w/2, y+bhH-1.5, {align:'center'});
     });
     y += bhH;
 
-    // Customer details
-    const cdH = 46, hw = cw/2;
-    brd(ml,y,hw,cdH); brd(ml+hw,y,hw,cdH);
-    hln(ml,y+6,ml+hw);
-    lbl(ml+1,y+3.5,'P.O. Ref. No. :');
-    val(ml+25,y+3.5, fit1(order.poRef||'',hw-27), 7.5);
-    hln(ml,y+17,ml+hw);
-    lbl(ml+1,y+10,'Customer Name :');
-    // Long customer names WRAP onto up to two lines (shrinking the font) instead
-    // of being truncated to one line, so large names print in full in the cell.
-    (function(){
-      const nm = String(order.customer||'');
-      doc.setFont('helvetica','bold'); doc.setTextColor(...INK);
-      doc.setFontSize(9);
-      if (doc.getTextWidth(nm) <= hw-3) {
-        doc.text(nm, ml+1, y+16);
-      } else {
-        doc.setFontSize(7.5);
-        doc.splitTextToSize(nm, hw-3).slice(0,2)
-          .forEach((ln,i)=>doc.text(ln, ml+1, y+13+i*3));
-      }
+    // ── Customer details ──────────────────────────────────────
+    // Only rows that were actually filled during order creation are drawn; empty
+    // optional fields (P.O. Ref, alt phone, e-mail, contact, …) are omitted and
+    // the block shrinks to fit. (Money-receipt rows are the one exception — those
+    // always print, see drawTotalsBlock.)
+    const hw = cw/2, cdTop = y;
+    // A compact single-line "label : value" row. Returns the height it used
+    // (0 when skipped because the value is blank).
+    const inlineRow = (x0, yy, label, value) => {
+      if (!String(value||'').trim()) return 0;
+      if (yy > cdTop) hln(x0, yy, x0+hw);   // divider between rows only
+      const rh = 4.8;
+      lbl(x0+1, yy+3.4, label);
+      const lx = x0 + 1 + doc.getTextWidth(label) + 2;
+      val(lx, yy+3.4, fit1(value, x0+hw-lx-1, 7.5), 7.5);
+      return rh;
+    };
+    // LEFT column (billing)
+    let ly = cdTop;
+    ly += inlineRow(ml, ly, 'P.O. Ref. No. :', order.poRef);
+    (function(){                                   // Customer Name (label + bold value)
+      const nm = String(order.customer||''); if (!nm) return;
+      if (ly > cdTop) hln(ml, ly, ml+hw);
+      lbl(ml+1, ly+3.2, 'Customer Name :');
+      doc.setFont('helvetica','bold'); doc.setTextColor(...INK); doc.setFontSize(9);
+      let lines;
+      if (doc.getTextWidth(nm) <= hw-3) lines = [nm];
+      else { doc.setFontSize(7.5); lines = doc.splitTextToSize(nm, hw-3).slice(0,2); }
+      lines.forEach((l,i)=>doc.text(l, ml+1, ly+8+i*3.4));
+      ly += 5.5 + lines.length*3.4;
     })();
-    hln(ml,y+33,ml+hw);
-    doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-    doc.splitTextToSize(order.billing||order.delivery||'',hw-3).slice(0,3).forEach((ln,i)=>doc.text(ln,ml+1,y+21+i*4));
-    hln(ml,y+38,ml+hw);
-    lbl(ml+1,y+36,'Ph. :'); val(ml+9,y+36, fit1(order.phone||'',hw-11), 7.5);
-    hln(ml,y+43,ml+hw);
-    lbl(ml+1,y+41,'M. :');  val(ml+9,y+41, fit1(order.alt||'',hw-11), 7.5);
-    const dx = ml+hw;
-    lbl(dx+1,y+3.5,'Delivery Address :');
-    // Recipient (customer) name at the top of the delivery block, so the
-    // delivery / warehouse team can see who the order is for at a glance.
-    doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...INK);
-    doc.text(fit1(order.customer||'', hw-3, 8), dx+1, y+7.5);
-    doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-    const liftTypesTxt = Array.isArray(order.liftTypes) ? order.liftTypes.join(', ') : '';
-    const delvText = [order.delivery||order.billing||'',
-      order.pincode  ? 'Pincode: '  + order.pincode  : '',
-      order.floor    ? 'Floor: '    + order.floor    : '',
-      order.landmark ? 'Landmark: ' + order.landmark : '',
-      order.liftAvailable ? 'Lift: ' + order.liftAvailable + (liftTypesTxt ? ' (' + liftTypesTxt + ')' : '') : '']
-      .filter(Boolean).join('\n');
-    doc.splitTextToSize(delvText,hw-3).slice(0,5).forEach((ln,i)=>doc.text(ln,dx+1,y+11.5+i*3.4));
-    hln(dx,y+27,dx+hw);
-    lbl(dx+1,y+30.5,'E-Mail :'); val(dx+14,y+30.5, fit1(order.email||'',hw-16), 7.5);
-    hln(dx,y+33,dx+hw);
-    // Contact person (for orders bought on behalf of someone else)
-    lbl(dx+1,y+36,'Contact :'); val(dx+15,y+36, fit1(order.contactPersonName||'',hw-17), 7.5);
-    hln(dx,y+39,dx+hw);
-    lbl(dx+1,y+42,'Ph. :'); val(dx+9,y+42, fit1(order.contactNumber||'',hw-11), 7.5);
-    y += cdH;
+    (function(){                                   // Billing address (multi-line)
+      const addr = order.billing||order.delivery||''; if (!String(addr).trim()) return;
+      if (ly > cdTop) hln(ml, ly, ml+hw);
+      doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+      const lines = doc.splitTextToSize(addr, hw-3).slice(0,3);
+      lines.forEach((l,i)=>doc.text(l, ml+1, ly+3.6+i*3.4));
+      ly += 1.6 + lines.length*3.4;
+    })();
+    ly += inlineRow(ml, ly, 'Ph. :', order.phone);
+    ly += inlineRow(ml, ly, 'M. :',  order.alt);
+    const leftH = ly - cdTop;
 
-    // Instruction + discount
-    const siH=28, lw5=cw*0.55, rw5=cw*0.45, rx5=ml+lw5;
-    brd(ml,y,lw5,siH); brd(rx5,y,rw5,siH);
-    doc.setFillColor(248,248,248); doc.rect(ml,y,lw5,7,'F'); doc.rect(rx5,y,rw5,7,'F');
-    hln(ml,y+7,ml+lw5); hln(rx5,y+7,rx5+rw5);
-    lbl(ml+2,y+5,'Specific Instruction',7);
-    lbl(rx5+2,y+5,'HFP / HFC / HFS / RFD',7);
-    doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-    doc.splitTextToSize(order.installNote||'',lw5-4).slice(0,4).forEach((ln,i)=>doc.text(ln,ml+2,y+11+i*4));
-    vln(rx5+rw5*0.5,y+7,y+siH);
-    const r5=(l,v,ry)=>{ hln(rx5,y+ry,rx5+rw5); lbl(rx5+2,y+ry-5.5,l); val(rx5+rw5*0.5+2,y+ry-1.5,fit1(v,rw5*0.48,8.5),8.5,true); };
-    r5('Planned Dly Schedule', order.plannedDly||'',   16);
-    r5('Reference no.',        order.poRef||'',        siH);
-    y += siH;
+    // RIGHT column (delivery)
+    const dx = ml+hw; let ry = cdTop;
+    (function(){                                   // Delivery address + recipient
+      lbl(dx+1, ry+3.4, 'Delivery Address :');
+      let yy = ry + 7.2;
+      const nm = order.customer||'';
+      if (nm){ doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...INK); doc.text(fit1(nm,hw-3,8), dx+1, yy); yy += 3.6; }
+      doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+      const liftTypesTxt = Array.isArray(order.liftTypes) ? order.liftTypes.join(', ') : '';
+      const delvText = [order.delivery||order.billing||'',
+        order.pincode  ? 'Pincode: '  + order.pincode  : '',
+        order.floor    ? 'Floor: '    + order.floor    : '',
+        order.landmark ? 'Landmark: ' + order.landmark : '',
+        order.liftAvailable ? 'Lift: ' + order.liftAvailable + (liftTypesTxt ? ' (' + liftTypesTxt + ')' : '') : '']
+        .filter(Boolean).join('\n');
+      const lines = doc.splitTextToSize(delvText, hw-3).slice(0,6);
+      lines.forEach((l,i)=>doc.text(l, dx+1, yy+i*3.4));
+      ry += (yy - ry) + lines.length*3.4 + 1.5;
+    })();
+    ry += inlineRow(dx, ry, 'E-Mail :',  order.email);
+    ry += inlineRow(dx, ry, 'Contact :', order.contactPersonName);
+    ry += inlineRow(dx, ry, 'Ph. :',     order.contactNumber);
+    const rightH = ry - cdTop;
+
+    const cdH = Math.max(leftH, rightH, 14);
+    brd(ml, cdTop, hw, cdH); brd(ml+hw, cdTop, hw, cdH);
+    y = cdTop + cdH;
+
+    // ── Specific instruction + delivery-schedule codes ──
+    // Omit the whole block when nothing was filled; within it, omit empty rows.
+    (function(){
+      const instr = String(order.installNote||'').trim();
+      const rRows = [];
+      if (String(order.plannedDly||'').trim()) rRows.push(['Planned Dly Schedule', order.plannedDly]);
+      if (String(order.poRef||'').trim())      rRows.push(['Reference no.', order.poRef]);
+      if (!instr && !rRows.length) return;
+      const lw5=cw*0.55, rw5=cw*0.45, rx5=ml+lw5, headH=6;
+      doc.setFontSize(7.5);
+      const instrLines = instr ? doc.splitTextToSize(instr, lw5-4).slice(0,4) : [];
+      const leftBodyH  = instrLines.length ? instrLines.length*3.9 + 2 : 0;
+      const rightBodyH = rRows.length * 8;
+      const siH = headH + Math.max(leftBodyH, rightBodyH, 8);
+      brd(ml,y,lw5,siH); brd(rx5,y,rw5,siH);
+      doc.setFillColor(248,248,248); doc.rect(ml,y,lw5,headH,'F'); doc.rect(rx5,y,rw5,headH,'F');
+      hln(ml,y+headH,ml+lw5); hln(rx5,y+headH,rx5+rw5);
+      lbl(ml+2,y+headH-1.7,'Specific Instruction',7);
+      lbl(rx5+2,y+headH-1.7,'HFP / HFC / HFS / RFD',7);
+      doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+      instrLines.forEach((ln,i)=>doc.text(ln,ml+2,y+headH+4+i*3.9));
+      const half = rw5*0.5; let rry = y+headH;
+      if (rRows.length) vln(rx5+half, y+headH, y+siH);
+      rRows.forEach(([l,v])=>{
+        lbl(rx5+2, rry+4, l, 6.8);
+        val(rx5+half+2, rry+5.5, fit1(v, half-3, 8.5), 8.5, true);
+        rry += 8; if (rry < y+siH-0.5) hln(rx5, rry, rx5+rw5);
+      });
+      y += siH;
+    })();
 
     // Salesman + Payment Mode row (Payment Mode printed on both copies)
-    const scH=7;
+    const scH=6.5;
     brd(ml,y,cw,scH);
     const payX = ml+cw*0.58;
     vln(ml+28,y,y+scH);          // after "Salesman Code" label
@@ -1684,6 +1727,44 @@ function generatePDF(order, copyType) {
     return y + h;
   }
 
+  // ── TERMS OF ORDER (small print, two columns) ─────────────
+  // Drawn on the order form itself, immediately above the signature row.
+  function drawTermsBlock(y) {
+    const TERMS = [
+      'I/We agree to make payment in full before the delivery of goods or documents.',
+      'I/We agree that this order will not be binding on the store unless and until it is confirmed by the Company Head Office. I/We agree not to cancel the order.',
+      'I/We agree that the delivery time mentioned is indicative. I/We will not claim compensation nor cancel the order for any delay through any cause whatsoever.',
+      'I/We agree that the prices stated herein is/are tentative and will be charged as ruling at the time of delivery.',
+      'I/We agree that the Company or the employee shall not be held responsible for any damage caused to the property of the customer during delivery.',
+      'I/We agree to be charged additional for redelivery of the order, should I/We fail to take delivery.',
+      'Taxes shall be levied as applicable at the time of delivery.',
+      'Due to unavoidable circumstances, if there is cancellation of the order, I/We agree to bear the charges for the same.',
+      'I/We agree to the details of the product mentioned overleaf.',
+    ];
+    const headH = 5, pad = 2, lineH = 2.7, colGap = 6;
+    const colW = (cw - colGap) / 2 - pad;
+    // Same small type as the customer-care footer line (6.5pt).
+    doc.setFont('helvetica','normal'); doc.setFontSize(6.5);
+    const mkLines = (from, to) => {
+      let arr = [];
+      for (let i = from; i < to; i++) arr = arr.concat(doc.splitTextToSize((i+1) + '. ' + TERMS[i], colW));
+      return arr;
+    };
+    const L = mkLines(0, 5), R = mkLines(5, 9);
+    const bodyH = Math.max(L.length, R.length) * lineH;
+    const total = headH + bodyH + pad * 2;
+    brd(ml, y, cw, total);
+    doc.setFillColor(248,248,248); doc.rect(ml, y, cw, headH, 'F'); hln(ml, y+headH, ml+cw);
+    doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...INK);
+    doc.text('TERMS OF ORDER', ml+2, y+headH-1.3);
+    doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...INK);
+    const yy = y + headH + pad + 1.4;
+    L.forEach((ln,i)=>doc.text(ln, ml+pad, yy+i*lineH));
+    R.forEach((ln,i)=>doc.text(ln, ml+cw/2+colGap/2, yy+i*lineH));
+    vln(ml+cw/2, y+headH, y+total);
+    return y + total;
+  }
+
   // ── TOTALS + RECEIPT + SIGNATURE (final page only) ────────
   function drawTotalsBlock(y) {
     // Every MRP already includes 18% GST, so the subtotal is GST-inclusive. The
@@ -1767,7 +1848,7 @@ function generatePDF(order, copyType) {
     // Finance-scheme (Pine Labs / Bajaj Finance) bookings carry no money-receipt
     // details — the financier funds the order — so the receipt rows are omitted.
     if (isB2B(order)) {
-      const rcH=8;
+      const rcH=7;
       brd(ml,y,cw/2,rcH); brd(ml+cw/2,y,cw/2,rcH);
       lbl(ml+2,y+5,'Challan No & Dt :');
       const chTxt = [order.challanNo,order.challanDate].filter(Boolean).join('  ·  ');
@@ -1779,7 +1860,7 @@ function generatePDF(order, copyType) {
     } else if (!isFinanceScheme(order)) {
       const receipts = (order.moneyReceipts && order.moneyReceipts.length)
         ? order.moneyReceipts : [{no:order.receiptNo||'',date:''}];
-      const rcH=8;
+      const rcH=7;
       for(let r=0;r<3;r++){
         const mr = receipts[r] || {no:'',date:'',amt:''};
         brd(ml,y,cw/2,rcH); brd(ml+cw/2,y,cw/2,rcH);
@@ -1796,13 +1877,18 @@ function generatePDF(order, copyType) {
       }
     }
 
-    const sigH=18, sigW=cw/3;
+    // ── Terms of Order — printed on the form itself, just above the signatures
+    //    (small type, like the customer-care line). Replaces the terms that used
+    //    to be pre-printed on the back of the manual order form. ──
+    y = drawTermsBlock(y);
+
+    const sigH=16, sigW=cw/3;
     for(let s=0;s<3;s++) brd(ml+s*sigW,y,sigW,sigH);
     ['Sales Exe. Signature','Sales Exe. Name','Customer Signature'].forEach((t,i)=>{
       lbl(ml+i*sigW+2, y+sigH-2.5, t);
       if(i===1&&order.salesExec){
         doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...INK);
-        doc.text(fit1(order.salesExec,sigW-4,9), ml+i*sigW+sigW/2, y+10, {align:'center'});
+        doc.text(fit1(order.salesExec,sigW-4,9), ml+i*sigW+sigW/2, y+9, {align:'center'});
       }
     });
     return y + sigH;
@@ -1857,7 +1943,7 @@ function generatePDF(order, copyType) {
 
   // Totals must sit together on one page; move to a fresh page if they don't fit.
   const nTotRows      = 6 + (orderDiscAmt > 0 ? 2 : 0);
-  const totalsBlockH  = Math.max(5.7*nTotRows, 44) + 24 /*receipt*/ + 18 /*signature*/;
+  const totalsBlockH  = Math.max(5.7*nTotRows, 44) + 21 /*receipt*/ + 32 /*terms*/ + 16 /*signature*/;
   if (y + totalsBlockH > itemAreaBottom) {
     drawFooter();
     doc.addPage(); pageNo++;
