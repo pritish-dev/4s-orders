@@ -1485,45 +1485,34 @@ function generatePDF(order, copyType) {
     ry += inlineRow(dx, ry, true, 'Ph. :',     order.contactNumber);
     const rightH = ry - cdTop;
 
-    // LEFT column (billing): optional P.O. Ref, Customer Name, then the billing
-    // address as equally-spaced comma-split lines, then optional phone.
-    const nm = String(order.customer||'');
-    const hasPoRef = !!String(order.poRef||'').trim();
-    const hasBillPh = !!String(order.phone||'').trim();
-    const poRefH = hasPoRef ? 4.8 : 0;
-    let nameLines = [];
-    if (nm) {
-      doc.setFont('helvetica','bold'); doc.setFontSize(9);
-      if (doc.getTextWidth(nm) <= hw-3) nameLines = [nm];
-      else { doc.setFontSize(7.5); nameLines = doc.splitTextToSize(nm, hw-3).slice(0,2); }
-    }
-    const nameH = nm ? 5.5 + nameLines.length*3.4 : 0;
-    const phoneH = hasBillPh ? 4.8 : 0;
-    // Split the billing address at commas into separate lines (postal style);
-    // fall back to width-wrapping if there are no commas.
-    let addrLines = String(order.billing||order.delivery||'').split(',').map(s=>s.trim()).filter(Boolean);
-    if (addrLines.length <= 1) addrLines = doc.splitTextToSize(String(order.billing||order.delivery||''), hw-3);
-    addrLines = addrLines.slice(0,6);
-    const addrMinH = addrLines.length ? addrLines.length*4.2 + 2 : 0;
-
-    const cdH = Math.max(rightH, poRefH + nameH + addrMinH + phoneH, 16);
-
+    // LEFT column (billing) — rendered in the same manner as the delivery
+    // column: optional P.O. Ref, the customer name, then the billing address
+    // wrapped onto packed lines, then the optional phone.
     let lyy = cdTop;
-    if (hasPoRef) { inlineRow(ml, lyy, false, 'P.O. Ref. No. :', order.poRef); lyy += poRefH; hln(ml, lyy, ml+hw); }
-    if (nm) {
+    lyy += inlineRow(ml, lyy, false, 'P.O. Ref. No. :', order.poRef);
+    (function(){                                   // Customer name
+      const bnm = String(order.customer||''); if (!bnm) return;
+      if (lyy > cdTop) hln(ml, lyy, ml+hw);
       lbl(ml+1, lyy+3.2, 'Customer Name :');
-      doc.setFont('helvetica','bold'); doc.setTextColor(...INK); doc.setFontSize(nameLines.length>1 ? 7.5 : 9);
-      nameLines.forEach((l,i)=>doc.text(l, ml+1, lyy+8+i*3.4));
-      lyy += nameH; hln(ml, lyy, ml+hw);
-    }
-    // Billing address — lines spread with equal gaps to fill the remaining box.
-    if (addrLines.length) {
-      const top = lyy, bottom = cdTop + cdH - phoneH, H = Math.max(bottom - top, addrMinH);
+      doc.setFont('helvetica','bold'); doc.setTextColor(...INK); doc.setFontSize(9);
+      let lines;
+      if (doc.getTextWidth(bnm) <= hw-3) lines = [bnm];
+      else { doc.setFontSize(7.5); lines = doc.splitTextToSize(bnm, hw-3).slice(0,2); }
+      lines.forEach((l,i)=>doc.text(l, ml+1, lyy+8+i*3.4));
+      lyy += 5.5 + lines.length*3.4;
+    })();
+    (function(){                                   // Billing address (same as delivery)
+      const addr = order.billing||order.delivery||''; if (!String(addr).trim()) return;
+      if (lyy > cdTop) hln(ml, lyy, ml+hw);
       doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-      addrLines.forEach((l,i)=>doc.text(fit1(l, hw-3, 7.5), ml+1, top + H*(i+1)/(addrLines.length+1) + 1.1));
-    }
-    if (hasBillPh) { const py = cdTop+cdH-phoneH; hln(ml, py, ml+hw); inlineRow(ml, py, false, 'Ph. :', order.phone); }
+      const lines = doc.splitTextToSize(addr, hw-3).slice(0,6);
+      lines.forEach((l,i)=>doc.text(l, ml+1, lyy+3.6+i*3.4));
+      lyy += 2 + lines.length*3.4;
+    })();
+    lyy += inlineRow(ml, lyy, true, 'Ph. :', order.phone);
+    const leftH = lyy - cdTop;
 
+    const cdH = Math.max(rightH, leftH, 16);
     brd(ml, cdTop, hw, cdH); brd(ml+hw, cdTop, hw, cdH);
     y = cdTop + cdH;
 
