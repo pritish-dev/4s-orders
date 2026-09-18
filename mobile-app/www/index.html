@@ -1465,9 +1465,9 @@ function generatePDF(order, copyType) {
     const dx = ml+hw; let ry = cdTop;
     (function(){
       lbl(dx+1, ry+3.4, 'Delivery Address :');
-      let yy = ry + 7.2;
-      const dnm = order.customer||'';
-      if (dnm){ doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...INK); doc.text(fit1(dnm,hw-3,8), dx+1, yy); yy += 3.6; }
+      // The customer name is already shown in the billing "Customer Name" field,
+      // so it is NOT repeated here at the top of the delivery address.
+      let yy = ry + 6.6;
       doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
       const liftTypesTxt = Array.isArray(order.liftTypes) ? order.liftTypes.join(', ') : '';
       const delvText = [order.delivery||order.billing||'',
