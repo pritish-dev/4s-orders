@@ -698,6 +698,8 @@ function itemUnitPrice(it) {
 // a valid tax breakup) — never added to it. Editing an item's price does not
 // re-apply GST; the entered value is treated as the final MRP.
 const GST_RATE = 0.18;
+// Specific Instruction dropdown options (first is the default for new orders).
+const INSTALL_NOTE_OPTIONS = ['Installation will be done within 48 hours post Delivery', 'SDDI', 'Marriage Order'];
 // Per-unit MRP = the (possibly edited / discounted) list price with 18% GST in it.
 function gstInclUnit(it) { return Math.round(itemUnitPrice(it) * (1 + GST_RATE)); }
 function gstInclLine(it) { return gstInclUnit(it) * (Number(it.qty) || 0); }
@@ -1445,55 +1447,27 @@ function generatePDF(order, copyType) {
     y += bhH;
 
     // ── Customer details ──────────────────────────────────────
-    // Only rows that were actually filled during order creation are drawn; empty
-    // optional fields (P.O. Ref, alt phone, e-mail, contact, …) are omitted and
-    // the block shrinks to fit. (Money-receipt rows are the one exception — those
-    // always print, see drawTotalsBlock.)
+    // Empty optional fields are omitted; the block reflows to fit. The billing
+    // address prints as several equally-spaced lines that fill its box. (Money-
+    // receipt rows always print — see drawTotalsBlock.)
     const hw = cw/2, cdTop = y;
-    // A compact single-line "label : value" row. Returns the height it used
-    // (0 when skipped because the value is blank).
-    const inlineRow = (x0, yy, label, value) => {
+    // Compact single-line "label : value" row (skipped when value is blank).
+    const inlineRow = (x0, yy, drawDiv, label, value) => {
       if (!String(value||'').trim()) return 0;
-      if (yy > cdTop) hln(x0, yy, x0+hw);   // divider between rows only
-      const rh = 4.8;
+      if (drawDiv) hln(x0, yy, x0+hw);
       lbl(x0+1, yy+3.4, label);
       const lx = x0 + 1 + doc.getTextWidth(label) + 2;
       val(lx, yy+3.4, fit1(value, x0+hw-lx-1, 7.5), 7.5);
-      return rh;
+      return 4.8;
     };
-    // LEFT column (billing)
-    let ly = cdTop;
-    ly += inlineRow(ml, ly, 'P.O. Ref. No. :', order.poRef);
-    (function(){                                   // Customer Name (label + bold value)
-      const nm = String(order.customer||''); if (!nm) return;
-      if (ly > cdTop) hln(ml, ly, ml+hw);
-      lbl(ml+1, ly+3.2, 'Customer Name :');
-      doc.setFont('helvetica','bold'); doc.setTextColor(...INK); doc.setFontSize(9);
-      let lines;
-      if (doc.getTextWidth(nm) <= hw-3) lines = [nm];
-      else { doc.setFontSize(7.5); lines = doc.splitTextToSize(nm, hw-3).slice(0,2); }
-      lines.forEach((l,i)=>doc.text(l, ml+1, ly+8+i*3.4));
-      ly += 5.5 + lines.length*3.4;
-    })();
-    (function(){                                   // Billing address (multi-line)
-      const addr = order.billing||order.delivery||''; if (!String(addr).trim()) return;
-      if (ly > cdTop) hln(ml, ly, ml+hw);
-      doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-      const lines = doc.splitTextToSize(addr, hw-3).slice(0,3);
-      lines.forEach((l,i)=>doc.text(l, ml+1, ly+3.6+i*3.4));
-      ly += 1.6 + lines.length*3.4;
-    })();
-    ly += inlineRow(ml, ly, 'Ph. :', order.phone);
-    ly += inlineRow(ml, ly, 'M. :',  order.alt);
-    const leftH = ly - cdTop;
 
-    // RIGHT column (delivery)
+    // RIGHT column (delivery) — drawn first so its height is known.
     const dx = ml+hw; let ry = cdTop;
-    (function(){                                   // Delivery address + recipient
+    (function(){
       lbl(dx+1, ry+3.4, 'Delivery Address :');
       let yy = ry + 7.2;
-      const nm = order.customer||'';
-      if (nm){ doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...INK); doc.text(fit1(nm,hw-3,8), dx+1, yy); yy += 3.6; }
+      const dnm = order.customer||'';
+      if (dnm){ doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...INK); doc.text(fit1(dnm,hw-3,8), dx+1, yy); yy += 3.6; }
       doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
       const liftTypesTxt = Array.isArray(order.liftTypes) ? order.liftTypes.join(', ') : '';
       const delvText = [order.delivery||order.billing||'',
@@ -1506,12 +1480,50 @@ function generatePDF(order, copyType) {
       lines.forEach((l,i)=>doc.text(l, dx+1, yy+i*3.4));
       ry += (yy - ry) + lines.length*3.4 + 1.5;
     })();
-    ry += inlineRow(dx, ry, 'E-Mail :',  order.email);
-    ry += inlineRow(dx, ry, 'Contact :', order.contactPersonName);
-    ry += inlineRow(dx, ry, 'Ph. :',     order.contactNumber);
+    ry += inlineRow(dx, ry, true, 'E-Mail :',  order.email);
+    ry += inlineRow(dx, ry, true, 'Contact :', order.contactPersonName);
+    ry += inlineRow(dx, ry, true, 'Ph. :',     order.contactNumber);
     const rightH = ry - cdTop;
 
-    const cdH = Math.max(leftH, rightH, 14);
+    // LEFT column (billing): optional P.O. Ref, Customer Name, then the billing
+    // address as equally-spaced comma-split lines, then optional phone.
+    const nm = String(order.customer||'');
+    const hasPoRef = !!String(order.poRef||'').trim();
+    const hasBillPh = !!String(order.phone||'').trim();
+    const poRefH = hasPoRef ? 4.8 : 0;
+    let nameLines = [];
+    if (nm) {
+      doc.setFont('helvetica','bold'); doc.setFontSize(9);
+      if (doc.getTextWidth(nm) <= hw-3) nameLines = [nm];
+      else { doc.setFontSize(7.5); nameLines = doc.splitTextToSize(nm, hw-3).slice(0,2); }
+    }
+    const nameH = nm ? 5.5 + nameLines.length*3.4 : 0;
+    const phoneH = hasBillPh ? 4.8 : 0;
+    // Split the billing address at commas into separate lines (postal style);
+    // fall back to width-wrapping if there are no commas.
+    let addrLines = String(order.billing||order.delivery||'').split(',').map(s=>s.trim()).filter(Boolean);
+    if (addrLines.length <= 1) addrLines = doc.splitTextToSize(String(order.billing||order.delivery||''), hw-3);
+    addrLines = addrLines.slice(0,6);
+    const addrMinH = addrLines.length ? addrLines.length*4.2 + 2 : 0;
+
+    const cdH = Math.max(rightH, poRefH + nameH + addrMinH + phoneH, 16);
+
+    let lyy = cdTop;
+    if (hasPoRef) { inlineRow(ml, lyy, false, 'P.O. Ref. No. :', order.poRef); lyy += poRefH; hln(ml, lyy, ml+hw); }
+    if (nm) {
+      lbl(ml+1, lyy+3.2, 'Customer Name :');
+      doc.setFont('helvetica','bold'); doc.setTextColor(...INK); doc.setFontSize(nameLines.length>1 ? 7.5 : 9);
+      nameLines.forEach((l,i)=>doc.text(l, ml+1, lyy+8+i*3.4));
+      lyy += nameH; hln(ml, lyy, ml+hw);
+    }
+    // Billing address — lines spread with equal gaps to fill the remaining box.
+    if (addrLines.length) {
+      const top = lyy, bottom = cdTop + cdH - phoneH, H = Math.max(bottom - top, addrMinH);
+      doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+      addrLines.forEach((l,i)=>doc.text(fit1(l, hw-3, 7.5), ml+1, top + H*(i+1)/(addrLines.length+1) + 1.1));
+    }
+    if (hasBillPh) { const py = cdTop+cdH-phoneH; hln(ml, py, ml+hw); inlineRow(ml, py, false, 'Ph. :', order.phone); }
+
     brd(ml, cdTop, hw, cdH); brd(ml+hw, cdTop, hw, cdH);
     y = cdTop + cdH;
 
@@ -1990,7 +2002,7 @@ const BLANK_ORDER = () => ({
   // mandatory when the billing address differs from the delivery address.
   contactPersonName:'', contactNumber:'', contactRemark:'',
   customerCode:'', poRef:'', source:'',
-  orderDiscount:'', plannedDly:'', installNote:'',
+  orderDiscount:'', plannedDly:'', installNote:'Installation will be done within 48 hours post Delivery',
   paymentMode:'', earnest:'',
   // Finance-scheme (Bajaj Finance / Pine Labs EMI) bookings. godrejReimbursement holds
   // the amount Godrej reimburses the showroom + its date. It is recorded for
@@ -7230,7 +7242,13 @@ function OrderFormScreen({ctx, viewOnly}) {
             </div>}
         <Field label="WON (Godrej SO No)" value={o.won} onChange={setWon} mono hint="Godrej SO / WON number — can be added or updated any time"/>
         <Field label="Planned Delivery" value={o.plannedDly} onChange={v=>setOrder(prev=>({...prev,plannedDly:v,followUp:followUpFromDelivery(v)||prev.followUp}))} mono required type="date" hint="Follow-up auto-set to 2 days before this date"/>
-        <Field label="Installation Note" value={o.installNote} onChange={v=>setF('installNote',v)} multiline/>
+        <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>SPECIFIC INSTRUCTION</div>
+          <select value={o.installNote} onChange={e=>setF('installNote',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.installNote?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+            {INSTALL_NOTE_OPTIONS.map(op=><option key={op} value={op}>{op}</option>)}
+            {o.installNote && !INSTALL_NOTE_OPTIONS.includes(o.installNote) && <option value={o.installNote}>{o.installNote}</option>}
+          </select>
+        </div>
         </>)}
         <AccordionHead secKey="payment" n="06" label="Payment" open={openSecs.payment} onToggle={()=>toggleSec('payment')} done={secDone('payment')}/>
         {openSecs.payment && (<>
