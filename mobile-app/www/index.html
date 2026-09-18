@@ -1995,6 +1995,20 @@ function isFinanceScheme(o) { return !!financeSchemeOf(o && o.paymentMode); }
 // rows. The challan amount reuses the `earnest` field (as Money Receipt 1's
 // amount does), so the running balance / "received so far" logic is unchanged.
 function isB2B(o) { return String((o && o.orderType) || '').toUpperCase() === 'B2B'; }
+// A B2B order's payment + challan details (Payment Mode, Challan No / Date /
+// Amount) are OPTIONAL when the order is placed, but become MANDATORY before the
+// order can be scheduled for delivery. Returns the list of still-missing fields
+// (empty for a non-B2B order, or a B2B order that has them all). The challan
+// amount lives in the `earnest` field (see isB2B above).
+function b2bDeliveryMissing(o) {
+  if (!isB2B(o)) return [];
+  const miss = [];
+  if (!String((o && o.paymentMode) || '').trim()) miss.push('Payment Mode');
+  if (!String((o && o.challanNo) || '').trim()) miss.push('Challan No');
+  if (!String((o && o.challanDate) || '').trim()) miss.push('Challan Date');
+  if (!(Number(o && o.earnest) > 0)) miss.push('Challan Amount');
+  return miss;
+}
 // ── Pine Labs / Bajaj Finance option lists ──────────────────────────────────
 // Pine Labs card blocks carry an EMI tenure + the card used; Bajaj Finance carries
 // only its EMI scheme.
@@ -6216,6 +6230,13 @@ function OrderFormScreen({ctx, viewOnly}) {
       ctx.showToast('Can’t mark "'+val+'" — ₹'+bal.toLocaleString('en-IN')+' still due. Collect full payment first.','bad');
       return;
     }
+    // A B2B order's payment + challan details are optional at booking but
+    // mandatory before it can move into delivery — enforce them the moment the
+    // order is scheduled (any status other than Pending).
+    if(!/^pending$/i.test(val)){
+      const miss=b2bDeliveryMissing(o);
+      if(miss.length){ ctx.showToast('Fill the B2B challan details first — '+miss.join(', ')+' required before scheduling for delivery','bad'); return; }
+    }
     if(/partial/i.test(val)){ setPartialPicker(true); return; }
     if(/rescheduled/i.test(val)){ setReschedulePicker(true); return; }
     // "Installation Done" (Completed) requires a Happy Code — unless one is already
@@ -6522,13 +6543,15 @@ function OrderFormScreen({ctx, viewOnly}) {
     const isExistingOrder = !!(String(o.no||'').trim() || o.internalNo);
     if(!isExistingOrder && (!o.slNo||!String(o.slNo).trim())) add('commercial','SI No is required');
     if(!isExistingOrder && o.manualOrder && (!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim())) add('commercial','Receipt No is required for a manual order');
-    if(!o.paymentMode||!String(o.paymentMode).trim()) add('payment','Select the Payment Mode');
-    // A B2B order bills against a delivery challan — require the Challan No, not a
-    // money receipt. Finance-scheme (Pine Labs / Bajaj Finance) bookings don't use
-    // money receipts either.
-    if(isB2B(o)){
-      if(!String(o.challanNo||'').trim()) add('payment','Challan No is required');
-    } else if(!isFinanceScheme(o) && (!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim())) add('payment','Money Receipt No is required');
+    // Payment Mode is required for every order EXCEPT a B2B order. A B2B order is
+    // billed against a delivery challan, and its payment + challan details are
+    // optional at booking — they only become mandatory when the order is
+    // scheduled for delivery (enforced via b2bDeliveryMissing).
+    if(!isB2B(o) && (!o.paymentMode||!String(o.paymentMode).trim())) add('payment','Select the Payment Mode');
+    // A non-B2B order still needs its Money Receipt No (finance-scheme bookings —
+    // Pine Labs / Bajaj Finance — don't use money receipts). A B2B order's challan
+    // No / Date / Amount are NOT required to place the order.
+    if(!isB2B(o) && !isFinanceScheme(o) && (!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim())) add('payment','Money Receipt No is required');
     if(financeSchemeOf(o.paymentMode)==='Bajaj Finance' && !String(o.bajajEmi||'').trim()) add('payment','Select the Bajaj Finance EMI scheme');
     return e;
   }
@@ -8129,6 +8152,13 @@ function HistoryScreen({ctx}) {
       const bal = Math.round(orderReceived(o).balance);
       ctx.showToast('Can’t mark "'+val+'" — ₹'+bal.toLocaleString('en-IN')+' still due. Collect full payment first.','bad');
       return;
+    }
+    // A B2B order's payment + challan details are optional at booking but
+    // mandatory before it can move into delivery — enforce them the moment the
+    // order is scheduled (any status other than Pending).
+    if(!/^pending$/i.test(val)){
+      const miss=b2bDeliveryMissing(o);
+      if(miss.length){ ctx.showToast('Fill the B2B challan details first — '+miss.join(', ')+' required before scheduling for delivery','bad'); return; }
     }
     // Partial Delivery needs the item picker to record which items were delivered.
     if(/partial/i.test(val)){ setPartialOrder(o); return; }
