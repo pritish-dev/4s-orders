@@ -2937,6 +2937,28 @@ function App() {
     };
   }, [user]);
 
+  // Poll the shared ledger on a timer while the app is open, so a NEW order (or
+  // any new alert) placed by a teammate surfaces — and fires its OS notification
+  // via the push effect below — within about a minute, even when this app is only
+  // sitting in the BACKGROUND (another app on top / screen off) rather than
+  // focused. The visibility/focus resync above only refreshes at the moment the
+  // app returns to the foreground; this timer keeps the ledger current in between.
+  // A backgrounded-but-alive page still runs the timer (throttled to ~once a
+  // minute, which is fine here); only a fully closed / killed app stops it, and no
+  // timer can cover that — that needs server push, which is out of scope here.
+  useEffect(() => {
+    if (!user) return;
+    const REFRESH_MS = 60000;
+    const tick = () => {
+      // Skip while the device is offline — the queued fetch would only fail.
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      try { loadOrders({ silent: true }); } catch (e) {}
+      try { loadMis({ silent: true }); } catch (e) {}
+    };
+    const id = setInterval(tick, REFRESH_MS);
+    return () => clearInterval(id);
+  }, [user]);
+
   // Restore an unsaved order draft once, right after login
   useEffect(() => {
     if (!user) return;
