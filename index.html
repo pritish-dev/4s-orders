@@ -2569,6 +2569,23 @@ function buildNotifications(orders, mis, user) {
   const out = [];
   (orders || []).forEach(o => {
     const m = misForOrder(mis, o);
+    // 0) A brand-new order was just placed → celebrate it for the WHOLE team,
+    // mirroring the on-device "Congratulations!" popup the salesperson sees. As
+    // every device re-reads the shared ledger, this surfaces a native "New order
+    // placed" push for everyone (fired once per order via the stable id). Scoped
+    // to orders dated TODAY (IST) so the existing history never re-notifies.
+    if (o.no && o.status !== 'draft') {
+      const placedIso = _toISO(o.date);
+      if (placedIso && daysFromToday(placedIso) === 0) {
+        out.push({
+          id: 'neworder|' + o.no + '|' + placedIso,
+          kind: 'neworder', tone: 'green', orderNo: o.no, order: o,
+          title: '🎉 New order placed',
+          body: (o.customer || 'A customer') + (o.salesExec ? ' · by ' + o.salesExec : '') + ' · Great work! 🚀',
+          sortDate: placedIso,
+        });
+      }
+    }
     // 1) Fully committed in MIS (SO_QTY == COMMITTED_QTY) → plan the delivery.
     if (m && m.committed && !isDeliveryDone(o)) {
       out.push({
@@ -2640,7 +2657,7 @@ function buildNotifications(orders, mis, user) {
     });
   }
   // Overdue first, then follow-ups, then soonest; committed notices interleave by date.
-  const rank = { occasion: -1, overdue: 0, followup: 1, soon: 2, mis: 3 };
+  const rank = { neworder: -2, occasion: -1, overdue: 0, followup: 1, soon: 2, mis: 3 };
   out.sort((a, b) => (rank[a.kind] - rank[b.kind]) || String(a.sortDate).localeCompare(String(b.sortDate)));
   return out;
 }
@@ -9680,6 +9697,7 @@ function NotificationsScreen({ctx}) {
   const committedCount = misList.filter(m=>m.committed).length;
 
   const groups = [
+    {kind:'neworder', label:'New orders placed', icon:<span style={{fontSize:15,lineHeight:'15px'}}>🎉</span>, tone:T.green, soft:T.greenSoft},
     {kind:'occasion', label:'Customer birthdays & anniversaries', icon:<span style={{fontSize:15,lineHeight:'15px'}}>🎂</span>, tone:T.green, soft:T.greenSoft},
     {kind:'overdue',  label:'Overdue deliveries', icon:Icon.clock(T.bad,16), tone:T.bad, soft:T.badSoft||'#fdecec'},
     {kind:'followup', label:'Follow-ups due', icon:Icon.bell(T.ink2,15), tone:T.ink2, soft:T.paper2},
