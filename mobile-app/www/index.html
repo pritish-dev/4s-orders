@@ -399,7 +399,9 @@ function priceBookItem(r) {
   const basic = (r.basic_price != null && r.basic_price !== '')
       ? Number(r.basic_price)
       : (r.price != null ? Number(r.price) / (1 + GST_RATE) : 0);
-  const base = Math.round(Number(basic) || 0);
+  // Keep the exact (unrounded) base: rounding it here and re-adding 18% GST
+  // later inflates the MRP by ₹1 (e.g. ₹10,000 → 8,475 × 1.18 = ₹10,001).
+  const base = Number(basic) || 0;
   // Size / thickness / warranty / finish shown under the name so the salesperson
   // can pick the right variant (mattresses share one code across sizes).
   const bits = [];
@@ -439,7 +441,7 @@ function buildEmbeddedPriceItems() {
 // and inch-based sizes/thickness — unlike the bundled price book's mattress rows
 // (short reference codes, cm sizes) — so they replace them when present.
 function serverMattressItem(s) {
-  const base = Math.round(Number(s.cpl) || Number(s.mrp) || 0);
+  const base = Number(s.cpl) || Number(s.mrp) || 0;   // exact — see priceBookItem
   return {
     code:  String(s.code || '').toUpperCase().trim(),
     name:  s.name || s.item || 'Mattress',
@@ -688,8 +690,12 @@ function isoToDMY(iso) {
 function itemUnitPrice(it) {
   const mrpVal  = Number(it.mrp) || Number(it.cpl) || 0;
   const discPct = parseFloat(it.disc || '0') / 100;
-  return (it.unitPrice > 0) ? it.unitPrice : (mrpVal > 0 ? Math.round(mrpVal * (1 - discPct)) : 0);
+  return (it.unitPrice > 0) ? it.unitPrice : (mrpVal > 0 ? mrpVal * (1 - discPct) : 0);
 }
+// Round a rupee amount ONCE, at the very end. The 2-decimal pre-pass drops
+// floating-point noise (8474.576…×1.18 = 9999.9999…) so it can't tip a value
+// over a .5 boundary. Intermediate pre-GST values are never rounded.
+function roundRs(n) { return Math.round(Math.round((Number(n) || 0) * 100) / 100); }
 // ── GST-inclusive pricing (MRP) ────────────────────────────────
 // Every price shown in the app is the MRP = list price (CPL) + 18% GST, baked
 // in once at the point of display. The GST is ALREADY inside the price, so it is
@@ -701,7 +707,7 @@ const GST_RATE = 0.18;
 // Specific Instruction dropdown options (first is the default for new orders).
 const INSTALL_NOTE_OPTIONS = ['Installation will be done within 48 hours post Delivery', 'SDDI', 'Marriage Order'];
 // Per-unit MRP = the (possibly edited / discounted) list price with 18% GST in it.
-function gstInclUnit(it) { return Math.round(itemUnitPrice(it) * (1 + GST_RATE)); }
+function gstInclUnit(it) { return roundRs(itemUnitPrice(it) * (1 + GST_RATE)); }
 function gstInclLine(it) { return gstInclUnit(it) * (Number(it.qty) || 0); }
 
 function orderTotals(o) {
@@ -1202,12 +1208,13 @@ function customerCopyItems(items) {
     const fam = uType ? { key: baseFam.key + ':' + uType, label: baseFam.label + ' ' + uType } : baseFam;
     if (groupIndex[fam.key] === undefined) {
       groupIndex[fam.key] = out.length;
-      out.push({ code:'', name:fam.label, qty:0, mrp:0, disc:'', unitPrice:0, total:0, _group:true, _grossMrp:0, _children:[] });
+      out.push({ code:'', name:fam.label, qty:0, mrp:0, disc:'', unitPrice:0, total:0, _group:true, _grossMrp:0, _inclTotal:0, _children:[] });
     }
     const g = out[groupIndex[fam.key]];
     const qty = Number(it.qty) || 0;
     g.qty       += qty;
     g.total     += Number(it.total) || 0;
+    g._inclTotal += gstInclLine(it);                                 // GST-incl, as in orderTotals
     g._grossMrp += (Number(it.mrp) || Number(it.cpl) || 0) * qty;   // gross (pre-discount) price
     // Keep each underlying item (code + name + qty) so the customer copy can
     // still list them under the family heading, even though the family is
@@ -1702,7 +1709,7 @@ function generatePDF(order, copyType) {
       }
     }
     // MRP — the (possibly edited) list price per unit, shown WITH 18% GST in it.
-    const incl = (n) => Math.round((Number(n) || 0) * (1 + GST_RATE));
+    const incl = (n) => roundRs((Number(n) || 0) * (1 + GST_RATE));
     const mrpV = it.mrp||it.cpl||0;                       // pre-GST base (per unit, or line-gross for a collapsed family)
     const dPct = parseFloat(it.disc)||0;
     // Disc. Price — MRP after the per-item discount
@@ -1719,8 +1726,10 @@ function generatePDF(order, copyType) {
     }
     // Every price column is GST-inclusive (18% baked into each MRP). GST is never
     // added on top; it is carved back out in the totals block only for the breakup.
-    const cplShown  = incl(cplV);
-    const totShown  = it._group ? incl(it.total) : gstInclLine(it);
+    // A collapsed family shows the sum of its members' rounded lines, so the PDF
+    // lines always add up to the order total (no ±₹1 per member).
+    const cplShown  = it._group ? it._inclTotal : incl(cplV);
+    const totShown  = it._group ? it._inclTotal : gstInclLine(it);
     // Price column: "Disc. Price" on the sales copy, "Price (Rs.)" on the customer
     // copy — both hold the net (post-discount) GST-inclusive unit price.
     const priceCol  = isCustomer ? tC.price : tC.cpl;
@@ -2324,7 +2333,7 @@ function normalizeLoadedOrder(o) {
     const disc = fixPct(it.disc);
     const mrp  = Number(it.mrp) || Number(it.cpl) || 0;
     const qty  = Number(it.qty) || 0;
-    const up   = mrp > 0 ? Math.round(mrp * (1 - (parseFloat(disc) || 0) / 100)) : (Number(it.unitPrice) || 0);
+    const up   = mrp > 0 ? mrp * (1 - (parseFloat(disc) || 0) / 100) : (Number(it.unitPrice) || 0);
     return { ...it, disc, unitPrice: up, total: up * qty };
   });
   // Birthdays & anniversaries are day+month only. Collapse any legacy full-date
@@ -5503,7 +5512,7 @@ function OfferZoneScreen({ctx}) {
             const mto        = isMTOItem(it);
             const oos        = hasStock && stockTotal===0 && !mto;
             const base       = Number(it.cpl)||Number(it.mrp)||0;
-            const mrpIncl    = base>0 ? Math.round(base*(1+GST_RATE)) : 0;
+            const mrpIncl    = base>0 ? roundRs(base*(1+GST_RATE)) : 0;
             const pctNum     = parseFloat(String(it.sweetenerDiscount).replace(/[^\d.]/g,'')) || 0;
             const discIncl   = (mrpIncl>0 && pctNum>0) ? Math.round(mrpIncl*(1-pctNum/100)) : mrpIncl;
             const thumb      = (catalog[it.catKey]&&catalog[it.catKey].images&&catalog[it.catKey].images[0]);
@@ -5716,7 +5725,7 @@ function ProductSheet({item, cat, onClose, onAdd}) {
   const [ai,setAi]       = React.useState(0);
   const [imgErr,setImgErr] = React.useState({});
   const cplBase = Number(item.cpl)||Number(item.mrp)||0;
-  const cpl     = cplBase>0 ? Math.round(cplBase*(1+GST_RATE)) : 0;
+  const cpl     = cplBase>0 ? roundRs(cplBase*(1+GST_RATE)) : 0;
   const images  = (cat&&Array.isArray(cat.images))?cat.images:[];
   const swatches= (cat&&Array.isArray(cat.swatches))?cat.swatches:[];
   const stockTotal = (item.stock||[]).reduce((s,x)=>s+x.q,0);
@@ -6257,7 +6266,7 @@ function SearchScreen({ctx}) {
           const oos        = hasStock && stockTotal === 0 && !mto;
           const cplBase = Number(it.cpl) || Number(it.mrp) || 0;
           // MRP shown to the user = list price (CPL) with 18% GST already added in.
-          const cpl = cplBase > 0 ? Math.round(cplBase * (1 + GST_RATE)) : 0;
+          const cpl = cplBase > 0 ? roundRs(cplBase * (1 + GST_RATE)) : 0;
           const catEntry = catalog[it.catKey];
           const thumb = catEntry && catEntry.images && catEntry.images[0];
           return (
@@ -6626,7 +6635,7 @@ function OrderFormScreen({ctx, viewOnly}) {
       if(i!==idx) return it;
       const newQty = Math.max(1,it.qty+delta);
       const baseP = it.mrp||it.cpl||0;
-      const up = it.unitPrice!==undefined ? it.unitPrice : Math.round(baseP*(1-(parseFloat(it.disc)||0)/100));
+      const up = it.unitPrice!==undefined ? it.unitPrice : baseP*(1-(parseFloat(it.disc)||0)/100);
       return {...it,qty:newQty,unitPrice:up,total:newQty*up};
     })}));
   }
@@ -6965,7 +6974,7 @@ function OrderFormScreen({ctx, viewOnly}) {
             const curPrice = (it.unitPrice>0) ? it.unitPrice : (mrpVal>0 ? mrpVal*(1-discPct) : 0);
             // Every price shown includes 18% GST (the MRP). GST is baked in for
             // display only — never re-applied — so the line total is just MRP × qty.
-            const mrpIncl  = Math.round(mrpVal*(1+GST_RATE));   // per-unit MRP (incl. GST)
+            const mrpIncl  = roundRs(mrpVal*(1+GST_RATE));      // per-unit MRP (incl. GST)
             const gstUnit  = gstInclUnit(it);                   // per-unit MRP after discount
             const lineShown= gstInclLine(it);                   // line total (incl. GST)
             return (
@@ -6992,8 +7001,8 @@ function OrderFormScreen({ctx, viewOnly}) {
                     </div>
                   )}
                   {discPct>0&&gstUnit>0&&<div style={{fontSize:10,color:T.green,marginTop:2,fontWeight:700}}>You save ₹{Math.max(0,mrpIncl-gstUnit).toLocaleString('en-IN')} /unit <span style={{color:T.ink4,fontWeight:600}}>vs MRP (incl. GST)</span></div>}
-                  {priv&&(()=>{const cplU=Number(it.cpl)||Number(it.mrp)||0;const sellEx=Math.round(curPrice);const m=sellEx-cplU;const mp=cplU>0?Math.round(m/cplU*100):0;return(
-                    <div style={{fontSize:10,color:T.ink4,marginTop:2}}>CPL: ₹{cplU.toLocaleString('en-IN')} · Margin: <b style={{color:m>=0?T.green:T.bad}}>₹{m.toLocaleString('en-IN')}{cplU>0?` (${mp}%)`:''}</b> <span style={{opacity:.7}}>· pre-GST · mgr only</span></div>
+                  {priv&&(()=>{const cplU=Number(it.cpl)||Number(it.mrp)||0;const m=Math.round(curPrice-cplU);const mp=cplU>0?Math.round(m/cplU*100):0;return(
+                    <div style={{fontSize:10,color:T.ink4,marginTop:2}}>CPL: ₹{Math.round(cplU).toLocaleString('en-IN')} · Margin: <b style={{color:m>=0?T.green:T.bad}}>₹{m.toLocaleString('en-IN')}{cplU>0?` (${mp}%)`:''}</b> <span style={{opacity:.7}}>· pre-GST · mgr only</span></div>
                   );})()}
                   <div style={{display:'flex',gap:8,marginTop:6,alignItems:'center',flexWrap:'wrap'}}>
                     <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>QTY</span>
@@ -7042,7 +7051,9 @@ function OrderFormScreen({ctx, viewOnly}) {
                         const sellIncl=parseFloat(t)||0;
                         const up=sellIncl/(1+GST_RATE);
                         const discP=mrpIncl>0 ? (1 - sellIncl/mrpIncl)*100 : 0;
-                        const discStr=discP>0.0001 ? String(Math.round(discP*100)/100) : '';
+                        // 4 decimals: a 2-decimal % re-derived on reopen could shift a
+                        // ₹50,000 price by ₹2–3; 4 decimals keeps it within paise.
+                        const discStr=discP>0.0001 ? String(Math.round(discP*10000)/10000) : '';
                         setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,unitPrice:up,disc:discStr,total:up*x.qty}:x)}));
                       }}
                       style={{width:78,border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 6px',fontFamily:T.mono,fontSize:13,fontWeight:700,textAlign:'right',color:T.green}}
@@ -7399,8 +7410,8 @@ function OrderFormScreen({ctx, viewOnly}) {
             {priv&&(
               <>
                 <div style={{height:1,background:'rgba(255,255,255,.2)',margin:'8px 0'}}/>
-                <div style={{display:'flex',justifyContent:'space-between',fontSize:13,color:'rgba(255,255,255,.6)'}}><span>Total cost (CPL)</span><span>₹{totalCost.toLocaleString('en-IN')}</span></div>
-                <div style={{display:'flex',justifyContent:'space-between',fontSize:14,fontWeight:700,color:'#7ee0a8'}}><span>Gross margin</span><span>₹{totalMargin.toLocaleString('en-IN')}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:13,color:'rgba(255,255,255,.6)'}}><span>Total cost (CPL)</span><span>₹{Math.round(totalCost).toLocaleString('en-IN')}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:14,fontWeight:700,color:'#7ee0a8'}}><span>Gross margin</span><span>₹{Math.round(totalMargin).toLocaleString('en-IN')}</span></div>
                 <div style={{fontSize:9,color:'rgba(255,255,255,.4)',marginTop:3}}>Cost &amp; margin are visible to Manager / Admin only</div>
               </>
             )}

@@ -1848,7 +1848,7 @@ function handleOrders(p) {
     var mrp  = cIMrp >= 0 ? Number(r[cIMrp]) || 0 : 0;
     var discPct = parseFloat(sval(r, cIDisc).replace('%', '')) || 0;
     if (discPct > 0 && discPct < 1) discPct = discPct * 100;   // legacy "40%" stored as 0.40
-    var unitPrice = Math.round(mrp * (1 - discPct / 100));
+    var unitPrice = mrp * (1 - discPct / 100);   // exact — rounded only after GST is added
     var schemeStr = sval(r, cISchm);
     var otherMatch = schemeStr.match(/Other\s*:?\s*([^,]*)/i);
     m.items.push({
@@ -2909,6 +2909,10 @@ function _writeOrderToCRM(o) {
   return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: built.length, isNew: !isExisting };
 }
 
+// Round a rupee amount once, at the end; the 2-decimal pre-pass drops float noise
+// (e.g. 8474.576…×1.18 = 9999.9999…) so it can't tip a value across a .5 boundary.
+function _roundRs(n) { return Math.round(Math.round((Number(n) || 0) * 100) / 100); }
+
 // Builds the per-item rows for one order (values matched to columns by header).
 function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, won, slBaseRow) {
   var items = o.items || [];
@@ -2922,8 +2926,11 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     var unitMrp = Number(it.mrp) || Number(it.cpl) || 0;
     var unitCpl = Number(it.cpl) || Number(it.mrp) || 0;
     var unitItem = (it.unitPrice !== undefined && it.unitPrice !== '') ? (Number(it.unitPrice) || 0) : unitMrp;
-    var lineNet  = Math.round(unitItem * qty * (1 - orderDiscPct));    // after item + order discount, before tax
-    var unitAll  = qty > 0 ? (lineNet / qty) : unitItem;
+    // Keep the pre-tax values exact and round only the final GST-inclusive figures —
+    // rounding before adding 18% GST inflates the amount by ₹1–₹3.
+    var lineNetX = unitItem * qty * (1 - orderDiscPct);                 // after item + order discount, before tax (exact)
+    var lineNet  = Math.round(lineNetX);
+    var unitAll  = qty > 0 ? (lineNetX / qty) : unitItem;
     var grossMrp = Math.round(unitMrp * qty);
 
     var schemes = [];
@@ -2955,10 +2962,10 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['MRP/UNIT(AS PER PRICE LIST )', 'MRP/UNIT(AS PER PRICE LIST)', 'MRP/UNIT'], unitMrp);
     put(['MRP'], unitMrp);
     put(['CPL'], unitCpl);
-    put(['ORDER UNIT PRICE=(AFTER DISC + TAX)', 'ORDER UNIT PRICE'], Math.round(unitAll * 1.18));
+    put(['ORDER UNIT PRICE=(AFTER DISC + TAX)', 'ORDER UNIT PRICE'], _roundRs(unitAll * 1.18));
     put(['QTY'], qty);
     put(['GROSS ORDER VALUE(MRP)'], grossMrp);
-    put(CRM_H.AMOUNT, Math.round(lineNet * 1.18));
+    put(CRM_H.AMOUNT, _roundRs(lineNetX * 1.18));
     put(['DISC ALLOWED'], schemes.join(', '));
     put(['DISCOUNT GIVEN'], grossMrp - lineNet);   // total rupee discount (item + order share), pre-tax
     put(['CROSS CHECK GROSS AMT (Order Value Without Tax)', 'CROSS CHECK GROSS AMT'], lineNet);
