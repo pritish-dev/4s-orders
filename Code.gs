@@ -1668,6 +1668,7 @@ function handleOrders(p) {
   var cIWh   = colOf(['WAREHOUSE','DELIVERY WAREHOUSE','ITEM WAREHOUSE']);
   // 4S warehouse sub-category (GD1 / GD2 / SHOWROOM) — only set on 4S lines.
   var cIWhSub= colOf(['WAREHOUSE SUB','WAREHOUSE SUBCATEGORY','WH SUB']);
+  var cIUpm  = colOf(['UPMODS TYPE','UPMODS CATEGORY']);
   // After-sales service / issue tracking (order-level).
   var cSvcFlag  = colOf(['SERVICE FLAG','SERVICE REQUIRED','HAS SERVICE REQUEST']);
   var cSvcReqNo = colOf(['SERVICE REQUEST NO','SERVICE REQ NO']);
@@ -1871,6 +1872,8 @@ function handleOrders(p) {
       whTag: sval(r, cIWh),
       // 4S warehouse sub-category (GD1 / GD2 / SHOWROOM); blank for non-4S lines.
       whSub: cIWhSub >= 0 ? sval(r, cIWhSub) : '',
+      // Upmods furniture type picked on the order form.
+      upmodsType: cIUpm >= 0 ? sval(r, cIUpm) : '',
     });
   }
 
@@ -2212,6 +2215,9 @@ var CRM_APP_COLUMNS = [
   ['WAREHOUSE', 'DELIVERY WAREHOUSE', 'ITEM WAREHOUSE'],
   // 4S warehouse sub-category (GD1 / GD2 / SHOWROOM) — only populated on 4S lines.
   ['WAREHOUSE SUB', 'WAREHOUSE SUBCATEGORY', 'WH SUB'],
+  // Upmods furniture type picked per line (Bed / Sofa / Dining / Dining Chair /
+  // Others) — Upmods spans several categories, so it is never assumed.
+  ['UPMODS TYPE', 'UPMODS CATEGORY'],
   // After-sales service / issue tracking (order-level, repeated on every row).
   // SERVICE FLAG = 'Yes' once a service request is raised against an order (e.g. a
   // product found damaged/defective at installation). The rest capture the issue,
@@ -3080,6 +3086,8 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['WAREHOUSE','DELIVERY WAREHOUSE','ITEM WAREHOUSE'], it.whTag || '');
     // 4S warehouse sub-category (GD1 / GD2 / SHOWROOM) — blank for non-4S lines.
     put(['WAREHOUSE SUB','WAREHOUSE SUBCATEGORY','WH SUB'], it.whSub || '');
+    // Upmods furniture type (Bed / Sofa / Dining / Dining Chair / Others).
+    put(['UPMODS TYPE','UPMODS CATEGORY'], it.upmodsType || '');
     // After-sales service / issue tracking — order-level, written on every row so a
     // row scan (like delivery status) always finds it.
     put(['SERVICE FLAG','SERVICE REQUIRED','HAS SERVICE REQUEST'], o.serviceFlag ? 'Yes' : '');

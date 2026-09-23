@@ -1195,8 +1195,11 @@ function StockRibbon({syncedAt}) {
 function customerCopyItems(items) {
   const out = [], groupIndex = {};
   (items || []).forEach(it => {
-    const fam = modularFamilyOf(it);
-    if (!fam) { out.push(it); return; }
+    const baseFam = modularFamilyOf(it);
+    if (!baseFam) { out.push(it); return; }
+    // Upmods lines group per chosen type ("Upmods Bed", "Upmods Sofa" …).
+    const uType = baseFam.key === 'upmods' && it.upmodsType && it.upmodsType !== 'Others' ? it.upmodsType : '';
+    const fam = uType ? { key: baseFam.key + ':' + uType, label: baseFam.label + ' ' + uType } : baseFam;
     if (groupIndex[fam.key] === undefined) {
       groupIndex[fam.key] = out.length;
       out.push({ code:'', name:fam.label, qty:0, mrp:0, disc:'', unitPrice:0, total:0, _group:true, _grossMrp:0, _children:[] });
@@ -2262,8 +2265,16 @@ const MODULAR_FAMILIES = [
   { key:'kalista',    label:'Kalista',     test:s=>/kalista/i.test(s) },
   { key:'kreationx3', label:'Kreation X3', test:s=>/kreation\s*[-_]?\s*x\s*[-_]?\s*3/i.test(s) },
   { key:'kreationx2', label:'Kreation X2', test:s=>/kreation\s*[-_]?\s*x\s*[-_]?\s*2/i.test(s) },
-  { key:'upmods',     label:'Upmods Sofa', test:s=>/upmods/i.test(s) },
+  { key:'upmods',     label:'Upmods',      test:s=>/upmods/i.test(s) },
 ];
+// Upmods is a multi-category range (beds, sofas, dining, chairs …). Its price-list
+// category names say nothing reliable about the furniture, so the salesperson
+// picks the type per Upmods line from this list — nothing is assumed.
+const UPMODS_TYPES = ['Bed', 'Sofa', 'Dining', 'Dining Chair', 'Others'];
+function isUpmodsItem(it) {
+  const f = modularFamilyOf(it);
+  return !!f && f.key === 'upmods';
+}
 function modularFamilyOf(it) {
   const hay = [it.cat, it.item, it.name].filter(Boolean).join(' ');
   for (const f of MODULAR_FAMILIES) if (f.test(hay)) return f;
@@ -2276,10 +2287,10 @@ function isWardrobeItem(it) {
   const f = modularFamilyOf(it);
   return !!f && WARDROBE_FAMILY_KEYS.indexOf(f.key) >= 0;
 }
-// A sofa item — any item named "sofa" or a modular Upmods sofa.
+// A sofa item — any item named "sofa", or an Upmods item whose type was picked
+// as "Sofa". An Upmods item is never assumed to be a sofa.
 function isSofaItem(it) {
-  const f = modularFamilyOf(it);
-  if (f && f.key === 'upmods') return true;
+  if (isUpmodsItem(it)) return it.upmodsType === 'Sofa';
   return /sofa/i.test((it.name || '') + ' ' + (it.cat || '') + ' ' + (it.item || ''));
 }
 // A "Made To Order" item — the price list tags it (ITEM_GROUP / category / tab)
@@ -6521,7 +6532,7 @@ function OrderFormScreen({ctx, viewOnly}) {
   // Margin compares the pre-GST selling value (tax carved out) against pre-GST cost.
   const totalMargin = taxable - totalCost;
 
-  // A sofa (incl. Upmods modular sofa) or a modular wardrobe (Kalista /
+  // A sofa (incl. an Upmods item typed as Sofa) or a modular wardrobe (Kalista /
   // Kreation X2 / X3) in the cart makes its measurements mandatory.
   const hasSofa     = (o.items||[]).some(isSofaItem);
   const hasWardrobe = (o.items||[]).some(isWardrobeItem);
@@ -6638,6 +6649,7 @@ function OrderFormScreen({ctx, viewOnly}) {
     if(!o.purchasePattern||o.purchasePattern.length===0) add('customer','Select the purchase pattern');
     if(!o.purchasingFor) add('customer','Select what they are purchasing for');
     if(o.manualOrder && !o.date) add('customer','Set the Booking Date for the manual order');
+    (o.items||[]).forEach(it=>{ if(isUpmodsItem(it) && !it.upmodsType) add('items','Select the Upmods type (Bed / Sofa / Dining …) for '+(it.name||it.code||'item')); });
     if(!o.delivery) add('address','Delivery address is required');
     if(!o.pincode||!String(o.pincode).trim()) add('address','Pincode is required');
     else if(!/^\d{6}$/.test(String(o.pincode).trim())) add('address','Enter a valid 6-digit pincode');
@@ -6967,6 +6979,18 @@ function OrderFormScreen({ctx, viewOnly}) {
                     {it.discontinued&&<Pill tone="bad" size="sm">DISCONTINUED{it.discSince?' since '+it.discSince:''}</Pill>}
                   </div>
                   <div style={{fontSize:13,fontWeight:600,lineHeight:1.3}}>{it.name}</div>
+                  {isUpmodsItem(it)&&(
+                    <div style={{display:'flex',gap:8,marginTop:6,alignItems:'center',flexWrap:'wrap'}}>
+                      <span style={{fontSize:10,color:it.upmodsType?T.ink4:T.bad,fontWeight:700}}>UPMODS TYPE *</span>
+                      <select
+                        value={it.upmodsType||''}
+                        onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,upmodsType:v}:x)}));}}
+                        style={{border:`1.5px solid ${it.upmodsType?T.line:T.bad}`,borderRadius:4,padding:'3px 6px',fontSize:12,fontWeight:600,background:'#fff',color:T.ink}}>
+                        <option value="">Select…</option>
+                        {UPMODS_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </div>
+                  )}
                   {discPct>0&&gstUnit>0&&<div style={{fontSize:10,color:T.green,marginTop:2,fontWeight:700}}>You save ₹{Math.max(0,mrpIncl-gstUnit).toLocaleString('en-IN')} /unit <span style={{color:T.ink4,fontWeight:600}}>vs MRP (incl. GST)</span></div>}
                   {priv&&(()=>{const cplU=Number(it.cpl)||Number(it.mrp)||0;const sellEx=Math.round(curPrice);const m=sellEx-cplU;const mp=cplU>0?Math.round(m/cplU*100):0;return(
                     <div style={{fontSize:10,color:T.ink4,marginTop:2}}>CPL: ₹{cplU.toLocaleString('en-IN')} · Margin: <b style={{color:m>=0?T.green:T.bad}}>₹{m.toLocaleString('en-IN')}{cplU>0?` (${mp}%)`:''}</b> <span style={{opacity:.7}}>· pre-GST · mgr only</span></div>
