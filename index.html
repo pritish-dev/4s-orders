@@ -751,9 +751,9 @@ function hasManagerAccess(user) {
   return PRIVILEGED_ROLES.indexOf(normRole(user && user.role)) >= 0;
 }
 // Whether an order has been finalised — i.e. submitted and its PDF generated.
-// Only a submitted order is locked down for the sales team; a draft stays fully
-// editable by everyone until it is submitted. Admins can always edit everything.
-//   • orderStatus 'submitted' → finalised (locked, sales edits WON/receipts/delivery)
+// A draft saves directly for everyone. A submitted order is still editable by
+// everyone, but a non-admin's edit needs admin approval (see ORDER CHANGE APPROVAL).
+//   • orderStatus 'submitted' → finalised (non-admin edits go for admin approval)
 //   • orderStatus 'draft'     → still a draft (fully editable by everyone)
 //   • neither (legacy order saved before this lifecycle existed) → treat a saved
 //     order (it has an order no) as submitted, preserving the earlier behaviour.
@@ -763,6 +763,179 @@ function isOrderSubmitted(o) {
   if (s === 'submitted') return true;
   if (s === 'draft')     return false;
   return !!o.no;
+}
+
+// ─── ORDER CHANGE APPROVAL ──────────────────────────────────
+// Everyone can edit a submitted order, but a NON-admin's edit is sent to an
+// admin for approval instead of being saved straight away. The one exception
+// is the quick operational fields below (WON / SO No, money receipts or challan,
+// finance-payment details and delivery status): changing only these saves
+// directly, as before, so day-to-day updates are never held up. If an edit
+// touches anything else, the whole edit goes for approval.
+const QUICK_EDIT_KEYS = ['won','moneyReceipts','receiptNo','earnest','challanNo','challanDate',
+  'godrejReimbursement','godrejReimbursementDate','pineLabsCards','bajajEmi',
+  'deliveryStatus','deliveredItems','plannedDly','followUp','happyCode','happyCodeDate'];
+// Keys that are bookkeeping / derived and never count as a change.
+const DIFF_IGNORE_KEYS = ['clientId','_queuedAt','by','byName','totalWithTax','source','amt','status',
+  'orderStatus','no','internalNo','rows','wardrobeLength','wardrobeWidth','wardrobeHeight','items'];
+const ORDER_FIELD_LABELS = {
+  customer:'Customer name', phone:'Phone', alt:'Alt. phone', email:'E-mail', gstNumber:'Customer GST No.',
+  billing:'Billing address', delivery:'Delivery address', pincode:'Pincode', floor:'Floor', landmark:'Landmark',
+  liftAvailable:'Lift available', liftTypes:'Lift type', contactPersonName:'Delivery contact person',
+  contactNumber:'Delivery contact number', contactRemark:'Contact remark', customerCode:'Customer code',
+  poRef:'PO ref', orderDiscount:'Order discount %', plannedDly:'Planned delivery date', installNote:'Installation note',
+  paymentMode:'Payment mode', earnest:'Advance / amount 1', godrejReimbursement:'Godrej reimbursement',
+  godrejReimbursementDate:'Godrej reimbursement date', pineLabsCards:'Pine Labs card(s)', bajajEmi:'Bajaj EMI scheme',
+  happyCode:'Happy Code', happyCodeDate:'Happy Code date', slNo:'SI No', orderFormReceiptNo:'Receipt No',
+  receiptNo:'Money receipt no', moneyReceipts:'Money receipts', challanNo:'Challan No', challanDate:'Challan date',
+  deliveryStatus:'Delivery status', deliveredItems:'Delivered items', followUp:'Follow-up date', salesExec:'Salesperson',
+  won:'WON (Godrej SO No)', gifts:'Gifts', orderType:'Order type', dob:'Date of birth', anniversary:'Anniversary',
+  awareness:'Lead source', purchasePattern:'Purchase pattern', purchasingFor:'Purchasing for',
+  sofaWidth:'Sofa width (cm)', sofaHeight:'Sofa height (cm)', sofaDepth:'Sofa depth (cm)',
+  wardrobes:'Modular furniture measurements', rooms:'Room measurements', staircaseWidth:'Staircase width (cm)',
+  landingLength:'Landing length (cm)', landingWidth:'Landing width (cm)', landingDepth:'Landing depth (cm)',
+  entryDoorWidth:'Entry door width (cm)', entryDoorHeight:'Entry door height (cm)', date:'Booking date',
+  manualOrder:'Manual order', serviceFlag:'Service request', serviceIssue:'Service issue', serviceStatus:'Service status',
+};
+
+// A value reduced to a comparable string: blanks / false / empty arrays are all
+// "empty", numbers compare by value, and array entries that are entirely blank
+// (e.g. an unused money-receipt row) are dropped.
+function _isBlankVal(v) {
+  if (v == null || v === false) return true;
+  if (typeof v === 'string') return v.trim() === '';
+  if (Array.isArray(v)) return v.every(_isBlankVal);
+  if (typeof v === 'object') return Object.keys(v).every(k => k === 'emi' ? (v[k] == null || v[k] === '' || v[k] === 'No EMI') : _isBlankVal(v[k]));
+  return false;
+}
+function _cmpVal(v) {
+  if (_isBlankVal(v)) return '';
+  if (typeof v === 'number') return String(Math.round(v * 100) / 100);
+  if (typeof v === 'string') { const t = v.trim(); return /^-?\d+(\.\d+)?$/.test(t) ? String(Math.round(parseFloat(t) * 100) / 100) : t; }
+  if (Array.isArray(v)) return JSON.stringify(v.filter(x => !_isBlankVal(x)).map(_cmpVal));
+  if (typeof v === 'object') { const o = {}; Object.keys(v).sort().forEach(k => { if (!_isBlankVal(v[k])) o[k] = _cmpVal(v[k]); }); return JSON.stringify(o); }
+  return String(v);
+}
+// Bring an order into the same shape the edit form works with (legacy single
+// wardrobe → wardrobes[]), so an untouched order never shows a phantom change.
+function _orderForDiff(o) {
+  o = o || {};
+  if (!Array.isArray(o.wardrobes) && (o.wardrobeLength || o.wardrobeWidth || o.wardrobeHeight))
+    return { ...o, wardrobes: [{ name:'', length:o.wardrobeLength||'', width:o.wardrobeWidth||'', height:o.wardrobeHeight||'' }] };
+  return o;
+}
+// The parts of a line item that matter for approval.
+function _itemView(it) {
+  it = it || {};
+  return { code: it.code || '', name: it.name || '', qty: Number(it.qty) || 0, disc: it.disc || '',
+    sell: gstInclUnit(it), whTag: it.whTag || '', whSub: _isFourS(it.whTag) ? (it.whSub || '') : '',
+    upmodsType: it.upmodsType || '', ageing: !!it.ageing, sweetner: !!it.sweetner, other: !!it.other,
+    schemeCode: it.other ? (it.schemeCode || '') : '' };
+}
+function _itemsCmp(items) { return JSON.stringify((items || []).map(it => _cmpVal(_itemView(it)))); }
+
+// Top-level keys whose value differs between two versions of an order
+// ('items' is reported as one key when any line item changed).
+function orderChangedKeys(before, after) {
+  const b = _orderForDiff(before), a = _orderForDiff(after);
+  const keys = new Set([...Object.keys(b), ...Object.keys(a)]);
+  const out = [];
+  keys.forEach(k => {
+    if (DIFF_IGNORE_KEYS.indexOf(k) >= 0) return;
+    let bv = b[k], av = a[k];
+    if (k === 'salesExec') { bv = String(bv || '').trim().toUpperCase(); av = String(av || '').trim().toUpperCase(); }
+    if (_cmpVal(bv) !== _cmpVal(av)) out.push(k);
+  });
+  if (_itemsCmp(b.items) !== _itemsCmp(a.items)) out.push('items');
+  return out;
+}
+// True when a change needs admin approval (it touches a non-quick field).
+function changeNeedsApproval(keys) { return (keys || []).some(k => QUICK_EDIT_KEYS.indexOf(k) < 0); }
+
+// Human-readable value for the approval screen.
+function fmtChangeVal(k, v) {
+  if (_isBlankVal(v)) return '—';
+  const rs = n => '₹' + Math.round(Number(n) || 0).toLocaleString('en-IN');
+  const nonBlank = arr => (Array.isArray(arr) ? arr : []).filter(x => !_isBlankVal(x));
+  if (k === 'moneyReceipts') return nonBlank(v).map((m, i) => '#' + (i + 1) + ' ' + [m.no, m.date, m.amt ? rs(m.amt) : ''].filter(Boolean).join(' · ')).join('\n');
+  if (k === 'gifts') return nonBlank(v).map(g => (g.item || '?') + ' ×' + (g.qty || 1)).join('\n');
+  if (k === 'wardrobes') return nonBlank(v).map((w, i) => (w.name || 'Modular ' + (i + 1)) + ': ' + [w.length, w.width, w.height].map(x => x || '?').join(' × ') + ' cm').join('\n');
+  if (k === 'rooms') return nonBlank(v).map((r, i) => (r.name || 'Room ' + (i + 1)) + ': ' + [r.width, r.height, r.depth].map(x => x || '?').join(' × ') + ' cm').join('\n');
+  if (k === 'pineLabsCards') return nonBlank(v).map(c => [c.payee, pineCardName(c), c.emi, c.amount ? rs(c.amount) : ''].filter(Boolean).join(' · ')).join('\n');
+  if (k === 'deliveredItems') return nonBlank(v).map(d => (d && typeof d === 'object') ? (d.code || ('item ' + ((d.i || 0) + 1))) : ('item ' + (Number(d) + 1))).join(', ');
+  if (Array.isArray(v)) return nonBlank(v).map(x => typeof x === 'object' ? fmtChangeVal('', x) : String(x)).join(', ');
+  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+  if (typeof v === 'object') return Object.keys(v).filter(x => !_isBlankVal(v[x])).map(x => x + ': ' + v[x]).join(', ');
+  return String(v);
+}
+function _whLabel(it) { return (it.whTag || '—') + (it.whSub ? ' · ' + it.whSub : ''); }
+
+// Everything that changed between two versions of an order, as rows for the
+// approval screen: { group, label, before, after, kind:'changed'|'added'|'removed', fourS }.
+function orderChangeRows(before, after) {
+  const b = _orderForDiff(before), a = _orderForDiff(after);
+  const rows = [];
+  orderChangedKeys(b, a).forEach(k => {
+    if (k === 'items') return;
+    rows.push({ group:'Order details', label: ORDER_FIELD_LABELS[k] || k, before: fmtChangeVal(k, b[k]), after: fmtChangeVal(k, a[k]), kind:'changed' });
+  });
+  // Line items: pair lines by item code (in order), so an edited line shows its
+  // field-by-field changes and extra / missing lines show as added / removed.
+  const bi = (b.items || []).map(_itemView), ai = (a.items || []).map(_itemView);
+  const used = new Set();
+  const rs = n => '₹' + Math.round(Number(n) || 0).toLocaleString('en-IN');
+  const lineTxt = it => it.qty + ' × ' + rs(it.sell) + ' · ' + _whLabel(it);
+  const title = it => (it.code ? it.code + ' — ' : '') + (it.name || 'Item');
+  ai.forEach(it => {
+    let j = bi.findIndex((x, n) => !used.has(n) && x.code === it.code && x.whTag === it.whTag);
+    if (j < 0) j = bi.findIndex((x, n) => !used.has(n) && x.code === it.code);
+    if (j < 0) { rows.push({ group:'Items', label: title(it), before:'—', after: lineTxt(it), kind:'added', fourS:_isFourS(it.whTag) }); return; }
+    used.add(j);
+    const old = bi[j];
+    const f = (lbl, x, y) => { if (_cmpVal(x) !== _cmpVal(y)) rows.push({ group:'Items', label: title(it) + ' · ' + lbl, before: _isBlankVal(x) ? '—' : String(x), after: _isBlankVal(y) ? '—' : String(y), kind:'changed', fourS:_isFourS(it.whTag) }); };
+    f('Qty', old.qty, it.qty);
+    f('Warehouse', _whLabel(old), _whLabel(it));
+    f('Disc %', old.disc, it.disc);
+    f('Selling price (incl. GST)', rs(old.sell), rs(it.sell));
+    f('Upmods type', old.upmodsType, it.upmodsType);
+    f('Scheme', ['ageing','sweetner','other'].filter(s => old[s]).join(', ') + (old.schemeCode ? ' (' + old.schemeCode + ')' : ''),
+                ['ageing','sweetner','other'].filter(s => it[s]).join(', ') + (it.schemeCode ? ' (' + it.schemeCode + ')' : ''));
+    f('Name', old.name, it.name);
+  });
+  bi.forEach((it, n) => { if (!used.has(n)) rows.push({ group:'Items', label: title(it), before: lineTxt(it), after:'—', kind:'removed', fourS:_isFourS(it.whTag) }); });
+  const tb = orderTotals(b).total, ta = orderTotals(a).total;
+  if (Math.round(tb) !== Math.round(ta)) rows.push({ group:'Totals', label:'Order total (incl. GST)', before: rs(tb), after: rs(ta), kind:'changed' });
+  return rows;
+}
+// One-line summary of a change ("Customer name, Items, Floor") for lists / the sheet.
+function orderChangeSummary(before, after) {
+  return orderChangedKeys(before, after).map(k => k === 'items' ? 'Items' : (ORDER_FIELD_LABELS[k] || k)).join(', ');
+}
+// Strip bulky, volatile per-item data (stock snapshots) before a snapshot is sent
+// to the backend, keeping the request well inside a sheet cell.
+function orderSnapshot(o) {
+  if (!o) return o;
+  const { _queuedAt, ...rest } = o;
+  return { ...rest, items: (o.items || []).map(it => { const { stock, whOptions, ...x } = it || {}; return x; }) };
+}
+// The order an approval writes: the request's changed fields applied onto the
+// order's CURRENT state, so anything updated since the request (a delivery
+// status, a WON) that the requester did not touch is kept.
+function applyOrderChange(current, before, after) {
+  const merged = { ...current };
+  orderChangedKeys(before, after).forEach(k => { merged[k] = after[k]; });
+  if (orderChangedKeys(before, after).indexOf('wardrobes') >= 0) {
+    const w0 = (after.wardrobes || [])[0] || {};
+    merged.wardrobeLength = w0.length || ''; merged.wardrobeWidth = w0.width || ''; merged.wardrobeHeight = w0.height || '';
+  }
+  merged.orderStatus = 'submitted';
+  return merged;
+}
+// Pending change requests on one order.
+function pendingChangesFor(changeRequests, o) {
+  if (!o) return [];
+  return (changeRequests || []).filter(r => r && r.status === 'pending' &&
+    ((o.no && r.orderNo === o.no) || (o.internalNo && Number(r.internalNo) === Number(o.internalNo))));
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1151,10 +1324,22 @@ function StockRibbon({syncedAt}) {
 // single line per family — used for the CUSTOMER copy of the PDF only. The
 // summed line total is preserved, so order totals never change.
 function customerCopyItems(items) {
-  const out = [], groupIndex = {};
+  const out = [], groupIndex = {}, lineIndex = {};
   (items || []).forEach(it => {
     const baseFam = modularFamilyOf(it);
-    if (!baseFam) { out.push(it); return; }
+    if (!baseFam) {
+      // An item split across warehouses is several lines with the same code and
+      // price — the customer sees it as one line with the combined quantity.
+      const k = it.code ? String(it.code) + '|' + gstInclUnit(it) + '|' + (it.disc || '') : '';
+      if (k && lineIndex[k] !== undefined) {
+        const m = out[lineIndex[k]];
+        m.qty = (Number(m.qty) || 0) + (Number(it.qty) || 0);
+        m.total = (Number(m.total) || 0) + (Number(it.total) || 0);
+        return;
+      }
+      if (k) lineIndex[k] = out.length;
+      out.push(k ? { ...it } : it); return;
+    }
     // Upmods lines group per chosen type ("Upmods Bed", "Upmods Sofa" …).
     const uType = baseFam.key === 'upmods' && it.upmodsType && it.upmodsType !== 'Others' ? it.upmodsType : '';
     const fam = uType ? { key: baseFam.key + ':' + uType, label: baseFam.label + ' ' + uType } : baseFam;
@@ -2770,6 +2955,8 @@ function App() {
   // cache so the Offer buttons render disabled instantly, then reconciled with the
   // backend (so the lock holds across every device, not just the one that sent it).
   const [offersSent,   setOffersSent]   = useState(() => { try { return JSON.parse(localStorage.getItem('4s_offers_sent')||'{}'); } catch { return {}; } });
+  // Order change requests awaiting / past admin approval (see ORDER CHANGE APPROVAL).
+  const [changeRequests, setChangeRequests] = useState([]);
 
   const showToast = (msg,type='ok') => setToast({msg,type});
   // "New order placed" celebration overlay — set by doSaveOrder on a first-time
@@ -2871,6 +3058,7 @@ function App() {
     loadLeads({ silent: true });
     loadContactTags({ silent: true });
     loadOffersSent();
+    loadChangeRequests();
   }, [user]);
 
   // Re-sync shared data every time the app is reopened / brought to the
@@ -2891,6 +3079,7 @@ function App() {
       loadMis({ silent: true });
       loadOrders();
       loadOffersSent();
+      loadChangeRequests();
       loadPriceListItems(false, true)   // skip local cache, use shared server cache
         .then(pi => {
           if (pi && pi.length) {
@@ -3452,6 +3641,53 @@ function App() {
     finally { setLoading(false); }
   }
 
+  // ── Order change approval ─────────────────────────────────────────────────
+  async function loadChangeRequests() {
+    try {
+      const res = await apiGet('changeRequests', {}, 30000, 1);
+      if (res && res.ok) setChangeRequests(res.requests || []);
+    } catch(e) { /* keep the last list */ }
+  }
+  // Non-admin edit of a submitted order → file it for admin approval.
+  async function doRequestOrderChange(before, after) {
+    setLoading(true);
+    try {
+      const b = orderSnapshot(before), a = orderSnapshot(after);
+      const res = await apiPost({ action:'requestOrderChange', orderNo: a.no || b.no || '', internalNo: a.internalNo || b.internalNo || '',
+        customer: a.customer || b.customer || '', byName: user?.name, summary: orderChangeSummary(b, a), before: b, after: a });
+      if (res && res.ok) {
+        showToast(res.replaced ? 'Updated change sent for admin approval ✓' : 'Change sent for admin approval ✓');
+        loadChangeRequests();
+        return true;
+      }
+      showToast((res && res.error) || 'Could not send the change for approval','bad'); return false;
+    } catch(e) { showToast('No internet — the change was not sent. Try again when online.','bad'); return false; }
+    finally { setLoading(false); }
+  }
+  // Admin: approve (apply the change onto the order's current state) or reject.
+  async function doReviewOrderChange(req, decision, note) {
+    if (normRole(user?.role) !== 'admin') { showToast('Only an admin can approve order changes','bad'); return false; }
+    let order = null;
+    if (decision === 'approve') {
+      const cur = (orders||[]).find(x => x && ((req.orderNo && x.no === req.orderNo) || (req.internalNo && Number(x.internalNo) === Number(req.internalNo))));
+      const current = cur ? { ...BLANK_ORDER(), ...normalizeLoadedOrder(cur) } : req.after;
+      const merged = applyOrderChange(current, req.before || {}, req.after || {});
+      order = { ...merged, totalWithTax: orderTotals(merged).total, by: user?.code,
+        byName: (user?.name || '') + ' (approved change by ' + (req.requestedByName || req.requestedBy || '?') + ')' };
+    }
+    setLoading(true);
+    try {
+      const res = await apiPost({ action:'reviewOrderChange', id: req.id, decision, note: note || '', order, byName: user?.name });
+      if (res && res.ok) {
+        showToast(decision === 'approve' ? 'Change approved & saved to order ✓' : 'Change rejected');
+        loadChangeRequests(); loadOrders();
+        return true;
+      }
+      showToast((res && res.error) || 'Could not update the change request','bad'); return false;
+    } catch(e) { showToast(e.message,'bad'); return false; }
+    finally { setLoading(false); }
+  }
+
   function doSignOut() {
     localStorage.removeItem('4s_user');
     localStorage.removeItem('4s_token');
@@ -3578,7 +3814,8 @@ function App() {
     leads, leadsLoading, loadLeads, doAddLead, doEditLead, doDeleteLead,
     gmbPhones, ldmPhones, contactTagsLoading, loadContactTags,
     offersSent, loadOffersSent, doMarkOfferSent, doResetOffersSent,
-    offerEndDate, doSaveOfferConfig };
+    offerEndDate, doSaveOfferConfig,
+    changeRequests, loadChangeRequests, doRequestOrderChange, doReviewOrderChange };
 
   const screens = {
     loading: <LoadingScreen/>,
@@ -3602,6 +3839,7 @@ function App() {
     leads:   <LeadsScreen ctx={ctx}/>,
     mycustomers: <MyCustomerScreen ctx={ctx}/>,
     offerzone: <OfferZoneScreen ctx={ctx}/>,
+    approvals: <ApprovalsScreen ctx={ctx}/>,
   };
 
   return (
@@ -5593,6 +5831,17 @@ function HomeScreen({ctx}) {
             <button onClick={()=>{ if(!window.confirm('Discard the unsaved draft?'))return; try{localStorage.removeItem('4s_draft');}catch(e){} ctx.setOrder(BLANK_ORDER()); }} title="Discard draft" style={{flexShrink:0,width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.trash(T.ink4,14)}</button>
           </div>
         ); })()}
+        {/* Order changes waiting for admin approval — admins see every pending
+            request; everyone else sees the ones they sent. */}
+        {(()=>{ const me=String(user?.code||user?.name||'').toLowerCase(); const mine=(ctx.changeRequests||[]).filter(r=>r.status==='pending' && (role==='admin' || String(r.requestedBy||'').toLowerCase()===me)); if(!mine.length) return null; return (
+          <div onClick={()=>nav('approvals')} style={{margin:'0 18px 12px',padding:'11px 14px',background:T.warnSoft,border:'1.5px solid '+T.warn,borderRadius:8,display:'flex',alignItems:'center',gap:10,cursor:'pointer'}}>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:12,fontWeight:800,color:T.warn}}>{role==='admin' ? `${mine.length} order change${mine.length>1?'s':''} waiting for your approval` : `${mine.length} order change${mine.length>1?'s':''} waiting for admin approval`}</div>
+              <div style={{fontSize:11,color:T.ink3,marginTop:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{mine.slice(0,3).map(r=>(r.orderNo||'')+' · '+(r.customer||'')).join('  |  ')}</div>
+            </div>
+            <span style={{flexShrink:0,height:32,padding:'0 14px',borderRadius:6,background:T.warn,color:'#fff',fontSize:12,fontWeight:700,display:'inline-flex',alignItems:'center'}}>{role==='admin'?'Review':'View'}</span>
+          </div>
+        ); })()}
       </div>
 
       {/* Coloured menu — the heart of the home screen */}
@@ -6368,11 +6617,15 @@ function OrderFormScreen({ctx, viewOnly}) {
   }
   // Admins can permanently delete an already-saved order straight from the edit screen.
   const isAdmin = normRole(user?.role) === 'admin';
-  // A DRAFT stays fully editable by everyone until it is submitted. Once the
-  // order is submitted (its PDF has been generated), the sales team can only EDIT
-  // its WON (Godrej SO No), money-receipt no/date and delivery status. Admins may
-  // always edit everything; a draft or brand-new order is fully editable.
-  const restricted = isOrderSubmitted(o) && !isAdmin;
+  // A DRAFT or brand-new order is fully editable by everyone and saves directly.
+  // A SUBMITTED order is also fully editable by everyone, but a non-admin's edit
+  // needs admin approval: changing only the quick fields (WON, money receipts /
+  // challan, delivery status) saves straight away; anything else is sent to an
+  // admin, who sees every change highlighted before approving it. Admins' edits
+  // always save directly.
+  const needsApproval = isOrderSubmitted(o) && !isAdmin && !!(o.no || o.internalNo);
+  const myPending = needsApproval ? pendingChangesFor(ctx.changeRequests, o) : [];
+  const [warehouseSplit,setWarehouseSplit] = React.useState(null);   // index of the item being split
   // Measurement entry unit — 'cm' (default) or 'ft' (feet + inches). Only the
   // input changes; every value is stored in cm on the order and the Google sheet.
   const [measUnit,setMeasUnit] = React.useState('cm');
@@ -6579,6 +6832,20 @@ function OrderFormScreen({ctx, viewOnly}) {
   },[hasWardrobe,wardrobeItemCount]);
 
   function removeItem(idx) { setOrder(prev=>({...prev,items:prev.items.filter((_,i)=>i!==idx)})); }
+  // Split one line across warehouses: parts = [{wh, sub, qty}] (qty > 0, summing
+  // to the line's qty). The line is replaced by one line per warehouse, each with
+  // its own qty and delivery warehouse; price, discount and schemes are kept.
+  function splitItemAcrossWarehouses(idx, parts) {
+    setOrder(prev=>{
+      const items = prev.items||[];
+      const it = items[idx]; if(!it) return prev;
+      const baseP = it.mrp||it.cpl||0;
+      const up = it.unitPrice!==undefined ? it.unitPrice : baseP*(1-(parseFloat(it.disc)||0)/100);
+      const lines = parts.filter(p=>p.qty>0).map(p=>({...it, qty:p.qty, unitPrice:up, total:up*p.qty, whTag:p.wh, whSub:_isFourS(p.wh)?(p.sub||'GD1'):''}));
+      if(!lines.length) return prev;
+      return {...prev, items:[...items.slice(0,idx), ...lines, ...items.slice(idx+1)]};
+    });
+  }
   function toggleScheme(idx,key) { setOrder(prev=>({...prev,items:prev.items.map((it,i)=>i===idx?{...it,[key]:!it[key]}:it)})); }
   function togglePattern(p) { setOrder(prev=>{ const cur=prev.purchasePattern||[]; return {...prev,purchasePattern: cur.includes(p)?cur.filter(x=>x!==p):[...cur,p]}; }); }
   function updateItemQty(idx,delta) {
@@ -6662,6 +6929,7 @@ function OrderFormScreen({ctx, viewOnly}) {
       scrollToSec(errs[0].sec);
       return;
     }
+    if(needsApproval) return handleSubmitForApproval();
     // Lead Source is now the awareness dropdown — keep the OPS "Source" column in sync.
     // This is the finalise/submit path: mark the order SUBMITTED so it locks down
     // for the sales team (only WON / money receipts / delivery stay editable).
@@ -6675,6 +6943,25 @@ function OrderFormScreen({ctx, viewOnly}) {
       if(!wasAlreadyPlaced) { try { ctx.showCelebration({no:saved.no, customer:saved.customer, amt:orderTotals(saved).total}); } catch(e){} }
       nav('pdf');
     }
+  }
+
+  // Non-admin edit of a submitted order. Compare against the order as it is saved
+  // on the server: quick-field-only edits save directly; anything else is sent
+  // to an admin for approval (the order itself stays unchanged until approved).
+  async function handleSubmitForApproval() {
+    const live = (ctx.orders||[]).find(x => x && ((o.no && x.no === o.no) || (o.internalNo && Number(x.internalNo) === Number(o.internalNo))));
+    const before = live ? {...BLANK_ORDER(), ...normalizeLoadedOrder(live)} : null;
+    if(!before){ ctx.showToast('Could not load the saved order to compare — refresh Orders and try again','bad'); return; }
+    const after = withMeasurements({...o, orderStatus:'submitted', salesExec:(o.salesExec||user?.name||'').trim().toUpperCase(), source:o.awareness||o.source||''});
+    const keys = orderChangedKeys(before, after);
+    if(!keys.length){ ctx.showToast('No changes to save','warn'); return; }
+    if(!changeNeedsApproval(keys)){
+      const saved = await doSaveOrder(after);
+      if(saved){ setOrder(saved); ctx.showToast('Order updated ✓','ok'); nav('history'); }
+      return;
+    }
+    const ok = await ctx.doRequestOrderChange(before, after);
+    if(ok){ try{localStorage.removeItem('4s_draft');}catch(e){} setOrder(BLANK_ORDER()); nav('history'); }
   }
 
   // Mirror the first modular-furniture block onto the legacy scalar wardrobe
@@ -6697,85 +6984,6 @@ function OrderFormScreen({ctx, viewOnly}) {
     // downgrade an already-submitted order: the backend guards against that too).
     const saved = await doSaveOrder(withMeasurements({...o,orderStatus:isOrderSubmitted(o)?'submitted':'draft',salesExec:(o.salesExec||user?.name||'').trim().toUpperCase(),source:o.awareness||o.source||'',followUp:o.followUp||followUpFromDelivery(o.plannedDly)}));
     if(saved) { setOrder(saved); ctx.showToast('Draft saved — you can reopen it from Orders','ok'); }
-  }
-
-  // Sales-team restricted edit: only WON, money receipts + dates, and delivery
-  // status are editable. Everything else stays read-only (admins get the full form).
-  async function handleRestrictedSave(){
-    const saved = await doSaveOrder(withMeasurements({...o,salesExec:(o.salesExec||user?.name||'').trim().toUpperCase()}));
-    if(saved){ setOrder(saved); ctx.showToast('Order updated ✓','ok'); nav('history'); }
-  }
-  const setMRestricted=(i,field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:''},{no:'',date:''},{no:'',date:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; });
-  // View-only mode (opened from a "Recent order" tap on Home) shows the full order
-  // form as a non-editable, scrollable page — it bypasses the sales-team restricted
-  // editor below and renders the complete form with every control disabled.
-  if(restricted && !viewOnly){
-    return (
-      <div className="screen">
-        <div style={{display:'flex',alignItems:'center',gap:8,padding:'10px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,flexShrink:0}}>
-          <button onClick={back} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
-          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.home(T.ink2,18)}</button>
-          <div>
-            <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>Update order</div>
-            <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono}}>{o.no}</div>
-          </div>
-        </div>
-        <div className="scroll">
-          {/* Read-only order summary */}
-          <div style={{padding:'12px 14px',background:'#fff',borderBottom:`1px solid ${T.line}`}}>
-            <div style={{fontSize:16,fontWeight:700}}>{o.customer||'—'}</div>
-            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{o.phone||''} · {o.date||''}</div>
-            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>Order No (Sl / Receipt): {(o.slNo||o.internalNo||'—')} / {(o.orderFormReceiptNo||o.internalNo||'—')}</div>
-          </div>
-          <div style={{padding:'9px 14px',background:T.warnSoft,color:T.warn,fontSize:11,fontWeight:600,lineHeight:1.5}}>
-            Sales access — you can update the <b>WON (Godrej SO No)</b>, <b>{isB2B(o)?'Challan No & date':'Money Receipt No & date'}</b> and the <b>Delivery Status</b>. Other fields can be changed by an admin.
-          </div>
-          <SectionHead n="01" label="Godrej SO / WON"/>
-          <Field label="WON (Godrej SO No)" value={o.won} onChange={setWon} mono hint="Godrej SO / WON number — add or update it here"/>
-          <SectionHead n="02" label={isB2B(o)?'Challan':(financeSchemeOf(o.paymentMode)?'Finance Payment':'Money Receipt')}/>
-          {isB2B(o)
-            ? <ChallanFields o={o} setOrder={setOrder}/>
-            : financeSchemeOf(o.paymentMode)
-            ? <FinancePaymentFields o={o} setOrder={setOrder}/>
-            : [0,1,2].map(i=>{ const mr=(o.moneyReceipts&&o.moneyReceipts[i])||{no:'',date:'',amt:''}; return (
-            <div key={i} style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
-              <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
-                <Field label={`Money Receipt No ${i+1}`} value={mr.no} onChange={v=>setMRestricted(i,'no',v)} mono/>
-              </div>
-              <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
-                <Field label={`Date ${i+1}`} value={mr.date} onChange={v=>setMRestricted(i,'date',v)} mono type="date"/>
-              </div>
-              <div style={{flex:1}}>
-                <Field label={`Amount ${i+1}`} value={i===0?o.earnest:mr.amt} onChange={v=>i===0?setF('earnest',v):setMRestricted(i,'amt',v)} mono type="number" hint={i===0?'Advance at booking':'Later payment'}/>
-              </div>
-            </div>
-          );})}
-          {(()=>{ const {received,balance}=orderReceived(o); return (
-            <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12}}>
-              <span style={{color:T.ink3,fontWeight:600}}>Received so far <b style={{fontFamily:T.mono,color:T.ink}}>₹{received.toLocaleString('en-IN')}</b></span>
-              <span style={{color:balance>0?T.bad:T.ok,fontWeight:700}}>{balance>0?`Balance ₹${balance.toLocaleString('en-IN')}`:'Paid in full ✓'}</span>
-            </div>
-          );})()}
-          <SectionHead n="03" label="Delivery"/>
-          <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
-            <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Delivery Status</div>
-            <select value={o.deliveryStatus||'Pending'} onChange={e=>handleDeliveryChange(e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
-              {DELIVERY_STATUSES.map(s=><option key={s}>{s}</option>)}
-            </select>
-            <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Order is Completed only when "Installation Done".</div>
-            {/partial/i.test(o.deliveryStatus||'') && <PartialDeliverySummary order={o} onEdit={()=>setPartialPicker(true)}/>}
-          </div>
-          <div style={{height:20}}/>
-        </div>
-        <div style={{display:'flex',gap:8,padding:'10px 14px',background:'#fff',borderTop:`1px solid ${T.line}`,flexShrink:0}}>
-          <Btn onClick={()=>{ setOrder(BLANK_ORDER()); nav('history'); }}>Cancel</Btn>
-          <Btn primary full onClick={handleRestrictedSave}>Save Changes</Btn>
-        </div>
-        {partialPicker && <PartialDeliveryModal order={o} onCancel={()=>setPartialPicker(false)} onConfirm={confirmPartialDelivery}/>}
-        {reschedulePicker && <RescheduleModal order={o} onCancel={()=>setReschedulePicker(false)} onConfirm={confirmReschedule}/>}
-        {happyPrompt && <HappyCodeModal title="Happy Code" subtitle={(o.no||'')+' · '+(o.customer||'')} note='A Happy Code is required to mark this order "Installation Done" (Completed).' confirmLabel="Mark Installed" onCancel={()=>setHappyPrompt(false)} onConfirm={confirmInstallHappy}/>}
-      </div>
-    );
   }
 
   // Live validation state drives the step progress bar and the save summary.
@@ -6806,6 +7014,20 @@ function OrderFormScreen({ctx, viewOnly}) {
         </div>
       </div>
       <StockRibbon syncedAt={ctx.syncedAt}/>
+      {needsApproval && !viewOnly && (
+        <div style={{flexShrink:0,padding:'9px 14px',background:T.warnSoft,borderBottom:'1px solid #e6cc95',color:T.warn,fontSize:11,fontWeight:600,lineHeight:1.5}}>
+          This order is submitted — your changes need <b>admin approval</b> before they are saved. Updating only the <b>WON</b>, <b>{isB2B(o)?'challan':'money receipts'}</b> or <b>delivery status</b> saves straight away.
+          {myPending.length>0 && (
+            <div style={{marginTop:6,paddingTop:6,borderTop:'1px dashed #e6cc95',color:T.ink2}}>
+              ⏳ {myPending.length} change{myPending.length>1?'s':''} already waiting for approval ({myPending.map(r=>r.requestedByName||r.requestedBy).join(', ')}).
+              {myPending.some(r=>String(r.requestedBy||'').toLowerCase()===String(user?.code||user?.name||'').toLowerCase() && r.after) && (
+                <button onClick={()=>{ const mine=myPending.find(r=>String(r.requestedBy||'').toLowerCase()===String(user?.code||user?.name||'').toLowerCase() && r.after); if(mine) setOrder(prev=>({...prev,...mine.after,no:prev.no,internalNo:prev.internalNo,clientId:prev.clientId})); }}
+                  style={{marginLeft:6,padding:'2px 8px',borderRadius:4,border:`1px solid ${T.warn}`,background:'#fff',color:T.warn,fontSize:11,fontWeight:700,cursor:'pointer'}}>Load my pending changes</button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {/* Step progress — a tap jumps to that section; a filled dot means every
           required field in it is done. Purely a guide; nothing is gated on it.
           Hidden in view-only mode (nothing to fill in). */}
@@ -7060,6 +7282,14 @@ function OrderFormScreen({ctx, viewOnly}) {
                         </select>
                       </>}
                       <span style={{fontSize:9,color:T.ink4}}>{isFourS?'4S sub-category':'pick delivery warehouse'}</span>
+                      {/* More than one unit → the units can ship from different
+                          warehouses (e.g. 2 from KB + 1 from 4S). Opens a picker that
+                          asks how many come from each; the line is then split into
+                          one line per warehouse (4S lines stay highlighted). */}
+                      {(Number(it.qty)||0)>1 && (
+                        <button type="button" onClick={()=>setWarehouseSplit(i)}
+                          style={{border:`1px dashed ${T.green}`,borderRadius:4,padding:'3px 8px',fontSize:11,fontWeight:700,color:T.green,background:'#fff',cursor:'pointer'}}>+ Multiple warehouses</button>
+                      )}
                     </div>
                     {/* 4S STOCK availability line (item-code lookup). */}
                     <div style={{marginTop:5,fontSize:10.5,display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
@@ -7393,11 +7623,70 @@ function OrderFormScreen({ctx, viewOnly}) {
           </div>
         : <div style={{display:'flex',gap:8,padding:'10px 14px',background:'#fff',borderTop:`1px solid ${T.line}`,flexShrink:0}}>
             <Btn onClick={()=>{ if((o.items&&o.items.length)&&!window.confirm('Discard changes to this order?'))return; try{localStorage.removeItem('4s_draft');}catch{} setOrder(BLANK_ORDER()); nav('home'); }}>Discard</Btn>
-            <Btn disabled={ctx.loading} onClick={handleSaveDraft}>Save Draft</Btn>
-            <Btn primary full disabled={ctx.loading} onClick={handleSave}>Save & PDF →</Btn>
+            {!needsApproval && <Btn disabled={ctx.loading} onClick={handleSaveDraft}>Save Draft</Btn>}
+            <Btn primary full disabled={ctx.loading} onClick={handleSave}>{needsApproval?'Submit changes →':'Save & PDF →'}</Btn>
           </div>}
       {partialPicker && <PartialDeliveryModal order={o} onCancel={()=>setPartialPicker(false)} onConfirm={confirmPartialDelivery}/>}
+      {reschedulePicker && <RescheduleModal order={o} onCancel={()=>setReschedulePicker(false)} onConfirm={confirmReschedule}/>}
+      {warehouseSplit!=null && (o.items||[])[warehouseSplit] && <WarehouseSplitModal item={o.items[warehouseSplit]} fourS={ctx.fourSByCode[String(o.items[warehouseSplit].code||'').toUpperCase().trim()]} onCancel={()=>setWarehouseSplit(null)} onConfirm={parts=>{ splitItemAcrossWarehouses(warehouseSplit,parts); setWarehouseSplit(null); }}/>}
       {happyPrompt && <HappyCodeModal title="Happy Code" subtitle={(o.no||'')+' · '+(o.customer||'')} note='A Happy Code is required to mark this order "Installation Done" (Completed).' confirmLabel="Mark Installed" onCancel={()=>setHappyPrompt(false)} onConfirm={confirmInstallHappy}/>}
+    </div>
+  );
+}
+
+// Ask how many units of a multi-quantity item ship from each warehouse (34S / KB
+// / 4S). The counts must add up to the item's quantity; at least two warehouses
+// must get units for it to be a split. 4S units also pick their location
+// (GD1 / GD2 / SHOWROOM).
+function WarehouseSplitModal({item, fourS, onCancel, onConfirm}) {
+  const total = Number(item.qty)||0;
+  const WHS = ['34S','KB','4S'];
+  const label = w => w==='KB'?'KB (ZBF11T)':w==='34S'?'34S (ZBF34S)':'4S';
+  const fsStock = fourS && Array.isArray(fourS.stock) ? fourS.stock : [];
+  const fsDefaultSub = (fsStock.filter(x=>(Number(x.q)||0)>0)[0]||{}).b || 'GD1';
+  const cur = item.whTag || '34S';
+  const [qty,setQty] = React.useState(()=>{ const q={'34S':0,KB:0,'4S':0}; q[WHS.indexOf(cur)>=0?cur:'34S']=total; return q; });
+  const [sub,setSub] = React.useState(_isFourS(cur)&&item.whSub ? item.whSub : fsDefaultSub);
+  const used = WHS.reduce((t,w)=>t+(qty[w]||0),0);
+  const left = total - used;
+  const nWh = WHS.filter(w=>qty[w]>0).length;
+  const ok = left===0 && nWh>=2;
+  const step = (w,d) => setQty(p=>{ const sum=WHS.reduce((t,x)=>t+(p[x]||0),0); if(d>0 && sum>=total) return p; return {...p,[w]:Math.max(0,(p[w]||0)+d)}; });
+  const stepBtn = {width:30,height:30,borderRadius:6,border:`1px solid ${T.line}`,background:'#fff',cursor:'pointer',fontSize:18,color:T.ink,display:'inline-flex',alignItems:'center',justifyContent:'center'};
+  return (
+    <div onClick={onCancel} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.45)',zIndex:9990,display:'flex',alignItems:'flex-end',justifyContent:'center'}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:'#fff',width:'100%',maxWidth:480,borderRadius:'14px 14px 0 0',padding:'16px 16px 18px',maxHeight:'85vh',overflowY:'auto'}}>
+        <div style={{fontSize:16,fontWeight:800}}>Deliver from multiple warehouses</div>
+        <div style={{fontSize:12,color:T.ink3,marginTop:3}}>{item.code} · {item.name}</div>
+        <div style={{fontSize:12,color:T.ink2,marginTop:8}}>How many of the <b>{total}</b> units come from each warehouse?</div>
+        <div style={{marginTop:10,display:'flex',flexDirection:'column',gap:8}}>
+          {WHS.map(w=>{ const on=qty[w]>0; const is4=_isFourS(w); return (
+            <div key={w} style={{border:`1px solid ${on?(is4?T.warn:T.green):T.line}`,borderLeft:is4&&on?`4px solid ${T.warn}`:undefined,background:is4&&on?'#fff4d6':'#fff',borderRadius:8,padding:'9px 11px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:10}}>
+                <div style={{flex:1,fontSize:13,fontWeight:700}}>{label(w)}</div>
+                <button type="button" style={stepBtn} onClick={()=>step(w,-1)}>−</button>
+                <span style={{fontFamily:T.mono,fontSize:16,fontWeight:800,minWidth:24,textAlign:'center'}}>{qty[w]||0}</span>
+                <button type="button" style={stepBtn} onClick={()=>step(w,1)}>+</button>
+              </div>
+              {is4 && on && (
+                <div style={{marginTop:7,display:'flex',alignItems:'center',gap:8}}>
+                  <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>4S LOCATION</span>
+                  <select value={sub} onChange={e=>setSub(e.target.value)} style={{border:`1.5px solid ${T.warn}`,borderRadius:4,padding:'3px 8px',fontSize:12,fontWeight:700,background:'#fff'}}>
+                    {['GD1','GD2','SHOWROOM'].map(sb=>{ const s0=fsStock.find(x=>String(x.b||'').toUpperCase().trim()===sb); return <option key={sb} value={sb}>{s0?`${sb} (${Number(s0.q)||0})`:sb}</option>; })}
+                  </select>
+                </div>
+              )}
+            </div>
+          );})}
+        </div>
+        <div style={{marginTop:10,fontSize:12,fontWeight:700,color:left===0?(nWh>=2?T.ok:T.warn):T.bad}}>
+          {left>0 ? `${left} unit${left>1?'s':''} still to assign` : nWh<2 ? 'Assign units to at least two warehouses to split' : '✓ All units assigned'}
+        </div>
+        <div style={{display:'flex',gap:8,marginTop:14}}>
+          <Btn onClick={onCancel}>Cancel</Btn>
+          <Btn primary full disabled={!ok} onClick={()=>onConfirm(WHS.filter(w=>qty[w]>0).map(w=>({wh:w,qty:qty[w],sub:_isFourS(w)?sub:''})))}>Split item</Btn>
+        </div>
+      </div>
     </div>
   );
 }
@@ -8096,6 +8385,139 @@ function ServiceScreen({ctx}){
 }
 
 // ─── Order History ───────────────────────────────────────────
+// ─── Order change approvals ─────────────────────────────────
+// Admin: every pending change request, and a review page that highlights each
+// change (value before → value now) with Approve / Reject. Everyone else sees
+// the status of the changes they sent (pending / approved / rejected).
+function ApprovalsScreen({ctx}) {
+  const {user,nav,back,changeRequests,loadChangeRequests,doReviewOrderChange,orders,loading} = ctx;
+  const isAdmin = normRole(user?.role) === 'admin';
+  const me = String(user?.code||user?.name||'').toLowerCase();
+  const [selId,setSelId] = React.useState(null);
+  React.useEffect(()=>{ loadChangeRequests(); },[]);
+  const all = (changeRequests||[]).filter(r => isAdmin || String(r.requestedBy||'').toLowerCase()===me);
+  const pending = all.filter(r=>r.status==='pending');
+  const decided = all.filter(r=>r.status!=='pending');
+  const sel = selId ? (changeRequests||[]).find(r=>r.id===selId) : null;
+  const tone = st => st==='approved'?'ok':st==='rejected'?'bad':'warn';
+
+  const header = (title, sub, onBack) => (
+    <div style={{display:'flex',alignItems:'center',gap:8,padding:'10px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,flexShrink:0}}>
+      <button onClick={onBack} title="Back" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.back()}</button>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontSize:17,fontWeight:700,letterSpacing:-0.4}}>{title}</div>
+        {sub && <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono}}>{sub}</div>}
+      </div>
+      <button onClick={()=>loadChangeRequests()} title="Refresh" style={{width:32,height:32,borderRadius:6,background:'#fff',border:`1px solid ${T.line}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.refresh(T.ink2,15)}</button>
+    </div>
+  );
+
+  if (sel && sel.status==='pending' && sel.before && sel.after) {
+    const rows = orderChangeRows(sel.before, sel.after);
+    // Fields the order has changed on since this request was made (someone else
+    // updated them meanwhile) — shown so the admin knows what approving overwrites.
+    const live = (orders||[]).find(x => x && ((sel.orderNo && x.no===sel.orderNo) || (sel.internalNo && Number(x.internalNo)===Number(sel.internalNo))));
+    const liveOrder = live ? {...BLANK_ORDER(), ...normalizeLoadedOrder(live)} : null;
+    const reqKeys = orderChangedKeys(sel.before, sel.after);
+    const moved = liveOrder ? orderChangedKeys(sel.before, liveOrder).filter(k => reqKeys.indexOf(k)>=0) : [];
+    const groups = [];
+    rows.forEach(r => { let g = groups.find(x=>x.name===r.group); if(!g){ g={name:r.group,rows:[]}; groups.push(g); } g.rows.push(r); });
+    async function decide(decision){
+      let note = '';
+      if (decision==='reject') { note = window.prompt('Reason for rejecting (optional) — the salesperson will see it:','') ; if (note===null) return; }
+      else if (!window.confirm('Approve these '+rows.length+' change'+(rows.length===1?'':'s')+' and save them to order '+(sel.orderNo||'')+'?')) return;
+      const ok = await doReviewOrderChange(sel, decision, note);
+      if (ok) setSelId(null);
+    }
+    const valBox = (txt, kind) => (
+      <div style={{flex:1,minWidth:0,padding:'6px 8px',borderRadius:6,fontSize:12.5,lineHeight:1.4,whiteSpace:'pre-wrap',wordBreak:'break-word',
+        ...(kind==='before'
+          ? {background:T.badSoft,color:T.bad,border:'1px solid #e0b7ae',textDecoration:txt==='—'?'none':'line-through'}
+          : {background:T.okSoft,color:T.ok,border:'1px solid #b7dbc1',fontWeight:700})}}>{txt}</div>
+    );
+    return (
+      <div className="screen">
+        {header('Review change', (sel.orderNo||'')+' · '+(sel.customer||''), ()=>setSelId(null))}
+        <div className="scroll">
+          <div style={{padding:'12px 14px',background:'#fff',borderBottom:`1px solid ${T.line}`}}>
+            <div style={{fontSize:16,fontWeight:700}}>{sel.customer||'—'}</div>
+            <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:2}}>Order {sel.orderNo||'—'}</div>
+            <div style={{fontSize:12,color:T.ink2,marginTop:6}}>Requested by <b>{sel.requestedByName||sel.requestedBy||'—'}</b> · {sel.requestedAt||''}</div>
+            <div style={{fontSize:12,color:T.ink3,marginTop:2}}><b>{rows.length}</b> change{rows.length===1?'':'s'} highlighted below — <span style={{color:T.bad,fontWeight:700}}>red = before</span>, <span style={{color:T.ok,fontWeight:700}}>green = now</span>.</div>
+          </div>
+          {moved.length>0 && (
+            <div style={{padding:'9px 14px',background:T.warnSoft,color:T.warn,fontSize:11.5,fontWeight:600,lineHeight:1.5,borderBottom:'1px solid #e6cc95'}}>
+              ⚠ Since this request was made, the order's {moved.map(k=>k==='items'?'items':(ORDER_FIELD_LABELS[k]||k)).join(', ')} {moved.length>1?'were':'was'} also changed. Approving replaces {moved.length>1?'them':'it'} with the requested value.
+            </div>
+          )}
+          {!rows.length && <div style={{padding:24,textAlign:'center',color:T.ink4,fontSize:13}}>No differences found — the order already matches this request.</div>}
+          {groups.map(g=>(
+            <div key={g.name}>
+              <SectionHead n="" label={g.name+' · '+g.rows.length}/>
+              {g.rows.map((r,i)=>(
+                <div key={i} style={{padding:'10px 14px',background:r.fourS?'#fff4d6':'#fff',borderBottom:`1px solid ${T.line}`,borderLeft:`4px solid ${r.kind==='added'?T.ok:r.kind==='removed'?T.bad:T.warn}`}}>
+                  <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6,flexWrap:'wrap'}}>
+                    <span style={{fontSize:12,fontWeight:800,color:T.ink}}>{r.label}</span>
+                    {r.kind!=='changed' && <Pill tone={r.kind==='added'?'ok':'bad'} size="sm">{r.kind==='added'?'ADDED':'REMOVED'}</Pill>}
+                    {r.fourS && <Pill tone="warn" size="sm">4S</Pill>}
+                  </div>
+                  <div style={{display:'flex',alignItems:'stretch',gap:6}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:9,fontWeight:800,color:T.ink4,letterSpacing:.8,marginBottom:2}}>BEFORE</div>
+                      {valBox(r.before,'before')}
+                    </div>
+                    <div style={{alignSelf:'center',color:T.ink4,fontWeight:800,paddingTop:12}}>→</div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:9,fontWeight:800,color:T.ink4,letterSpacing:.8,marginBottom:2}}>NOW</div>
+                      {valBox(r.after,'after')}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+          <div style={{height:20}}/>
+        </div>
+        {isAdmin
+          ? <div style={{display:'flex',gap:8,padding:'10px 14px',background:'#fff',borderTop:`1px solid ${T.line}`,flexShrink:0}}>
+              <Btn danger disabled={loading} onClick={()=>decide('reject')}>Reject</Btn>
+              <Btn primary full disabled={loading} onClick={()=>decide('approve')}>Approve change ✓</Btn>
+            </div>
+          : <div style={{padding:'10px 14px',background:T.warnSoft,color:T.warn,fontSize:12,fontWeight:700,borderTop:`1px solid ${T.line}`,flexShrink:0}}>⏳ Waiting for an admin to approve</div>}
+      </div>
+    );
+  }
+
+  const card = r => (
+    <div key={r.id} onClick={()=>{ if(r.status==='pending' && r.before && r.after) setSelId(r.id); }}
+      style={{background:'#fff',borderBottom:`1px solid ${T.line}`,borderLeft:`4px solid ${r.status==='pending'?T.warn:r.status==='approved'?T.ok:T.bad}`,padding:'11px 14px',cursor:r.status==='pending'?'pointer':'default'}}>
+      <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+        <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{r.orderNo}</span>
+        <Pill tone={tone(r.status)} size="sm">{r.status==='pending'?'PENDING APPROVAL':r.status.toUpperCase()}</Pill>
+      </div>
+      <div style={{fontSize:14,fontWeight:700,marginTop:3}}>{r.customer||'—'}</div>
+      <div style={{fontSize:11,color:T.ink3,marginTop:2}}>Changed: {r.summary||'—'}</div>
+      <div style={{fontSize:10.5,color:T.ink4,marginTop:2,fontFamily:T.mono}}>{r.requestedByName||r.requestedBy} · {r.requestedAt}</div>
+      {r.status!=='pending' && <div style={{fontSize:10.5,color:T.ink4,marginTop:2}}>{r.status==='approved'?'Approved':'Rejected'} by {r.reviewedBy||'—'}{r.reviewedAt?' · '+r.reviewedAt:''}{r.reviewNote?' — “'+r.reviewNote+'”':''}</div>}
+      {r.status==='pending' && <div style={{fontSize:11,color:T.green,fontWeight:700,marginTop:4}}>{isAdmin?'Review changes →':'View changes →'}</div>}
+    </div>
+  );
+  return (
+    <div className="screen">
+      {header(isAdmin?'Order change approvals':'My order changes', pending.length+' pending', back)}
+      <div className="scroll">
+        <SectionHead n="" label={'Pending · '+pending.length}/>
+        {pending.length ? pending.map(card) : <div style={{padding:'18px 14px',color:T.ink4,fontSize:13,background:'#fff'}}>Nothing waiting for approval.</div>}
+        {decided.length>0 && <>
+          <SectionHead n="" label="Recently decided"/>
+          {decided.slice(0,30).map(card)}
+        </>}
+        <div style={{height:20}}/>
+      </div>
+    </div>
+  );
+}
+
 function HistoryScreen({ctx}) {
   const {orders,mis,nav,loadOrders,loadMis,doUpdateDelivery,doDeleteOrder,user,misLoading,loading,gmbPhones,ldmPhones} = ctx;
   const isAdmin = normRole(user?.role) === 'admin';
@@ -8329,6 +8751,7 @@ function HistoryScreen({ctx}) {
               <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3,flexWrap:'wrap'}}>
                 <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
                 {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:null}
+                {pendingChangesFor(ctx.changeRequests,o).length>0 && <span onClick={e=>{e.stopPropagation();nav('approvals');}} style={{cursor:'pointer'}}><Pill tone="warn" size="sm">⏳ Change pending approval</Pill></span>}
                 {/* SO / WON is generated only for the franchise channel — a pure 4S
                     order is never prompted to add one. The prompt also disappears once
                     every franchise line already carries its own SO (nothing left to
