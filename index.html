@@ -1657,6 +1657,7 @@ function generatePDF(order, copyType) {
       lyy += 2 + lines.length*3.4;
     })();
     lyy += inlineRow(ml, lyy, true, 'Ph. :', order.phone);
+    lyy += inlineRow(ml, lyy, true, 'Alt. Ph. :', order.alt);
     const leftH = lyy - cdTop;
 
     const cdH = Math.max(rightH, leftH, 16);
@@ -2458,8 +2459,56 @@ function rnd(n) { return Math.floor((Number(n) || 0) + 0.5); }
 // stored as a fraction (writing the string "40%" makes Sheets keep 0.40).
 // Normalize any 0<x<1 percent back to whole-number percent, and recompute each
 // item's unit price / line total so a reopened order matches what was entered.
+// ── Site-measurement memory ──────────────────────────────────────────────
+// Every saved order's site measurements are also remembered on this device,
+// keyed by internal no / order no / client id. When an order is reopened for
+// editing, any measurement the sheet came back without (e.g. a missing CRM
+// column or an older backend) is restored from here, so a sofa / wardrobe
+// order never asks for its measurements again once they have been filled.
+const MEAS_SCALARS = ['sofaWidth','sofaHeight','sofaDepth','entryDoorWidth','entryDoorHeight',
+  'staircaseWidth','landingLength','landingWidth','landingDepth',
+  'wardrobeLength','wardrobeWidth','wardrobeHeight'];
+const MEAS_ARRAYS  = ['wardrobes','rooms','liftTypes'];
+const MEAS_STORE   = '4s_meas';
+function _measKeys(o) {
+  if (!o) return [];
+  const k = [];
+  if (Number(o.internalNo)) k.push('i:' + Number(o.internalNo));
+  if (String(o.no||'').trim()) k.push('n:' + String(o.no).trim());
+  if (String(o.clientId||'').trim()) k.push('c:' + String(o.clientId).trim());
+  return k;
+}
+function _hasMeasVal(v) { return Array.isArray(v) ? v.length > 0 : String(v==null?'':v).trim() !== ''; }
+function rememberMeasurements(o) {
+  const keys = _measKeys(o); if (!keys.length) return;
+  const m = {};
+  MEAS_SCALARS.forEach(f => { if (_hasMeasVal(o[f])) m[f] = String(o[f]).trim(); });
+  MEAS_ARRAYS.forEach(f => { if (_hasMeasVal(o[f])) m[f] = o[f]; });
+  if (!Object.keys(m).length) return;
+  try {
+    const store = JSON.parse(localStorage.getItem(MEAS_STORE) || '{}') || {};
+    m._t = Date.now();
+    keys.forEach(k => { store[k] = m; });
+    // Keep the store small: drop the oldest entries beyond ~600 keys.
+    const all = Object.keys(store);
+    if (all.length > 600) all.sort((a,b)=>((store[a]&&store[a]._t)||0)-((store[b]&&store[b]._t)||0)).slice(0, all.length-600).forEach(k=>{ delete store[k]; });
+    localStorage.setItem(MEAS_STORE, JSON.stringify(store));
+  } catch (e) {}
+}
+function restoreMeasurements(o) {
+  const keys = _measKeys(o); if (!keys.length) return o;
+  let m = null;
+  try { const store = JSON.parse(localStorage.getItem(MEAS_STORE) || '{}') || {}; for (const k of keys) { if (store[k]) { m = store[k]; break; } } } catch (e) {}
+  if (!m) return o;
+  const out = { ...o };
+  MEAS_SCALARS.forEach(f => { if (!_hasMeasVal(out[f]) && _hasMeasVal(m[f])) out[f] = m[f]; });
+  MEAS_ARRAYS.forEach(f => { if (!_hasMeasVal(out[f]) && _hasMeasVal(m[f])) out[f] = m[f]; });
+  return out;
+}
+
 function normalizeLoadedOrder(o) {
   if (!o) return o;
+  o = restoreMeasurements(o);
   const fixPct = v => {
     const n = parseFloat(v);
     if (!isFinite(n) || n <= 0) return (v == null ? '' : v);
@@ -3508,6 +3557,7 @@ function App() {
       const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total, by: user?.code, byName: user?.name } });
       if (res.ok) {
         const saved = {...draft, no: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo || draft.orderFormReceiptNo};
+        rememberMeasurements(saved);
         setOrder(saved);
         showToast('Order '+res.orderNo+' saved ✓');
         // Refresh the ledger so the next new booking picks up the latest Receipt No.
@@ -3522,6 +3572,7 @@ function App() {
       const q = JSON.parse(localStorage.getItem('4s_queue')||'[]');
       // Persist the clientId with the queued order so the offline re-send (flushQueue)
       // resolves to the same order server-side instead of creating a duplicate.
+      rememberMeasurements(draft);
       q.push({...draft, _queuedAt: Date.now()});
       localStorage.setItem('4s_queue', JSON.stringify(q));
       return draft;
@@ -3538,6 +3589,7 @@ function App() {
       try {
         const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total, by: draft.by||user?.code, byName: draft.byName||user?.name } });
         if (!res || !res.ok) remaining.push(draft);
+        else rememberMeasurements({...draft, no: res.orderNo, internalNo: res.internalNo});
       } catch { remaining.push(draft); }
     }
     localStorage.setItem('4s_queue', JSON.stringify(remaining));
@@ -6960,6 +7012,7 @@ function OrderFormScreen({ctx, viewOnly}) {
       if(saved){ setOrder(saved); ctx.showToast('Order updated ✓','ok'); nav('history'); }
       return;
     }
+    rememberMeasurements(after);
     const ok = await ctx.doRequestOrderChange(before, after);
     if(ok){ try{localStorage.removeItem('4s_draft');}catch(e){} setOrder(BLANK_ORDER()); nav('history'); }
   }
