@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v63';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v64';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -252,6 +252,7 @@ function doGet(e) {
       case 'leads':          result = handleLeads(p);           break;
       case 'contactTags':    result = handleContactTags(p);     break;
       case 'offersSent':     result = handleOffersSent();       break;
+      case 'changeRequests': result = handleListChangeRequests(p); break;
       case 'debugPriceList': result = handleDebugPriceList();   break;
       default:               result = { ok: false, error: 'Unknown action: ' + (p.action || '(none)') };
     }
@@ -305,6 +306,8 @@ function doPost(e) {
       case 'sendWhatsApp':    result = handleSendWhatsApp(body);      break;
       case 'markOfferSent':   result = handleMarkOfferSent(body);     break;
       case 'resetOffersSent': result = handleResetOffersSent(body);   break;
+      case 'requestOrderChange': result = handleRequestOrderChange(body); break;
+      case 'reviewOrderChange':  result = handleReviewOrderChange(body);  break;
       default:                result = { ok: false, error: 'Unknown action: ' + body.action };
     }
   } catch(err) {
@@ -4029,6 +4032,152 @@ function handleAuditLog(p) {
     }).reverse();   // newest first
     return { ok: true, entries: entries, scriptVersion: SCRIPT_VERSION };
   } catch(e) { return { ok: false, error: e.message }; }
+}
+
+// ─── ORDER CHANGE REQUESTS (admin approval) ──────────────────────────────────
+// Anyone may edit a submitted order, but when a NON-admin changes anything beyond
+// the quick operational fields (WON, money receipts, delivery status), the edit
+// is not written to the CRM straight away. The app files it here as a change
+// request instead — a snapshot of the order BEFORE the edit plus the proposed
+// order AFTER it — and an admin reviews the highlighted differences and approves
+// (the change is then saved to the CRM) or rejects it. One row per request, kept
+// in the CRM spreadsheet next to the audit log.
+var CHANGE_REQ_TAB_NAME = 'ORDER CHANGE REQUESTS';
+var CHANGE_REQ_HEADERS  = ['ID', 'REQUESTED AT', 'ORDER NO', 'INTERNAL NO', 'CUSTOMER', 'REQUESTED BY',
+                           'REQUESTED BY NAME', 'STATUS', 'SUMMARY', 'BEFORE JSON', 'AFTER JSON',
+                           'REVIEWED BY', 'REVIEWED AT', 'REVIEW NOTE'];
+var CHANGE_REQ_CELL_MAX = 49000;   // Sheets caps a cell at 50,000 characters
+
+function _changeReqSheet(create) {
+  var ss = SpreadsheetApp.openById(CRM_SHEET_ID);
+  var sh = ss.getSheetByName(CHANGE_REQ_TAB_NAME);
+  if (!sh && create) {
+    sh = ss.insertSheet(CHANGE_REQ_TAB_NAME);
+    sh.appendRow(CHANGE_REQ_HEADERS);
+    try { sh.getRange(1, 1, 1, CHANGE_REQ_HEADERS.length).setFontWeight('bold'); sh.setFrozenRows(1); } catch (e) {}
+  }
+  return sh;
+}
+
+function _changeReqRow(r, tz, withJson) {
+  var ts = function (v) { return (v instanceof Date) ? Utilities.formatDate(v, tz, 'yyyy-MM-dd HH:mm:ss') : String(v == null ? '' : v); };
+  var parse = function (v) { try { return v ? JSON.parse(String(v)) : null; } catch (e) { return null; } };
+  var o = {
+    id: String(r[0] || ''), requestedAt: ts(r[1]), orderNo: String(r[2] || ''), internalNo: Number(r[3]) || 0,
+    customer: String(r[4] || ''), requestedBy: String(r[5] || ''), requestedByName: String(r[6] || ''),
+    status: String(r[7] || '').toLowerCase(), summary: String(r[8] || ''),
+    reviewedBy: String(r[11] || ''), reviewedAt: ts(r[12]), reviewNote: String(r[13] || '')
+  };
+  if (withJson) { o.before = parse(r[9]); o.after = parse(r[10]); }
+  return o;
+}
+
+// GET: every PENDING request (with its before/after snapshots, so the app can show
+// the diff) plus the most recent decided ones (no snapshots) so a salesperson can
+// see whether their change was approved or rejected.
+function handleListChangeRequests(p) {
+  try {
+    var sh = _changeReqSheet(false);
+    if (!sh || sh.getLastRow() < 2) return { ok: true, requests: [], scriptVersion: SCRIPT_VERSION };
+    var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+    var vals = sh.getRange(2, 1, sh.getLastRow() - 1, CHANGE_REQ_HEADERS.length).getValues();
+    var pending = [], decided = [];
+    for (var i = vals.length - 1; i >= 0; i--) {   // newest first
+      if (!vals[i][0]) continue;
+      var st = String(vals[i][7] || '').toLowerCase();
+      if (st === 'pending') pending.push(_changeReqRow(vals[i], tz, true));
+      else if (decided.length < 60) decided.push(_changeReqRow(vals[i], tz, false));
+    }
+    return { ok: true, requests: pending.concat(decided), scriptVersion: SCRIPT_VERSION };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+// POST: file a change request for an existing order.
+// body: { orderNo, internalNo, customer, byName, summary, before, after }
+// A requester re-submitting a change for the same order replaces their own
+// still-pending request (so the admin only ever sees their latest version).
+function handleRequestOrderChange(body) {
+  var by = String((body && body.by) || '').trim();
+  var orderNo = String((body && body.orderNo) || '').trim();
+  var internalNo = Number((body && body.internalNo) || 0);
+  if (!orderNo && !internalNo) return { ok: false, error: 'Order identifier is required.' };
+  if (!body.after) return { ok: false, error: 'No changes were sent.' };
+  var beforeJson = JSON.stringify(body.before || {});
+  var afterJson  = JSON.stringify(body.after);
+  if (beforeJson.length > CHANGE_REQ_CELL_MAX || afterJson.length > CHANGE_REQ_CELL_MAX) {
+    return { ok: false, error: 'This order is too large to send for approval — ask an admin to make the change.' };
+  }
+  var lock = LockService.getScriptLock();
+  var haveLock = false;
+  try { haveLock = lock.tryLock(15000); } catch (e) {}
+  try {
+    var sh = _changeReqSheet(true);
+    var now = new Date();
+    var row = null, id = '';
+    if (sh.getLastRow() >= 2) {
+      var vals = sh.getRange(2, 1, sh.getLastRow() - 1, 8).getValues();
+      for (var i = 0; i < vals.length; i++) {
+        var sameOrder = (orderNo && String(vals[i][2] || '').trim() === orderNo) || (internalNo && Number(vals[i][3]) === internalNo);
+        if (sameOrder && String(vals[i][7] || '').toLowerCase() === 'pending' &&
+            String(vals[i][5] || '').toLowerCase() === by.toLowerCase()) { row = i + 2; id = String(vals[i][0]); break; }
+      }
+    }
+    if (!id) id = 'CR' + now.getTime();
+    var rec = [id, now, orderNo, internalNo || '', String(body.customer || ''), by, String(body.byName || ''),
+               'pending', String(body.summary || '').slice(0, 2000), beforeJson, afterJson, '', '', ''];
+    if (row) sh.getRange(row, 1, 1, rec.length).setValues([rec]);
+    else sh.appendRow(rec);
+    _appendLog(body.byName || by, orderNo, 'REQUEST_ORDER_CHANGE', String(body.summary || '').slice(0, 400));
+    return { ok: true, id: id, replaced: !!row };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
+  }
+}
+
+// POST (admin only): approve or reject a pending change request.
+// body: { id, decision:'approve'|'reject', note, order, byName }
+// On approve, `order` is the order to save — the admin's app builds it by applying
+// the request's changed fields onto the order's CURRENT state (so operational
+// updates made since the request, e.g. a delivery status change, are kept).
+function handleReviewOrderChange(body) {
+  var by = String((body && body.by) || '').trim();
+  if (_lookupRole(by) !== 'admin') return { ok: false, error: 'Only an admin can approve order changes.' };
+  var id = String((body && body.id) || '').trim();
+  var decision = String((body && body.decision) || '').toLowerCase();
+  if (!id) return { ok: false, error: 'Change request id is required.' };
+  if (decision !== 'approve' && decision !== 'reject') return { ok: false, error: 'Decision must be approve or reject.' };
+  var lock = LockService.getScriptLock();
+  var haveLock = false;
+  try { haveLock = lock.tryLock(30000); } catch (e) {}
+  try {
+    var sh = _changeReqSheet(false);
+    if (!sh || sh.getLastRow() < 2) return { ok: false, error: 'Change request not found.' };
+    var vals = sh.getRange(2, 1, sh.getLastRow() - 1, 8).getValues();
+    var row = 0, orderNo = '';
+    for (var i = 0; i < vals.length; i++) {
+      if (String(vals[i][0]) === id) { row = i + 2; orderNo = String(vals[i][2] || ''); break; }
+    }
+    if (!row) return { ok: false, error: 'Change request not found.' };
+    var cur = String(vals[row - 2][7] || '').toLowerCase();
+    if (cur !== 'pending') return { ok: false, error: 'This change was already ' + cur + '.' };
+    var saved = null;
+    if (decision === 'approve') {
+      if (!body.order) return { ok: false, error: 'No order data to apply.' };
+      saved = handleSaveOrder(body.order);   // throws on failure → request stays pending
+    }
+    var reviewer = String(body.byName || by);
+    sh.getRange(row, 8).setValue(decision === 'approve' ? 'approved' : 'rejected');
+    sh.getRange(row, 12, 1, 3).setValues([[reviewer, new Date(), String(body.note || '').slice(0, 1000)]]);
+    _appendLog(reviewer, orderNo, decision === 'approve' ? 'APPROVE_ORDER_CHANGE' : 'REJECT_ORDER_CHANGE', id + (body.note ? ' · ' + body.note : ''));
+    return { ok: true, id: id, status: decision === 'approve' ? 'approved' : 'rejected',
+             orderNo: saved ? saved.orderNo : orderNo, internalNo: saved ? saved.internalNo : '' };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
+  }
 }
 
 // ─── LEADS ────────────────────────────────────────────────────────────────────
