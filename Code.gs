@@ -1835,6 +1835,16 @@ function handleOrders(p) {
         map[key].landingWidth = meas.staircase.landingWidth || map[key].landingWidth || '';
         map[key].landingDepth = meas.staircase.landingDepth || map[key].landingDepth || '';
       }
+      // Sofa + entry-door sizes: the scalar columns win; the blob fills any gap.
+      if (meas.sofa && typeof meas.sofa === 'object') {
+        map[key].sofaWidth  = map[key].sofaWidth  || String(meas.sofa.width  || '');
+        map[key].sofaHeight = map[key].sofaHeight || String(meas.sofa.height || '');
+        map[key].sofaDepth  = map[key].sofaDepth  || String(meas.sofa.depth  || '');
+      }
+      if (meas.entryDoor && typeof meas.entryDoor === 'object') {
+        map[key].entryDoorWidth  = map[key].entryDoorWidth  || String(meas.entryDoor.width  || '');
+        map[key].entryDoorHeight = map[key].entryDoorHeight || String(meas.entryDoor.height || '');
+      }
       keys.push(key);
     }
     var m = map[key];
@@ -3019,8 +3029,14 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
       return (r2.name || ('Room ' + (ri + 1))) + ' (WxHxD): ' + [r2.width, r2.height, r2.depth].map(function (v) { return v || '-'; }).join(' x ');
     }).join('  |  ');
     put(['ROOM MEASUREMENTS', 'ROOMS MEASUREMENTS'], rmSummary);
-    if (wbs.length || rms.length || lts.length || o.staircaseWidth || o.landingLength || o.landingWidth || o.landingDepth)
-      put(['SITE MEASUREMENTS DATA', 'MEASUREMENTS DATA', 'MEASUREMENTS JSON'], JSON.stringify({ wardrobes: wbs, rooms: rms, liftTypes: lts, staircase: { width: o.staircaseWidth || '', landingLength: o.landingLength || '', landingWidth: o.landingWidth || '', landingDepth: o.landingDepth || '' } }));
+    // The blob also carries the sofa + entry-door sizes, so they come back on
+    // reopen even if their individual columns are missing or were cleared.
+    if (wbs.length || rms.length || lts.length || o.staircaseWidth || o.landingLength || o.landingWidth || o.landingDepth ||
+        o.sofaWidth || o.sofaHeight || o.sofaDepth || o.entryDoorWidth || o.entryDoorHeight)
+      put(['SITE MEASUREMENTS DATA', 'MEASUREMENTS DATA', 'MEASUREMENTS JSON'], JSON.stringify({ wardrobes: wbs, rooms: rms, liftTypes: lts,
+        staircase: { width: o.staircaseWidth || '', landingLength: o.landingLength || '', landingWidth: o.landingWidth || '', landingDepth: o.landingDepth || '' },
+        sofa: { width: o.sofaWidth || '', height: o.sofaHeight || '', depth: o.sofaDepth || '' },
+        entryDoor: { width: o.entryDoorWidth || '', height: o.entryDoorHeight || '' } }));
 
     // ── Extra fields captured by the app (write only if the column exists).
     //    Add these headers to the CRM sheet to capture them.
