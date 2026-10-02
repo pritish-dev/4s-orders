@@ -5636,6 +5636,482 @@ function CollectiblesScreen({ctx}) {
 }
 
 // ─── Home ───────────────────────────────────────────────────
+// ─── Q326 Grand Festive schemes (INTERNAL — staff only) ─────────────────────
+// Godrej Interio Q3 FY26-27 circulars: HS/HF consumer scheme, mattress consumer
+// scheme, digital scratch card, bank tie-up instant discounts, No/Low-Cost EMI
+// (card + Bajaj paper finance) and the channel-partner schemes. Used ONLY by the
+// order form's "Applicable schemes" panel and the Offer Zone. Nothing here is
+// stored on the order, and none of it is drawn on the order-form PDF or the
+// customer WhatsApp message. Channel-partner margins are manager/admin only.
+const SCHEME_Q326 = {
+  code: 'Q326', name: 'Grand Festive Offer',
+  from: '2026-10-02', to: '2026-12-16', cpTo: '2026-12-17',
+  // Slabs are on the CPL + GST value. HF slab value = HF + HS + Mattress total.
+  hf:  [{max:29999,pct:3,label:'Up to ₹29,999'},{max:79999,pct:5,label:'₹30,000 – 79,999'},{max:99999,pct:7,label:'₹80,000 – 99,999'},
+        {max:149999,pct:9,label:'₹1,00,000 – 1,49,999'},{max:249999,pct:11,label:'₹1,50,000 – 2,49,999'},
+        {max:399999,pct:15,label:'₹2,50,000 – 3,99,999'},{max:Infinity,pct:20,label:'₹4,00,000 & above'}],
+  hs:  [{max:79999,pct:1,label:'Up to ₹79,999'},{max:Infinity,pct:3,label:'₹80,000 & above'}],
+  kx3: [{max:200000,pct:4,label:'Up to ₹2 lakh'},{max:Infinity,pct:6,label:'Above ₹2 lakh'}],
+  scratch: ['5% (assured)','50% off','100% off','5% + Amazon voucher ₹2,500','5% + VIP Luggage','5% + ₹5,000 off next purchase'],
+  mattress: [
+    { slab:'Super Slab', pct:20,
+      models:['Reborn','Mist Pro','Space Edge LX','Ogma','Expressiv'],
+      single:'1 Single Bedsheet + 1 Neckfine XL Pillow',
+      double:'1 Double Comforter + 1 Double Bedsheet + 2 Neckfine XL Pillow + 1 Marshmallow Wedge' },
+    { slab:'Slab 1', pct:12,
+      models:['Superlatx','Orthomatic Plus NX','Orthomatic Dlx Nx','Orthomatic Deluxe','Snugly Lux','Snugly LX','Accupadic','Ortho Delux',
+              'Orthomatic Premium','Orthomatic Max','Ortho Plus','Posture Plus','Ultima Plus','Elegenza','Spinefine','Innergize',
+              'Orthomatic Super','Slp Essential','Sleep Essential','Slp Comfort','Sleep Comfort','Aqmatic','Sleep Grande',
+              'Orthomatic Care PT','Springomatic','Sleep Renew'],
+      single:'1 Single Bedsheet + 1 Nixy Pillow',
+      double:'1 Double Comforter + 1 Double Bedsheet + 2 Nixy Pillow' },
+    { slab:'Slab 2', pct:10,
+      models:['Spinemax Memory','Superbond NX','Melody','Neofeel','D-Plus','Sleepcot ET','Dr. Jogy','Swing','Aventura','Sleepsy',
+              'Bravo','Napster ET','Dual Delite','Superb Coir','Vertebro Coir','Hyrise'],
+      single:'1 Single Bedsheet + 1 Nixy Pillow',
+      double:'1 Double Bedsheet + 2 Nixy Pillow' },
+    { slab:'Slab 3', pct:10,
+      models:['Ace Pro','Insignia','Sleepcot','Zen','Zen Ultra','Atom','Hero','Snow White','Breeze Neo','Nutrend','Lotus Pro','Tulip'],
+      single:'1 Single Bedsheet + 1 Neon Pillow',
+      double:'1 Double Bedsheet + 2 Neon Pillow' },
+  ],
+  // Not to be sold from COCO / Franchisee under this scheme.
+  notFromStore: ['Swing','Hero','Echo','Insignia','Sleepcot','Zen','Atom','Snow White'],
+  // Accessories bought on their own (not as a mattress gift): consumer discount.
+  accessories: [['Marshmallow Wedge',20],['Marshmallow',20],['Candyfloss',20],['Cushion',20],['Apollo',15],['Wonder',15],
+                ['Fresh',15],['Sentinel',15],['Neckfine',15],['Nixy',10],['Neon',10]],
+  gifts: [['Double Comforter','Blyss Comfy Std Cmfrtr 94 90 1','56101508SD10588',5999],
+          ['Double Bedsheet','Blyss Comfy Bedsheet 104 100 1','56101508SD10587',2490],
+          ['Single Bedsheet','Blyss Comfy Bedsheet 95 61 1','56101508SD10586',1249],
+          ['Neckfine XL Pillow','Neckfine Memory Foam Pillow XL','56101508SD09104 / SD09106',3429],
+          ['Nixy Pillow','Nixy Pillow','56101508SD07586',1020],
+          ['Neon Pillow','Neon Pillow','56101508SD08227',579],
+          ['Marshmallow Wedge','Marshmallow Wedge','52121505SD00091',8701]],
+};
+
+// Bank tie-up instant discounts (Pinelabs POS, automated). Min txn ₹15,000.
+const BANK_Q3 = {
+  emiTill: '2026-10-31', swipeTill: '2026-10-18',
+  emiLow:  [['HDFC Credit Card',''],['HDFC Debit Card','Franchisee / dealer only — not at COCO'],['IDFC FIRST Credit Card','Interest deferred']],
+  emiHigh: [['HDFC Credit Card',''],['HDFC Debit Card','Franchisee / dealer only — not at COCO'],['IDFC FIRST Credit Card','Interest deferred'],['SBI Credit Card','6, 9 & 12 month tenure only']],
+  swipe:   ['HDFC Credit & Debit Card (DC not at COCO)','IDFC FIRST Credit Card','Axis Bank Credit Card','SBI Credit Card'],
+};
+// No-Cost / Low-Cost EMI, valid till 31 Oct 2026.
+const EMI_FY27 = {
+  till: '2026-10-31',
+  card: [{m:3,min:15000,type:'No Cost'},{m:6,min:30000,type:'No Cost'},{m:9,min:50000,type:'Low Cost'},{m:12,min:75000,type:'Low Cost'}],
+  // [bank, 3m, 6m, 9m, 12m, customer processing fee]
+  banks: [['HDFC (CC & DC)','2.65%','4.50%','6.40%','8.20%','₹299 + GST'],
+          ['ICICI CC','2.68%','4.72%','6.78%','8.87%','₹199 + GST · Amazon co-brand not eligible'],
+          ['Axis CC','2.85%','5.02%','7.22%','9.45%','<₹50k ₹299 + GST · >₹50k ₹599 + GST'],
+          ['Kotak CC','2.68%','4.72%','6.78%','8.88%','₹249 + GST'],
+          ['IDFC FIRST CC','2.68%','4.72%','6.78%','8.88%','Flat ₹249 + GST'],
+          ['IndusInd CC','2.68%','4.72%','6.78%','8.88%','₹199'],
+          ['RBL CC','2.17%','4.12%','6.35%','8.31%','1.5% or ₹150 (higher) · Bajaj co-brand not eligible'],
+          ['YES Bank CC','2.68%','4.72%','6.78%','8.88%','₹199 + GST'],
+          ['Federal Bank CC','2.68%','4.72%','6.78%','8.87%','1% or ₹99 (higher)'],
+          ['HSBC CC','2.51%','4.42%','6.35%','8.31%','₹99 + GST'],
+          ['SBI CC','2.81%','4.64%','6.54%','8.39%','Nil (3m) · ₹45 / 69 / 89 (6 / 9 / 12m)'],
+          ['OneCard CC','2.68%','4.72%','6.78%','8.88%','1% of amount'],
+          ['J&K Bank CC','2.17%','3.97%','5.92%','7.74%','Nil']],
+  // Bajaj Finserv paper finance (tenure / advance EMI). Processing fee ₹399.
+  bajaj: [{t:'6/0',min:30000,cust:'0%'},{t:'8/2',min:30000,cust:'0%'},{t:'12/4',min:30000,cust:'0%'},
+          {t:'13/4',min:50000,cust:'0.50%'},{t:'15/5',min:75000,cust:'1.05%'},{t:'18/6',min:90000,cust:'2%'}],
+  // [tenure, total interest, GI share, franchisee/dealer share, customer] — scheme period.
+  bajajCp: [['6/0','6.25%','3.50%','2.75%','0%'],['8/2','5.50%','3.50%','2%','0%'],['12/4','5.85%','3.50%','2.35%','0%'],
+            ['13/4','6.75%','3.50%','2.75%','0.50%'],['15/5','7.30%','3.50%','2.75%','1.05%'],['18/6','8.25%','3.50%','2.75%','2%']],
+};
+// Channel-partner (dealer / franchisee) scheme — manager & admin only.
+const CP_Q326 = {
+  lineDisc: [['HS incl. Kreation X3','5%'],['HF','7%']],
+  hfReimb:  [['Over ₹1.5 lakh','16%','1%'],['Over ₹2.5 lakh','20%','5%'],['Over ₹4 lakh','25%','10%']],
+  mattress: [['₹5,00,000 & above','7%'],['₹3,00,000 – 4,99,999','5%'],['₹1,00,000 – 2,99,999','4%'],['Up to ₹99,999','3%']],
+  npi: 'Mist Pro, Orthomatic Care PT, Space Edge LX, Springomatic, Spinemax Memory, Ortho Plus NX, Orthomatic Deluxe NX, Snugly LX, Ace Pro, Dual Delite, Superb Coir and NPI mattresses launched in the scheme period',
+  // [gift, MRP, Early Bird 02.10–10.11, Golden Window 11.11–30.11, Last Chance 01.12–31.12] — WPL w/o GST
+  giftWindows: [['2026-10-02','2026-11-10','Early Bird'],['2026-11-11','2026-11-30','Golden Window'],['2026-12-01','2026-12-31','Last Chance']],
+  gifts: [['Double Comforter',5999,680,755,850],['Double Bedsheet',2490,470,545,600],['Single Bedsheet',1499,360,410,450],
+          ['Neckfine XL Pillow',3124,1050,1050,1150],['Nixy Pillow',929,225,235,250],['Neon Pillow',527,145,150,160],
+          ['Marshmallow Wedge',8701,2500,2500,2500]],
+  accessories: 'Apollo, Wonder, Fresh, Sentinel, Cushions, Candyfloss, Marshmallow, Marshmallow Wedge 20% · Nixy, Neon, Neckfine 15%',
+};
+
+function schemeNorm(s) { return ' ' + String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() + ' '; }
+function schemeSlab(slabs, v) {
+  const val = Math.round(Number(v) || 0);
+  const idx = slabs.findIndex(s => val <= s.max);
+  return { idx, ...slabs[idx] };
+}
+// Longest model names first, so "Sleepcot ET" wins over "Sleepcot" and
+// "Zen Ultra" over "Zen".
+const _MATTRESS_KEYS = SCHEME_Q326.mattress
+  .flatMap((s, si) => s.models.map(m => ({ key: schemeNorm(m), model: m, si })))
+  .sort((a, b) => b.key.length - a.key.length);
+function mattressSchemeOf(text) {
+  const hay = schemeNorm(text);
+  const hit = _MATTRESS_KEYS.find(k => hay.indexOf(k.key) >= 0);
+  if (!hit) return null;
+  return { ...SCHEME_Q326.mattress[hit.si], model: hit.model,
+           notFromStore: SCHEME_Q326.notFromStore.some(m => schemeNorm(m) === hit.key) };
+}
+// Width in inches when the line name carries "L W T" inches (e.g. "… Mat 72 48 10").
+function mattressWidthIn(text) {
+  const m = String(text || '').match(/\b(7[0-9]|8[0-4])\s+(\d{2})\s+\d{1,2}\b/);
+  return m ? Number(m[2]) : 0;
+}
+
+// Classify one order line for the schemes.
+function schemeLineKind(it) {
+  const cat  = String(it.cat || '');
+  const text = [it.name, it.item].filter(Boolean).join(' ');
+  if (it.sweetner) return 'SWEET';
+  if (/freshca|fresca/i.test(text)) return 'FRESHCA';
+  const matCat = String(it.sheet || '') === 'Mattress' || it.mat ||
+    /mattress|health care|luxury (non )?spring|coco care|^psm$|presidency/i.test(cat);
+  if (mattressSchemeOf(text) && (matCat || !cat || /^accessor/i.test(cat))) return 'MAT';
+  if (matCat && /^accessor/i.test(cat) || /\b(plw|pillow|cushion|sentinel)\b/i.test(text) && (matCat || /^accessor/i.test(cat) || !cat)) return 'MATACC';
+  if (matCat) return 'MAT';
+  if (/kreation\s*x3/i.test(cat + ' ' + text)) return 'KX3';
+  if (/home storage/i.test(cat)) return /storwel\s*(aura|neo)|neolite|storease/i.test(text) ? 'HSDIST' : 'HS';
+  if (cat || it.sheet === 'Furniture') return 'HF';
+  return 'OTHER';
+}
+function schemeListValue(it) {
+  const base = Number(it.cpl) || Number(it.mrp) || 0;
+  const unit = base > 0 ? base * (1 + GST_RATE) : gstInclUnit(it);
+  return unit * (Number(it.qty) || 0);
+}
+
+// Work out every scheme that applies to an order. Pure — never mutates the order.
+function schemeAdvice(o) {
+  const today = istTodayISO();
+  const S = SCHEME_Q326;
+  const lines = (o.items || []).map(it => ({ it, kind: schemeLineKind(it), value: schemeListValue(it) }));
+  const sum = k => lines.filter(l => k.indexOf(l.kind) >= 0).reduce((s, l) => s + l.value, 0);
+  const hfValue = sum(['HF']), hsValue = sum(['HS']), hsDistValue = sum(['HSDIST']), kx3Value = sum(['KX3']), matValue = sum(['MAT']);
+  // HF slab is decided on HF + HS + Mattress together (sweetener items excluded).
+  const hfBasis = hfValue + hsValue + hsDistValue + kx3Value + matValue;
+  const hf  = hfValue > 0 ? { value: hfValue, basis: hfBasis, ...schemeSlab(S.hf, hfBasis) } : null;
+  const hs  = hsValue > 0 ? { value: hsValue, ...schemeSlab(S.hs, hsValue) } : null;
+  const hsDist = hsDistValue > 0 ? { value: hsDistValue, ...S.hs[0], idx: 0 } : null;
+  const kx3 = kx3Value > 0 ? { value: kx3Value, ...schemeSlab(S.kx3, kx3Value) } : null;
+  const mattress = lines.filter(l => l.kind === 'MAT').map(l => {
+    const text = [l.it.name, l.it.item].filter(Boolean).join(' ');
+    return { name: l.it.name, qty: Number(l.it.qty) || 0, value: l.value, width: mattressWidthIn(text), scheme: mattressSchemeOf(text) };
+  });
+  const accessories = lines.filter(l => l.kind === 'MATACC').map(l => {
+    const hay = schemeNorm(l.it.name);
+    const hit = S.accessories.find(([k]) => hay.indexOf(schemeNorm(k)) >= 0);
+    return { name: l.it.name, pct: hit ? hit[1] : 0 };
+  });
+  const { orderDiscAmt, itemsSubtotal } = orderTotals(o);
+  const discFactor = itemsSubtotal > 0 ? 1 - orderDiscAmt / itemsSubtotal : 1;
+  const sweetLines = lines.filter(l => l.kind === 'SWEET');
+  // Bank / EMI transaction value = what the customer pays, less sweetener lines.
+  const txn = Math.round(lines.filter(l => l.kind !== 'SWEET').reduce((s, l) => s + gstInclLine(l.it), 0) * discFactor);
+  const assured = (hf ? hf.value * hf.pct : 0) + (hs ? hs.value * hs.pct : 0) + (hsDist ? hsDist.value * hsDist.pct : 0) + (kx3 ? kx3.value * kx3.pct : 0);
+  return {
+    today, inPeriod: today >= S.from && today <= S.to, b2b: isB2B(o),
+    hf, hs, hsDist, kx3, mattress, accessories,
+    freshca: lines.filter(l => l.kind === 'FRESHCA').map(l => l.it.name),
+    sweet: sweetLines.map(l => l.it.name),
+    other: lines.filter(l => l.kind === 'OTHER').map(l => l.it.name),
+    assuredAmt: Math.round(assured / 100),
+    scratch: !!(hf || hs || hsDist || kx3),
+    txn, bank: bankOffersFor(txn, today), emi: emiOptionsFor(txn, today),
+  };
+}
+function bankOffersFor(v, today) {
+  const out = [];
+  if (v < 15000) return out;
+  if (today <= BANK_Q3.emiTill) {
+    if (v < 50000) BANK_Q3.emiLow.forEach(([b, n]) => out.push({ bank: b, mode: 'EMI', offer: 'Flat ₹1,000 off', amt: 1000, note: n }));
+    else BANK_Q3.emiHigh.forEach(([b, n]) => out.push({ bank: b, mode: 'EMI', offer: '5% up to ₹15,000', amt: Math.min(15000, Math.round(v * 0.05)), note: n }));
+  }
+  if (today <= BANK_Q3.swipeTill && v <= 50000)
+    BANK_Q3.swipe.forEach(b => out.push({ bank: b, mode: 'Full swipe', offer: '5% up to ₹2,500', amt: Math.min(2500, Math.round(v * 0.05)), note: '' }));
+  return out;
+}
+function emiOptionsFor(v, today) {
+  if (today > EMI_FY27.till) return { card: [], bajaj: [], expired: true };
+  return { card: EMI_FY27.card.filter(t => v >= t.min), bajaj: EMI_FY27.bajaj.filter(t => v >= t.min), expired: false };
+}
+
+const _inr = n => '₹' + Math.round(Number(n) || 0).toLocaleString('en-IN');
+const _fmtD = v => { try { return new Date(v + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); } catch (e) { return v; } };
+
+// Small building blocks shared by the order-form panel and the Offer Zone.
+function SchemeBox({ title, tone, children }) {
+  const c = { purple: [T.purpleSoft, T.purpleLine, T.purple], ok: [T.okSoft, '#b7dbc1', T.ok], warn: [T.warnSoft, '#e6cc95', T.warn], bad: [T.badSoft, '#e0b7ae', T.bad], neutral: ['#fff', T.line, T.ink2] }[tone || 'neutral'];
+  return (
+    <div style={{ background: c[0], border: `1px solid ${c[1]}`, borderRadius: 8, padding: '9px 11px', marginBottom: 8 }}>
+      {title && <div style={{ fontSize: 10, fontWeight: 800, color: c[2], letterSpacing: .6, textTransform: 'uppercase', marginBottom: 5 }}>{title}</div>}
+      <div style={{ fontSize: 12, color: T.ink2, lineHeight: 1.5 }}>{children}</div>
+    </div>
+  );
+}
+function SchemeTable({ head, rows, hi }) {
+  return (
+    <div style={{ overflowX: 'auto', marginBottom: 8 }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5, background: '#fff' }}>
+        <thead><tr>{head.map((h, i) => <th key={i} style={{ textAlign: 'left', padding: '6px 8px', background: T.paper2, color: T.ink3, fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: .4, borderBottom: `1px solid ${T.line}`, whiteSpace: 'nowrap' }}>{h}</th>)}</tr></thead>
+        <tbody>{rows.map((r, ri) => (
+          <tr key={ri} style={{ background: ri === hi ? T.purpleSoft : 'transparent' }}>
+            {r.map((c, ci) => <td key={ci} style={{ padding: '6px 8px', borderBottom: `1px solid ${T.line}`, color: ri === hi ? T.purple : T.ink2, fontWeight: ri === hi ? 800 : 500, verticalAlign: 'top' }}>{c}</td>)}
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
+// Order form: which schemes apply to the items on this order. Staff-only and
+// collapsed by default; nothing it shows is saved or printed.
+function SchemeAdvisorPanel({ order }) {
+  const [open, setOpen] = React.useState(false);
+  const items = order.items || [];
+  const a = React.useMemo(() => schemeAdvice(order), [order]);
+  if (!items.length) return null;
+  const S = SCHEME_Q326;
+  const pct = n => n + '%';
+  const nOffers = [a.hf, a.hs, a.hsDist, a.kx3].filter(Boolean).length + a.mattress.length + (a.bank.length ? 1 : 0) + ((a.emi.card.length || a.emi.bajaj.length) ? 1 : 0);
+  return (
+    <div style={{ margin: '14px 14px 0', border: `1.5px dashed ${T.purple}`, borderRadius: 10, background: '#fff', overflow: 'hidden' }}>
+      <div role="button" onClick={() => setOpen(v => !v)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', cursor: 'pointer', background: T.purpleSoft }}>
+        <div style={{ fontSize: 18 }}>🔒</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: T.purple }}>Applicable schemes · staff only</div>
+          <div style={{ fontSize: 10.5, color: T.ink3 }}>{S.code} {S.name} · not shown on the order form PDF{open ? '' : ` · ${nOffers} match${nOffers === 1 ? '' : 'es'} · tap to view`}</div>
+        </div>
+        <div style={{ fontSize: 14, color: T.purple, fontWeight: 800 }}>{open ? '▲' : '▼'}</div>
+      </div>
+      {open && (
+        <div style={{ padding: '10px 12px 4px' }}>
+          {a.b2b && <SchemeBox tone="bad" title="B2B order">The Q326 consumer schemes are not valid on B2B / institutional orders.</SchemeBox>}
+          {!a.inPeriod && <SchemeBox tone="warn" title="Outside scheme period">Q326 runs {_fmtD(S.from)} – {_fmtD(S.to)}. Today is {_fmtD(a.today)}.</SchemeBox>}
+
+          {(a.hf || a.hs || a.hsDist || a.kx3) && (
+            <SchemeBox tone="purple" title={`Furniture & storage · code ${S.code}`}>
+              {a.hf && <div><b>Home Furniture</b> {_inr(a.hf.value)} → <b>Slab {a.hf.idx + 1}: {pct(a.hf.pct)}</b> + scratch card<div style={{ fontSize: 10.5, color: T.ink4 }}>Slab value (HF + HS + Mattress, CPL + GST) {_inr(a.hf.basis)} · {a.hf.label}</div></div>}
+              {a.hs && <div style={{ marginTop: 4 }}><b>Home Storage</b> {_inr(a.hs.value)} → <b>Slab {a.hs.idx + 1}: {pct(a.hs.pct)}</b> + scratch card</div>}
+              {a.hsDist && <div style={{ marginTop: 4 }}><b>Storwel Aura / Neo / Neolite / Storease</b> {_inr(a.hsDist.value)} → <b>1%</b> + scratch card (always HS slab 1)</div>}
+              {a.kx3 && <div style={{ marginTop: 4 }}><b>Kreation X3</b> {_inr(a.kx3.value)} → <b>{pct(a.kx3.pct)}</b> + scratch card</div>}
+              <div style={{ marginTop: 6, fontWeight: 800, color: T.purple }}>Assured discount ≈ {_inr(a.assuredAmt)} (on CPL + GST)</div>
+              <div style={{ fontSize: 10.5, color: T.ink4, marginTop: 4 }}>
+                Exchange: +2% on HF {a.hf && a.hf.idx > 3 ? <b>(not available — slab {a.hf.idx + 1} is above slab 4; free pick-up only)</b> : '(up to slab 4)'} · +1% on HS (all slabs).
+                Not valid on B2B, modular kitchen, SSD &amp; accessories. Cannot be clubbed with other offers except exchange.
+              </div>
+            </SchemeBox>
+          )}
+
+          {a.scratch && (
+            <SchemeBox title="Digital scratch card">
+              Eligible. Show the customer the printed QR at the counter at booking — never share it on WhatsApp / email.
+              Assured 5%; can also win 50% / 100% off, or 5% + Amazon ₹2,500 / VIP Luggage / ₹5,000 off next purchase (no extra 5% with 50% / 100%).
+            </SchemeBox>
+          )}
+
+          {a.mattress.length > 0 && (
+            <SchemeBox tone="purple" title="Mattress · gift OR discount (no scratch card)">
+              {a.mattress.map((m, i) => (
+                <div key={i} style={{ padding: '5px 0', borderTop: i ? `1px solid ${T.purpleLine}` : 'none' }}>
+                  <div style={{ fontWeight: 700, color: T.ink }}>{m.name} × {m.qty}</div>
+                  {m.scheme ? (<>
+                    <div><b>{m.scheme.slab}</b> — free gift <b>or {m.scheme.pct}%</b> discount</div>
+                    <div style={{ fontSize: 11, color: (!m.width || m.width < 48) ? T.ink2 : T.ink4 }}>• Single (&lt; 48″): {m.scheme.single}</div>
+                    <div style={{ fontSize: 11, color: (!m.width || m.width >= 48) ? T.ink2 : T.ink4 }}>• Double (≥ 48″): {m.scheme.double}</div>
+                    {m.scheme.notFromStore && <div style={{ fontSize: 11, color: T.bad, fontWeight: 700 }}>⚠ {m.scheme.model} is NOT to be sold from COCO / franchisee under this scheme.</div>}
+                  </>) : <div style={{ fontSize: 11, color: T.warn }}>Model not in the scheme list — regional mattresses fall in Slab 3 (10%). Confirm with the circular.</div>}
+                </div>
+              ))}
+              <div style={{ fontSize: 10.5, color: T.ink4, marginTop: 4 }}>Book gifts at 99.99% discount on basic + GST, in proportion to mattresses. Exchange: +5% on top of the discount (no extra discount if the customer takes the gift).</div>
+            </SchemeBox>
+          )}
+          {a.accessories.length > 0 && (
+            <SchemeBox title="Mattress accessories (bought separately)">
+              {a.accessories.map((x, i) => <div key={i}>{x.name} → <b>{x.pct ? x.pct + '%' : 'no listed discount'}</b></div>)}
+            </SchemeBox>
+          )}
+          {a.freshca.length > 0 && <SchemeBox tone="warn" title="Freshca">Freshca mattresses are not part of the consumer scheme — sell at MOP (CPL + GST).</SchemeBox>}
+          {a.sweet.length > 0 && <SchemeBox tone="warn" title="Sweetener items">{a.sweet.join(', ')} — excluded from slab value; no exchange, No/Low-Cost EMI or bank cashback on these.</SchemeBox>}
+          {a.other.length > 0 && <SchemeBox tone="warn" title="Not classified">{a.other.join(', ')} — no category on the line, so not counted in any slab.</SchemeBox>}
+
+          <SchemeBox title={`Bank offers · transaction ${_inr(a.txn)}`}>
+            {a.txn < 15000 ? 'Minimum ₹15,000 for bank instant discounts and card EMI.' :
+             a.bank.length === 0 ? 'No bank instant-discount offer live for this value today.' :
+             a.bank.map((b, i) => <div key={i}>• <b>{b.bank}</b> ({b.mode}): {b.offer} → <b>{_inr(b.amt)}</b>{b.note ? <span style={{ color: T.ink4 }}> · {b.note}</span> : ''}</div>)}
+            <div style={{ fontSize: 10.5, color: T.ink4, marginTop: 4 }}>Automated on Pinelabs POS · 1 per card per month · not on standalone sweetener / EOL / ageing stock · not on co-branded cards.</div>
+          </SchemeBox>
+          <SchemeBox title="EMI options">
+            {a.emi.expired ? `The EMI circular expired on ${_fmtD(EMI_FY27.till)}.` : (<>
+              <div><b>Card EMI:</b> {a.emi.card.length ? a.emi.card.map(t => `${t.m}m ${t.type}`).join(' · ') : 'needs ₹15,000+'}</div>
+              <div><b>Bajaj paper finance:</b> {a.emi.bajaj.length ? a.emi.bajaj.map(t => `${t.t}${t.cust !== '0%' ? ' (cust. ' + t.cust + ')' : ' no cost'}`).join(' · ') : 'needs ₹30,000+'} <span style={{ color: T.ink4 }}>· ₹399 processing</span></div>
+            </>)}
+          </SchemeBox>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Offer Zone: the full scheme library, with a value box that highlights the
+// matching slab and EMI tenures. Channel-partner terms are manager/admin only.
+function SchemeLibrary({ user }) {
+  const isManager = hasManagerAccess(user);
+  const [tab, setTab] = React.useState('hfhs');
+  const [val, setVal] = React.useState('');
+  const v = Number(String(val).replace(/[^\d.]/g, '')) || 0;
+  const today = istTodayISO();
+  const S = SCHEME_Q326;
+  const tabs = [['hfhs', 'HF / HS'], ['mattress', 'Mattress'], ['scratch', 'Scratch card'], ['bank', 'Bank offers'], ['emi', 'EMI'], isManager && ['cp', 'Channel partner']].filter(Boolean);
+  const live = today >= S.from && today <= S.to;
+  const ended = d => today > d ? <Pill tone="bad" size="sm">ENDED</Pill> : <Pill tone="ok" size="sm">TILL {_fmtD(d).toUpperCase()}</Pill>;
+  const hfHi = v ? schemeSlab(S.hf, v).idx : -1, hsHi = v ? schemeSlab(S.hs, v).idx : -1, kxHi = v ? schemeSlab(S.kx3, v).idx : -1;
+  const win = CP_Q326.giftWindows.findIndex(w => today >= w[0] && today <= w[1]);
+  return (
+    <div style={{ margin: '12px 16px 4px', background: '#fff', border: `1.5px solid ${T.purpleLine}`, borderRadius: 12, overflow: 'hidden' }}>
+      <div style={{ padding: '11px 14px', background: T.purpleSoft, borderBottom: `1px solid ${T.purpleLine}` }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 10, fontWeight: 800, color: T.purple, letterSpacing: .8, textTransform: 'uppercase' }}>🔒 Schemes · staff only</div>
+          {live ? <Pill tone="ok" size="sm">LIVE</Pill> : <Pill tone="bad" size="sm">{today < S.from ? 'NOT STARTED' : 'ENDED'}</Pill>}
+        </div>
+        <div style={{ fontSize: 15, fontWeight: 900, color: T.ink, marginTop: 2 }}>{S.code} · {S.name}</div>
+        <div style={{ fontSize: 11, color: T.ink3 }}>{_fmtD(S.from)} – {_fmtD(S.to)} · COCO / Franchisee / Dealer · do not share with customers</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 9, padding: '7px 10px', background: '#fff', border: `1px solid ${T.line}`, borderRadius: 8 }}>
+          <span style={{ fontSize: 12, color: T.ink3, fontWeight: 700 }}>₹</span>
+          <input value={val} onChange={e => setVal(e.target.value)} inputMode="numeric" placeholder="Bill value (CPL + GST) to check slab / EMI"
+            style={{ flex: 1, minWidth: 0, border: 'none', outline: 'none', fontSize: 14, color: T.ink, background: 'transparent', fontFamily: T.mono }} />
+          {val && <span onClick={() => setVal('')} style={{ cursor: 'pointer' }}>{Icon.close(T.ink4)}</span>}
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 6, padding: '9px 12px', overflowX: 'auto', borderBottom: `1px solid ${T.line}` }}>
+        {tabs.map(([k, l]) => (
+          <div key={k} role="button" onClick={() => setTab(k)} style={{ flexShrink: 0, padding: '6px 11px', borderRadius: 999, fontSize: 12, fontWeight: 800, cursor: 'pointer', whiteSpace: 'nowrap',
+            background: tab === k ? T.purple : '#fff', color: tab === k ? '#fff' : T.ink3, border: `1px solid ${tab === k ? T.purple : T.line}` }}>{l}</div>
+        ))}
+      </div>
+      <div style={{ padding: '11px 12px 4px' }}>
+        {tab === 'hfhs' && (<>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Home Furniture (HF) — assured discount + scratch card</div>
+          <SchemeTable head={['Slab', 'CPL + GST', 'Discount']} rows={S.hf.map((s, i) => [i + 1, s.label, s.pct + '% + scratch card'])} hi={hfHi} />
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Home Storage (HS)</div>
+          <SchemeTable head={['Slab', 'CPL + GST', 'Discount']} rows={S.hs.map((s, i) => [i + 1, s.label, s.pct + '% + scratch card'])} hi={hsHi} />
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Home Storage — Kreation X3</div>
+          <SchemeTable head={['Slab', 'Kreation X3 value', 'Discount']} rows={S.kx3.map((s, i) => [i + 1, s.label, s.pct + '% + scratch card'])} hi={kxHi} />
+          <SchemeBox title="Points to note">
+            • HF slab is decided on the total of HF + HS + Mattress bought; each scheme still applies on its own.<br />
+            • Storwel Aura, Storwel Neo, Neolite &amp; Storease are always HS slab 1 (1%).<br />
+            • Exchange: +2% HF (up to slab 4 only; above that free pick-up &amp; disposal) · +1% HS (all slabs).<br />
+            • Sweetener items: not counted for slabs, no exchange, no NCEMI / LCEMI / EMI or bank cashback.<br />
+            • Not valid on B2B, modular kitchen, SSD &amp; accessories · no cancel-and-rebook of pre-scheme orders.<br />
+            • Bestfest items get EMI &amp; cashback offers · use discount code <b>{S.code}</b>.
+          </SchemeBox>
+        </>)}
+        {tab === 'mattress' && (<>
+          <div style={{ fontSize: 12, color: T.ink3, marginBottom: 6 }}>Gifts worth up to ₹24,000 — free gift <b>OR</b> discount, per mattress. No scratch card on mattresses.</div>
+          {S.mattress.map((m, i) => (
+            <SchemeBox key={i} tone="purple" title={`${m.slab} · or ${m.pct}% off`}>
+              <div style={{ fontSize: 11, color: T.ink3, marginBottom: 4 }}>{m.models.join(', ')}{i === 3 ? ' + all regional mattresses' : ''}</div>
+              <div>• <b>Single (&lt; 48″):</b> {m.single}</div>
+              <div>• <b>Double (≥ 48″):</b> {m.double}</div>
+            </SchemeBox>
+          ))}
+          <SchemeBox tone="bad" title="Not from COCO / franchisee">{S.notFromStore.join(', ')} — not to be sold under this scheme. Freshca is outside the scheme — sell at MOP (CPL + GST).</SchemeBox>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Gift items</div>
+          <SchemeTable head={['Gift', 'Item', 'Code', 'MRP']} rows={S.gifts.map(g => [g[0], g[1], g[2], _inr(g[3])])} />
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Accessories bought on their own</div>
+          <SchemeTable head={['Accessory', 'Discount']} rows={S.accessories.map(([k, p]) => [k, p + '%'])} />
+          <SchemeBox title="Booking rules">
+            • Pillows: 1 per mattress below 48″, 2 per mattress 48″ and wider · all gifts in proportion to mattresses booked.<br />
+            • Comforter only with a ≥ 48″ mattress or 2 × &lt; 48″ · single bedsheet with &lt; 48″ · double bedsheet with ≥ 48″.<br />
+            • Two singles together wider than 48″ count as one double.<br />
+            • Book gifts at 99.99% discount on basic price, then add GST.<br />
+            • Exchange: +5% on the slab discount; if the customer takes the gift, exchange is a facility only.<br />
+            • EMI, cashback &amp; No-EMI cashback apply · not for bulk / institutional orders.
+          </SchemeBox>
+        </>)}
+        {tab === 'scratch' && (<>
+          <SchemeBox tone="purple" title="Rewards (HF & HS only)">{S.scratch.map((r, i) => <div key={i}>• {r}</div>)}<div style={{ fontSize: 11, color: T.ink4, marginTop: 3 }}>With 50% or 100% off there is no additional 5%.</div></SchemeBox>
+          <SchemeBox title="Customer flow">
+            1. Customer scans the QR at the counter → campaign microsite → Next.<br />
+            2. Reads T&amp;C and ticks “I Accept”.<br />
+            3. Verifies mobile number by OTP (resend after 1 min; 3 wrong tries locks it).<br />
+            4. Enters name, email (optional), address, PIN code &amp; state → reviews → Submit.<br />
+            5. Scratches the card — reward shown on screen and sent by SMS + WhatsApp.
+          </SchemeBox>
+          <SchemeBox tone="bad" title="Handling the QR code">
+            • Keep it printed in an acrylic stand at a safe place near reception.<br />
+            • Customers must not be able to reach it without staff assistance.<br />
+            • Never share it on WhatsApp, email or any other medium.<br />
+            • Show it only to an eligible customer at the time of order booking.
+          </SchemeBox>
+        </>)}
+        {tab === 'bank' && (<>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}><div style={{ fontSize: 12, fontWeight: 800, color: T.ink }}>Instant discount on card EMI</div>{ended(BANK_Q3.emiTill)}</div>
+          <SchemeTable head={['Bank', '₹15,000 – 49,999', '₹50,000 & above']} rows={[
+            ['HDFC Credit Card', 'Flat ₹1,000', '5% up to ₹15,000'],
+            ['HDFC Debit Card (not COCO)', 'Flat ₹1,000', '5% up to ₹15,000'],
+            ['IDFC FIRST Credit Card', 'Flat ₹1,000', '5% up to ₹15,000'],
+            ['SBI Credit Card (6/9/12m)', '—', '5% up to ₹15,000']]} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}><div style={{ fontSize: 12, fontWeight: 800, color: T.ink }}>Full swipe (no EMI)</div>{ended(BANK_Q3.swipeTill)}</div>
+          <SchemeBox>5% up to ₹2,500 on ₹15,000 – 50,000 · {BANK_Q3.swipe.join(' · ')}</SchemeBox>
+          {v >= 15000 && <SchemeBox tone="purple" title={`For ${_inr(v)} today`}>{bankOffersFor(v, today).length ? bankOffersFor(v, today).map((b, i) => <div key={i}>• {b.bank} ({b.mode}): <b>{_inr(b.amt)}</b> off</div>) : 'No bank offer live for this value today.'}</SchemeBox>}
+          <SchemeBox title="Points to note">
+            • Minimum ₹15,000 · 1 offer per card per month (full swipe and EMI share the limit) · offline only.<br />
+            • HDFC &amp; SBI: discount and interest instant · IDFC FIRST: discount instant, interest deferred.<br />
+            • Valid with Q3 consumer offer, + exchange, and standalone Bestfest — not standalone sweetener / EOL / ageing stock.<br />
+            • Not on co-branded cards · no refund of the instant discount on RSO / refund / loan cancellation.<br />
+            • HDFC debit eligibility: SMS MYHDFC to 5676712, missed call 9643222222, or WhatsApp MYOFFER to 7070022222.
+          </SchemeBox>
+        </>)}
+        {tab === 'emi' && (<>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}><div style={{ fontSize: 12, fontWeight: 800, color: T.ink }}>Card EMI (Pinelabs) — minimum value</div>{ended(EMI_FY27.till)}</div>
+          <SchemeTable head={['Tenure', 'Minimum', 'Type']} rows={EMI_FY27.card.map(t => [t.m + ' months', _inr(t.min), t.type + (v && v >= t.min ? ' ✓' : '')])} />
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Bank interest (excl. GST) &amp; customer processing fee</div>
+          <SchemeTable head={['Bank', '3m', '6m', '9m', '12m', 'Processing fee']} rows={EMI_FY27.banks} />
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Bajaj Finserv paper finance (₹399 processing)</div>
+          <SchemeTable head={['Tenure / adv. EMI', 'Minimum loan', 'Customer interest']} rows={EMI_FY27.bajaj.map(t => [t.t, _inr(t.min), (t.cust === '0%' ? 'No cost' : t.cust) + (v && v >= t.min ? ' ✓' : '')])} />
+          <SchemeBox title="Points to note">
+            • Card EMI: 3 &amp; 6 months No Cost, 9 &amp; 12 months Low Cost.<br />
+            • HDFC Cardless EMI (debit-card customers who forgot the card) and Pay-by-Link work at franchisee / dealer stores.<br />
+            • Not on sweetener / ageing products, kitchen, institutional or security products · valid with exchange (XNG26 / XNGSCH26).<br />
+            • Bajaj also charges the customer a convenience fee · loan cancellation is between customer and bank.
+          </SchemeBox>
+        </>)}
+        {tab === 'cp' && isManager && (<>
+          <SchemeBox tone="warn" title="Manager / admin only">Dealer margins — never share with customers or sales floor staff.</SchemeBox>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>HS / HF line discount (booked with Q326 till {_fmtD(S.cpTo)})</div>
+          <SchemeTable head={['Product line', 'Line discount']} rows={CP_Q326.lineDisc} />
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>HF reimbursement (on basic invoice value)</div>
+          <SchemeTable head={['Invoice value', 'If CP passes HF discount', 'Reimbursed']} rows={CP_Q326.hfReimb} />
+          <SchemeBox>
+            • GST invoice mandatory; claims audited by branch &amp; HO; one invoice per claim (multiple invoices need site photos after installation).<br />
+            • VIP Luggage won by a customer is billed to the CP at ₹1,730 (MRP ₹8,950, item 53121600SD01180).<br />
+            • ₹5,000 next-purchase vouchers: reimbursed with a minimum assured margin of 15% at HO's discretion.<br />
+            • Line discounts are automated — do not enter manually · no other scheme can be clubbed except exchange.
+          </SchemeBox>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Mattress — additional discount on WPL (single order)</div>
+          <SchemeTable head={['WPL order value', 'Additional discount']} rows={CP_Q326.mattress} />
+          <SchemeBox>
+            • NPI mattresses 10%: {CP_Q326.npi}.<br />
+            • Freshca: on ≥ 48″, one double bedsheet / 2 pillows at contribution price.<br />
+            • Mattress discounts are entered manually; franchisee gets it as ATD after billing on total OB in the period.<br />
+            • CP accessory discounts: {CP_Q326.accessories}.
+          </SchemeBox>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Gift contribution (WPL w/o GST){win >= 0 ? ` · now: ${CP_Q326.giftWindows[win][2]}` : ''}</div>
+          <SchemeTable head={['Gift', 'MRP', 'Early Bird 2 Oct–10 Nov', 'Golden 11–30 Nov', 'Last Chance 1–31 Dec']} rows={CP_Q326.gifts.map(g => [g[0], _inr(g[1]), _inr(g[2]), _inr(g[3]), _inr(g[4])])} />
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Bajaj interest split — scheme period</div>
+          <SchemeTable head={['Tenure', 'Interest', 'GI', 'Franchisee / dealer', 'Customer']} rows={EMI_FY27.bajajCp} />
+          <SchemeBox>
+            • Card EMI: during the scheme GI reimburses 3.5% across tenures and banks; outside the scheme 2.25%.<br />
+            • Dealer reimbursement only on HF, HF+HS, HF+Mattress, HF+HS+Mattress — none on standalone HS or mattress.<br />
+            • No reimbursement if minimum loan amount / approved tenure is not met.
+          </SchemeBox>
+        </>)}
+      </div>
+    </div>
+  );
+}
+
 // ─── Offer Zone ──────────────────────────────────────────────
 // A home-page destination that lists every item currently under an offer (i.e.
 // carrying a sweetener-scheme discount), with a search bar to find one by name
@@ -5729,7 +6205,7 @@ function OfferZoneScreen({ctx}) {
           <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.home('#fff',18)}</button>
           <div style={{flex:1,minWidth:0}}>
             <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,opacity:.85}}>🔥 OFFER ZONE</div>
-            <div style={{fontSize:20,fontWeight:900,letterSpacing:-0.5}}>Bestfest &amp; Sweetener offers</div>
+            <div style={{fontSize:20,fontWeight:900,letterSpacing:-0.5}}>Schemes, Bestfest &amp; Sweetener</div>
           </div>
           {cartCount>0 && <button onClick={()=>nav('order')} title="Open order" style={{flexShrink:0,height:32,padding:'0 12px',borderRadius:6,background:'rgba(255,255,255,.16)',border:'1px solid rgba(255,255,255,.3)',color:'#fff',fontSize:12,fontWeight:800,cursor:'pointer'}}>Order · {cartCount}</button>}
           <button onClick={syncPriceList} title="Refresh" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.refresh('#fff',15)}</button>
@@ -5742,6 +6218,9 @@ function OfferZoneScreen({ctx}) {
       </div>
 
       <div className="scroll" style={{background:T.paper}}>
+        {/* Q326 scheme library (staff only) — independent of the Sweetener end date */}
+        <SchemeLibrary user={user}/>
+
         {/* Admin: set / extend / clear the shared offer end date */}
         {isManager && (
           <div style={{margin:'12px 16px 4px',padding:'12px 14px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:10}}>
@@ -5867,7 +6346,7 @@ function HomeScreen({ctx}) {
 
   const tiles = [
     { key:'book',    label:'Book an Order',        sub:'New customer order',        emoji:'🛒', bg:'linear-gradient(135deg,#0b6b3a 0%,#0e5c4f 100%)', onClick:()=>{ctx.setOrder({...BLANK_ORDER(),salesExec:user?.name||''});nav('order');} },
-    { key:'offerzone',label:'Offer Zone',           sub:offersLive()?'Bestfest & Sweetener deals':'No live offers', emoji:'🔥', bg:'linear-gradient(135deg,#6d28d9 0%,#4c1d95 100%)', onClick:()=>nav('offerzone') },
+    { key:'offerzone',label:'Offer Zone',           sub:offersLive()?'Q326 schemes · Bestfest & Sweetener':'Q326 schemes', emoji:'🔥', bg:'linear-gradient(135deg,#6d28d9 0%,#4c1d95 100%)', onClick:()=>nav('offerzone') },
     canManual && { key:'manual', label:'Manual Order', sub:'Admin & owner only',    emoji:'📝', bg:'linear-gradient(135deg,#334155 0%,#1e293b 100%)', onClick:()=>{ctx.setOrder({...BLANK_ORDER(),manualOrder:true,salesExec:user?.name||''});nav('order');} },
     { key:'reports', label:'Sales Summary',        sub:'Month-to-date report',      emoji:'📊', bg:'linear-gradient(135deg,#0e7490 0%,#155e75 100%)', onClick:()=>nav('reports') },
     { key:'league',  label:'4S Premier League',    sub:'Live scoreboard',           emoji:'🏆', bg:'linear-gradient(135deg,#1e3a8a 0%,#7a1420 100%)', onClick:()=>nav('league') },
@@ -7678,6 +8157,8 @@ function OrderFormScreen({ctx, viewOnly}) {
           </select>
         </div>
         </>)}
+        {/* Staff-only scheme helper — computed live, never saved or printed */}
+        <SchemeAdvisorPanel order={o}/>
         <div style={{padding:'14px 14px 18px'}}>
           <div style={{background:T.ink,color:'#fff',borderRadius:8,padding:'14px 16px',fontFamily:T.mono}}>
             <div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>Items subtotal (incl. GST)</span><span>₹{(total+orderDiscAmt).toLocaleString('en-IN')}</span></div>
