@@ -94,6 +94,18 @@ self.addEventListener('fetch', e => {
     return;
   }
 
+  // 3b. Interio catalogue photos → cache-first, so a photo seen once opens
+  //     instantly / offline. Every deploy renames CACHE, which drops old photos.
+  if (url.includes('/catalog/img/')) {
+    e.respondWith(
+      caches.match(e.request).then(hit => hit || fetch(e.request).then(resp => {
+        if (resp && resp.ok) { const clone = resp.clone(); caches.open(CACHE).then(c => c.put(e.request, clone)); }
+        return resp;
+      }))
+    );
+    return;
+  }
+
   // 4. App shell (HTML, manifest, icons) → network-first so code updates deploy immediately
   if (url.includes(self.location.origin)) {
     e.respondWith(
