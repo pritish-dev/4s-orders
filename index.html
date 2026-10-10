@@ -651,10 +651,23 @@ function loadFinderCatalog() {
       .then(j => {
         const v = Array.isArray(j.v) ? j.v : [];
         const map = j.map || {};
-        // product id → catalogue entry index (for the product sheet)
+        // Product → catalogue entry index: the only source of product photos.
+        // Linked by price-book id (VPMAP + the Auraline range split), and by item
+        // code / LN code for rows that carry no price-book id (sheet-sourced
+        // mattresses, offer rows).
+        const book = rawPriceBook();
+        const pbAll = {}; book.forEach(r => { pbAll[r.id] = priceBookItem(r); });
         const byPid = {};
-        v.forEach((x, i) => (map[(x.sub || '') + '|' + x.name] || []).forEach(g => (g[1] || []).forEach(id => { if (byPid[id] == null) byPid[id] = i; })));
-        _catalogData = { v, map, byPid };
+        v.forEach((x, i) => {
+          const g = catalogPriceGroups(x, map, pbAll);
+          (g ? g.rows : []).forEach(r => r.items.forEach(it => { if (byPid[it.pbId] == null) byPid[it.pbId] = i; }));
+        });
+        const byCode = {};
+        book.forEach(r => {
+          const i = byPid[r.id]; if (i == null) return;
+          [r.code, r.ln_code].forEach(c => { const k = String(c || '').toUpperCase().trim(); if (k && byCode[k] == null) byCode[k] = i; });
+        });
+        _catalogData = { v, map, byPid, byCode };
         return _catalogData;
       })
       .catch(e => { _catalogPromise = null; throw e; });
@@ -673,6 +686,15 @@ function useFinderCatalog() {
   return { cat, err };
 }
 function catalogImg(x) { return x && x.img ? CATALOG_BASE + 'img/' + x.img : ''; }
+// The catalogue entry (and so the photo) for any price / offer item, or null.
+function finderEntryOf(item, fc) {
+  if (!fc || !item) return null;
+  let i = item.pbId != null ? fc.byPid[item.pbId] : null;
+  if (i == null) i = fc.byCode[String(item.altCode || '').toUpperCase().trim()];
+  if (i == null) i = fc.byCode[String(item.code || '').toUpperCase().trim()];
+  return i != null ? fc.v[i] : null;
+}
+function finderImgOf(item, fc) { return catalogImg(finderEntryOf(item, fc)); }
 // Size lines for a catalogue entry: [cm, ft] per variant. Feet carry the same
 // field corrections as the Finder (+0.2 ft sofas, +0.1 ft widths otherwise).
 function catalogSizeLines(x) {
@@ -6390,6 +6412,7 @@ function OfferZoneScreen({ctx}) {
   const shown = opsFiltered.length > RENDER_CAP ? opsFiltered.slice(0, RENDER_CAP) : opsFiltered;
 
   // Bestfest & Sweetener rows from the Interio Finder (Q3'26 sheet), with stock.
+  const {cat:fc} = useFinderCatalog();
   const finderAll = React.useMemo(() => {
     const stockMap = {}; (items||[]).forEach(it => { stockMap[String(it.code||'').toUpperCase()] = it; });
     return finderOffers().map((r, i) => {
@@ -6580,6 +6603,7 @@ function OfferZoneScreen({ctx}) {
             return (
               <div key={o.i} style={{background:'#fff',border:`1px solid ${T.purpleLine}`,borderRadius:12,padding:'12px 14px',marginBottom:9}}>
                 <div style={{display:'flex',gap:10}}>
+                  <ProductThumb src={finderImgOf(o, fc)} size={56}/>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:13,fontWeight:700,color:T.ink,lineHeight:1.35,marginBottom:5}}>{o.name}</div>
                     <div style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap',marginBottom:4}}>
@@ -6614,7 +6638,7 @@ function OfferZoneScreen({ctx}) {
             const mrpIncl    = base>0 ? roundRs(base*(1+GST_RATE)) : 0;
             const pctNum     = parseFloat(String(it.sweetenerDiscount).replace(/[^\d.]/g,'')) || 0;
             const discIncl   = (mrpIncl>0 && pctNum>0) ? Math.round(mrpIncl*(1-pctNum/100)) : mrpIncl;
-            const thumb      = (catalog[it.catKey]&&catalog[it.catKey].images&&catalog[it.catKey].images[0]);
+            const thumb      = finderImgOf(it, fc);   // Interio catalogue photo only
             return (
               <div key={(it.code||it.name||'')+'|'+fi} style={{background:'#fff',border:`1px solid ${T.purpleLine}`,borderRadius:12,padding:'12px 14px',marginBottom:9}}>
                 <div style={{display:'flex',gap:10}}>
@@ -6825,7 +6849,7 @@ function PhIcon({size=28}) {
 function ProductThumb({src, size=64}) {
   const [err,setErr] = React.useState(false);
   const box = {width:size,height:size,borderRadius:10,flexShrink:0,border:`1px solid ${T.line}`,background:T.paper2};
-  if (!src || err) return <div style={{...box,display:'grid',placeItems:'center'}}><PhIcon size={size*0.5}/></div>;
+  if (!src || err) return <div style={{...box,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:2}}><PhIcon size={size*0.38}/><span style={{fontSize:Math.max(8,size*0.13),color:T.ink4,fontWeight:600,lineHeight:1.1,textAlign:'center'}}>No image</span></div>;
   return <img src={src} loading="lazy" decoding="async" alt="" onError={()=>setErr(true)} style={{...box,objectFit:'cover'}}/>;
 }
 
@@ -6839,9 +6863,9 @@ function ProductSheet({item, cat, onClose, onAdd}) {
   const cpl     = cplBase>0 ? roundRs(cplBase*(1+GST_RATE)) : 0;
   // Interio catalogue entry for this product (photo, F-A-B key points, sizes).
   const {cat:fc} = useFinderCatalog();
-  const vx = (fc && item.pbId!=null && fc.byPid[item.pbId]!=null) ? fc.v[fc.byPid[item.pbId]] : null;
-  const opsImages = (cat&&Array.isArray(cat.images))?cat.images:[];
-  const images  = opsImages.length ? opsImages : (vx && vx.img ? [catalogImg(vx)] : []);
+  // Photos come only from the Interio catalogue — never the OPS / Drive images.
+  const vx = finderEntryOf(item, fc);
+  const images  = vx && vx.img ? [catalogImg(vx)] : [];
   const swatches= (cat&&Array.isArray(cat.swatches))?cat.swatches:[];
   const stockTotal = (item.stock||[]).reduce((s,x)=>s+x.q,0);
   const est = itemSchemeEstimate(item);
@@ -6861,39 +6885,18 @@ function ProductSheet({item, cat, onClose, onAdd}) {
       <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:430,background:T.paper,borderTopLeftRadius:16,borderTopRightRadius:16,maxHeight:'88vh',display:'flex',flexDirection:'column',animation:'slideUp .2s ease'}}>
         <div style={{width:38,height:4,borderRadius:99,background:T.line2||T.line,margin:'9px auto 2px',flexShrink:0}}/>
         <div className="scroll" style={{paddingBottom:14}}>
-          {images.length>0 ? (
-            <div style={{padding:'6px 16px 0'}}>
-              <div style={{aspectRatio:'16 / 11',borderRadius:14,overflow:'hidden',border:`1px solid ${T.line}`,background:opsImages.length?T.paper2:'#fff',display:'grid',placeItems:'center'}}>
-                {main && !imgErr[ai] ? <img src={main} loading="lazy" decoding="async" alt="" onError={()=>setImgErr(p=>({...p,[ai]:true}))} style={{width:'100%',height:'100%',objectFit:opsImages.length?'cover':'contain'}}/> : <PhIcon size={72}/>}
+          <div style={{padding:'6px 16px 0'}}>
+            {images.length>0 && !imgErr[0] ? (
+              <div style={{aspectRatio:'16 / 11',borderRadius:14,overflow:'hidden',border:`1px solid ${T.line}`,background:'#fff',display:'grid',placeItems:'center'}}>
+                <img src={images[0]} loading="lazy" decoding="async" alt="" onError={()=>setImgErr({0:true})} style={{width:'100%',height:'100%',objectFit:'contain'}}/>
               </div>
-              {images.length>1 && (
-                <div style={{display:'flex',gap:8,marginTop:8,overflowX:'auto'}}>
-                  {images.map((u,i)=>(
-                    <div key={i} onClick={()=>setAi(i)} style={{width:54,height:46,borderRadius:8,flexShrink:0,overflow:'hidden',background:T.paper2,border:`1px solid ${i===ai?T.green:T.line}`,boxShadow:i===ai?`0 0 0 1px ${T.green}`:'none',cursor:'pointer',display:'grid',placeItems:'center'}}>
-                      {!imgErr[i] ? <img src={u} loading="lazy" alt="" onError={()=>setImgErr(p=>({...p,[i]:true}))} style={{width:'100%',height:'100%',objectFit:'cover'}}/> : <PhIcon size={20}/>}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          ) : hasSpecs ? (
-            // Photo missing, but the catalog row has specs — show a neutral photo
-            // placeholder and let the features / measurements / colour render below.
-            <div style={{padding:'6px 16px 0'}}>
-              <div style={{aspectRatio:'16 / 11',borderRadius:14,overflow:'hidden',border:`1px solid ${T.line}`,background:T.paper2,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:6}}>
-                <PhIcon size={56}/>
-                <div style={{fontSize:11,color:T.ink4,fontWeight:600}}>Photo coming soon</div>
+            ) : (
+              <div style={{aspectRatio:'16 / 9',borderRadius:14,border:`1.5px dashed ${T.line2||T.line}`,background:T.paper2,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:8}}>
+                <div style={{width:50,height:50,borderRadius:14,background:'#fff',border:`1px solid ${T.line}`,display:'grid',placeItems:'center'}}><PhIcon size={28}/></div>
+                <div style={{fontSize:14,fontWeight:800,color:T.ink3}}>{fc || images.length ? 'No images available' : 'Loading photo…'}</div>
               </div>
-            </div>
-          ) : (
-            <div style={{padding:'16px 16px 2px'}}>
-              <div style={{border:`1.5px dashed ${T.line2||T.line}`,borderRadius:14,background:T.paper2,padding:'24px 18px',textAlign:'center',display:'flex',flexDirection:'column',alignItems:'center',gap:8}}>
-                <div style={{width:54,height:54,borderRadius:14,background:'#fff',border:`1px solid ${T.line}`,display:'grid',placeItems:'center'}}><PhIcon size={30}/></div>
-                <div style={{fontSize:14.5,fontWeight:800}}>Full preview coming soon</div>
-                <div style={{fontSize:12,color:T.ink4,maxWidth:250,lineHeight:1.5}}>This item isn’t in the Product Catalog yet — everything you need to order it is right here.</div>
-              </div>
-            </div>
-          )}
+            )}
+          </div>
 
           <div style={{padding:'12px 16px 2px'}}>
             <div style={{fontSize:19,fontWeight:800,letterSpacing:-0.4,lineHeight:1.18,textWrap:'balance'}}>{item.name}</div>
@@ -7681,9 +7684,7 @@ function SearchScreen({ctx}) {
           const cplBase = Number(it.cpl) || Number(it.mrp) || 0;
           // MRP shown to the user = list price (CPL) with 18% GST already added in.
           const cpl = cplBase > 0 ? roundRs(cplBase * (1 + GST_RATE)) : 0;
-          const catEntry = catalog[it.catKey];
-          const thumb = (catEntry && catEntry.images && catEntry.images[0])
-            || (fc && it.pbId!=null && fc.byPid[it.pbId]!=null ? catalogImg(fc.v[fc.byPid[it.pbId]]) : '');
+          const thumb = finderImgOf(it, fc);   // Interio catalogue photo only
           return (
             <div key={(it.code||it.name||'')+'|'+(it.sheet||'')+'|'+fi} onClick={()=>setPreview(it)} style={{padding:'12px 18px',borderBottom:`1px solid ${T.line}`,cursor:'pointer'}}>
               <div style={{display:'flex',gap:10}}>
