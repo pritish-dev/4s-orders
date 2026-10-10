@@ -1601,6 +1601,7 @@ function handleOrders(p) {
   var cBill    = colOf(['BILLING ADDRESS']);
   var cDelv    = colOf(['DELIVERY ADDRESS']);
   var cPincode = colOf(['PINCODE','PIN CODE','DELIVERY PINCODE','DELIVERY PIN CODE']);
+  var cBillPin = colOf(['BILLING PINCODE','BILLING PIN CODE']);
   var cFloor   = colOf(['FLOOR']);
   var cLandmk  = colOf(['LANDMARK']);
   var cLiftAv  = colOf(['LIFT AVAILABLE','LIFT AVAILABLE?']);
@@ -1733,6 +1734,7 @@ function handleOrders(p) {
         billing: sval(r, cBill),
         delivery: sval(r, cDelv),
         pincode: sval(r, cPincode),
+        billingPincode: sval(r, cBillPin),
         floor: sval(r, cFloor),
         landmark: sval(r, cLandmk),
         liftAvailable: sval(r, cLiftAv),
@@ -3047,6 +3049,7 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     put(['BILLING ADDRESS'], o.billing || '');
     put(['DELIVERY ADDRESS'], o.delivery || '');
     put(['PINCODE', 'PIN CODE', 'DELIVERY PINCODE', 'DELIVERY PIN CODE'], o.pincode || '');
+    put(['BILLING PINCODE', 'BILLING PIN CODE'], o.billingPincode || '');
     put(['FLOOR'], o.floor || '');
     put(['LANDMARK'], o.landmark || '');
     put(['LIFT AVAILABLE', 'LIFT AVAILABLE?'], o.liftAvailable || '');

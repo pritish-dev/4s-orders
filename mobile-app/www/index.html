@@ -1120,7 +1120,7 @@ const DIFF_IGNORE_KEYS = ['clientId','_queuedAt','by','byName','totalWithTax','s
   'orderStatus','no','internalNo','rows','wardrobeLength','wardrobeWidth','wardrobeHeight','items'];
 const ORDER_FIELD_LABELS = {
   customer:'Customer name', phone:'Phone', alt:'Alt. phone', email:'E-mail', gstNumber:'Customer GST No.',
-  billing:'Billing address', delivery:'Delivery address', pincode:'Pincode', floor:'Floor', landmark:'Landmark',
+  billing:'Billing address', delivery:'Delivery address', pincode:'Pincode', billingPincode:'Billing pincode', floor:'Floor', landmark:'Landmark',
   liftAvailable:'Lift available', liftTypes:'Lift type', contactPersonName:'Delivery contact person',
   contactNumber:'Delivery contact number', contactRemark:'Contact remark', customerCode:'Customer code',
   poRef:'PO ref', orderDiscount:'Order discount %', plannedDly:'Planned delivery date', installNote:'Installation note',
@@ -1354,6 +1354,14 @@ function Btn({children,primary,danger,ghost,full,size='md',icon,onClick,disabled
 
 function Field({label,value,onChange,mono,hint,required,action,onAction,multiline,type='text',placeholder,readOnly,error}) {
   const [focused,setFocused] = React.useState(false);
+  // Multiline boxes (e.g. billing / delivery address) grow with their content
+  // so nothing typed is ever hidden behind a scrollbar.
+  const taRef = React.useRef(null);
+  React.useLayoutEffect(() => {
+    const el = taRef.current; if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+  }, [value, multiline]);
   const style = {fontSize:15,fontFamily:mono?T.mono:T.sans,color:error?T.bad:T.ink,fontWeight:mono?500:400,lineHeight:'22px',background:'transparent',border:'none',outline:'none',width:'100%',resize:'none',padding:0};
   const borderCol = error ? T.bad : (focused ? T.green : T.line);
   return (
@@ -1363,7 +1371,7 @@ function Field({label,value,onChange,mono,hint,required,action,onAction,multilin
         {action&&<span onClick={onAction} style={{fontSize:11,color:T.green,fontWeight:600,fontFamily:T.sans,cursor:'pointer'}}>{action}</span>}
       </div>
       {multiline
-        ? <textarea value={value} onChange={e=>onChange&&onChange(e.target.value)} rows={3} placeholder={placeholder||'Tap to fill'} readOnly={readOnly} style={{...style,lineHeight:'20px',fontSize:14}} onFocus={()=>setFocused(true)} onBlur={()=>setFocused(false)}/>
+        ? <textarea ref={taRef} value={value} onChange={e=>onChange&&onChange(e.target.value)} rows={3} placeholder={placeholder||'Tap to fill'} readOnly={readOnly} style={{...style,lineHeight:'20px',fontSize:14,minHeight:60,overflow:'hidden'}} onFocus={()=>setFocused(true)} onBlur={()=>setFocused(false)}/>
         : <input type={type} value={value} onChange={e=>onChange&&onChange(e.target.value)} placeholder={placeholder||'Tap to fill'} readOnly={readOnly} style={style} onFocus={()=>setFocused(true)} onBlur={()=>setFocused(false)}/>}
       {error
         ? <div style={{fontSize:11,color:T.bad,marginTop:3,fontWeight:600}}>{error}</div>
@@ -1963,7 +1971,7 @@ function generatePDF(order, copyType) {
         order.landmark ? 'Landmark: ' + order.landmark : '',
         order.liftAvailable ? 'Lift: ' + order.liftAvailable + (liftTypesTxt ? ' (' + liftTypesTxt + ')' : '') : '']
         .filter(Boolean).join('\n');
-      const lines = doc.splitTextToSize(delvText, hw-3).slice(0,6);
+      const lines = doc.splitTextToSize(delvText, hw-3);
       lines.forEach((l,i)=>doc.text(l, dx+1, yy+i*3.4));
       ry += (yy - ry) + lines.length*3.4 + 1.5;
     })();
@@ -1990,9 +1998,14 @@ function generatePDF(order, copyType) {
     })();
     (function(){                                   // Billing address (same as delivery)
       const addr = order.billing||order.delivery||''; if (!String(addr).trim()) return;
+      // Billing pincode: its own field, else the delivery pincode when the
+      // billing address is blank or the same as the delivery address.
+      const sameAddr = !String(order.billing||'').trim() || String(order.billing||'').trim()===String(order.delivery||'').trim();
+      const bPin = String(order.billingPincode||'').trim() || (sameAddr ? String(order.pincode||'').trim() : '');
+      const billText = [addr, bPin ? 'Pincode: ' + bPin : ''].filter(Boolean).join('\n');
       if (lyy > cdTop) hln(ml, lyy, ml+hw);
       doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...INK);
-      const lines = doc.splitTextToSize(addr, hw-3).slice(0,6);
+      const lines = doc.splitTextToSize(billText, hw-3);
       lines.forEach((l,i)=>doc.text(l, ml+1, lyy+3.6+i*3.4));
       lyy += 2 + lines.length*3.4;
     })();
@@ -2474,7 +2487,7 @@ const BLANK_ORDER = () => ({
   clientId: uid(),
   no:'', customer:'', phone:'', alt:'', email:'',
   gstNumber:'',
-  billing:'', delivery:'', pincode:'', floor:'', landmark:'', liftAvailable:'',
+  billing:'', billingPincode:'', delivery:'', pincode:'', floor:'', landmark:'', liftAvailable:'',
   // When a lift is available, which lift type(s): Standard / Goods / Service.
   liftTypes:[],
   // Contact details (for orders purchased on behalf of someone else) —
@@ -7956,6 +7969,7 @@ function OrderFormScreen({ctx, viewOnly}) {
             delivery: fill('delivery', m.delivery || addr),
             billing:  fill('billing',  m.billing  || addr),
             pincode:  fill('pincode',  m.pincode),
+            billingPincode: fill('billingPincode', m.billingPincode),
             floor:    fill('floor',    m.floor),
             landmark: fill('landmark', m.landmark),
             email:    fill('email',    m.email),
@@ -8149,6 +8163,7 @@ function OrderFormScreen({ctx, viewOnly}) {
     if(!o.delivery) add('address','Delivery address is required');
     if(!o.pincode||!String(o.pincode).trim()) add('address','Pincode is required');
     else if(!/^\d{6}$/.test(String(o.pincode).trim())) add('address','Enter a valid 6-digit pincode');
+    if(o.billingPincode && !/^\d{6}$/.test(String(o.billingPincode).trim())) add('address','Enter a valid 6-digit billing pincode');
     if(!o.floor) add('address','Floor is required');
     if(!o.landmark) add('address','Nearest landmark is required');
     if(!o.liftAvailable) add('address','Select whether a lift is available');
@@ -8371,7 +8386,8 @@ function OrderFormScreen({ctx, viewOnly}) {
         <Field label="Pincode" value={o.pincode} onChange={v=>setF('pincode',v.replace(/[^\d]/g,'').slice(0,6))} mono required type="tel" hint="Mandatory · delivery address pincode (printed on the PDF)" error={o.pincode&&!/^\d{6}$/.test(o.pincode)?'Enter a valid 6-digit pincode':undefined}/>
         <Field label="Floor" value={o.floor} onChange={v=>setF('floor',v)} required hint="Mandatory"/>
         <Field label="Nearest Landmark" value={o.landmark} onChange={v=>setF('landmark',v)} required hint="Mandatory"/>
-        <Field label="Billing Address" value={o.billing} onChange={v=>setF('billing',v)} multiline action="SAME AS DELIVERY" onAction={()=>setF('billing',o.delivery)} hint="Leave blank or tap SAME AS DELIVERY if identical"/>
+        <Field label="Billing Address" value={o.billing} onChange={v=>setF('billing',v)} multiline action="SAME AS DELIVERY" onAction={()=>{setF('billing',o.delivery); setF('billingPincode',o.pincode||'');}} hint="Leave blank or tap SAME AS DELIVERY if identical"/>
+        <Field label="Billing Pincode" value={o.billingPincode||''} onChange={v=>setF('billingPincode',v.replace(/[^\d]/g,'').slice(0,6))} mono type="tel" hint="Billing address pincode (printed on the PDF) · uses delivery pincode if left blank and addresses are the same" error={o.billingPincode&&!/^\d{6}$/.test(o.billingPincode)?'Enter a valid 6-digit pincode':undefined}/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Lift available? <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <select value={o.liftAvailable} onChange={e=>{const v=e.target.value; setOrder(prev=>({...prev,liftAvailable:v,liftTypes: v==='Yes'?(Array.isArray(prev.liftTypes)?prev.liftTypes:[]):[]}));}} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.liftAvailable?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
