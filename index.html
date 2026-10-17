@@ -1153,7 +1153,7 @@ function fmtChangeVal(k, v) {
   if (k === 'gifts') return nonBlank(v).map(g => (g.item || '?') + ' ×' + (g.qty || 1)).join('\n');
   if (k === 'wardrobes') return nonBlank(v).map((w, i) => (w.name || 'Modular ' + (i + 1)) + ': ' + [w.length, w.width, w.height].map(x => x || '?').join(' × ') + ' cm').join('\n');
   if (k === 'rooms') return nonBlank(v).map((r, i) => (r.name || 'Room ' + (i + 1)) + ': ' + [r.width, r.height, r.depth].map(x => x || '?').join(' × ') + ' cm').join('\n');
-  if (k === 'pineLabsCards') return nonBlank(v).map(c => (isPineCardBlock(c) ? [c.payee, pineCardName(c), c.emi, c.amount ? rs(c.amount) : ''] : [c.method, c.payee, c.bank, c.date, c.amount ? rs(c.amount) : '']).filter(Boolean).join(' · ')).join('\n');
+  if (k === 'pineLabsCards') return nonBlank(v).map(c => (isPineCardBlock(c) ? [c.payee, pineCardName(c), c.emi, c.amount ? rs(c.amount) : ''] : [c.method, c.mrNo ? 'MR ' + c.mrNo : '', c.payee, c.bank, c.txnRef ? 'Ref ' + c.txnRef : '', c.date, c.amount ? rs(c.amount) : '']).filter(Boolean).join(' · ')).join('\n');
   if (k === 'deliveredItems') return nonBlank(v).map(d => (d && typeof d === 'object') ? (d.code || ('item ' + ((d.i || 0) + 1))) : ('item ' + (Number(d) + 1))).join(', ');
   if (Array.isArray(v)) return nonBlank(v).map(x => typeof x === 'object' ? fmtChangeVal('', x) : String(x)).join(', ');
   if (typeof v === 'boolean') return v ? 'Yes' : 'No';
@@ -2460,8 +2460,10 @@ const BLANK_ORDER = () => ({
   // first card's amount & reimbursement stay in earnest / godrejReimbursement).
   // From the 2nd block onward, `method` says how the rest was paid: another Pine Labs
   // card (EMI) or a plain Credit / Debit Card, Cash or UPI payment (see PINE_2ND_METHODS);
-  // `date` and `bank` (card / bank name for a plain card payment) belong to that block.
-  pineLabsCards:[{payee:'',emi:'No EMI',cardName:'',cardNameOther:'',amount:'',reimbursement:'',method:'Pine Labs Card',date:'',bank:''}],
+  // `date` and `bank` (card / bank name for a plain card payment) belong to that block,
+  // as do `mrNo` (money receipt no) and `txnRef` (card approval / UPI txn ref) for a
+  // plain card / cash / UPI payment.
+  pineLabsCards:[{payee:'',emi:'No EMI',cardName:'',cardNameOther:'',amount:'',reimbursement:'',method:'Pine Labs Card',date:'',bank:'',mrNo:'',txnRef:''}],
   // Bajaj Finance EMI scheme (one of the BAJAJ_EMI_OPTS values, e.g. "0/6").
   bajajEmi:'',
   // Installation Happy Code — required to move the order to "Installation Done".
@@ -2560,7 +2562,7 @@ function b2bDeliveryMissing(o) {
 const PINE_EMI_OPTS  = ['No EMI', '3', '6', '9', '12'];
 const PINE_CARD_OPTS = ['HDFC CREDIT CARD', 'HDFC DEBIT CARD', 'IDFC FIRST BANK', 'AXIS CREDIT CARD', 'SBI CREDIT CARD', 'Other'];
 const BAJAJ_EMI_OPTS = ['0/6', '8/2', '12/4'];
-const BLANK_PINE_CARD = () => ({ payee:'', emi:'No EMI', cardName:'', cardNameOther:'', amount:'', reimbursement:'', method:'Pine Labs Card', date:'', bank:'' });
+const BLANK_PINE_CARD = () => ({ payee:'', emi:'No EMI', cardName:'', cardNameOther:'', amount:'', reimbursement:'', method:'Pine Labs Card', date:'', bank:'', mrNo:'', txnRef:'' });
 // How the balance of a Pine Labs order (the 2nd payment) can be paid. The first
 // block is always the Pine Labs EMI card.
 const PINE_2ND_METHODS = ['Pine Labs Card', 'Credit Card', 'Debit Card', 'Cash', 'UPI'];
@@ -2667,8 +2669,10 @@ function FinancePaymentFields({ o, setOrder }) {
           )}
           {idx>0 && !isPineCardBlock(c) ? (
             <React.Fragment>
+              <Field label="Money Receipt No" required value={c.mrNo} onChange={v=>setCard(idx,'mrNo',v)} mono hint="Money receipt issued for this payment"/>
               {c.method!=='Cash' && <Field label="Name of Payee" value={c.payee} onChange={v=>setCard(idx,'payee',v)}/>}
               {(c.method==='Credit Card' || c.method==='Debit Card') && <Field label="Card / Bank Name" value={c.bank} onChange={v=>setCard(idx,'bank',v)}/>}
+              {c.method!=='Cash' && <Field label={c.method==='UPI'?'UPI Transaction Ref':'Card Approval / Transaction No'} value={c.txnRef} onChange={v=>setCard(idx,'txnRef',v)} mono/>}
               <div style={{display:'flex'}}>
                 <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
                   <Field label={`Amount Paid by ${c.method}`} value={c.amount} onChange={v=>setCard(idx,'amount',String(v).replace(/[^\d.]/g,''))} mono type="number" hint={gap>0?`₹${gap.toLocaleString('en-IN')} still to reach order value`:'Rest of the order value'}/>
@@ -8192,6 +8196,7 @@ function OrderFormScreen({ctx, viewOnly}) {
     // A Pine Labs order's 2nd payment (card / cash / UPI / another Pine Labs card)
     // must carry the amount paid on it once it has been added.
     if(financeSchemeOf(o.paymentMode)==='Pine Labs' && pineLabsCardsOf(o).slice(1).some(c=>!(Number(c.amount)>0))) add('payment','Enter the 2nd payment amount (or remove it)');
+    if(financeSchemeOf(o.paymentMode)==='Pine Labs' && pineLabsCardsOf(o).slice(1).some(c=>!isPineCardBlock(c) && !String(c.mrNo||'').trim())) add('payment','Money Receipt No is required for the 2nd payment');
     return e;
   }
 
