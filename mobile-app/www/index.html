@@ -1201,7 +1201,7 @@ function fmtChangeVal(k, v) {
   if (k === 'gifts') return nonBlank(v).map(g => (g.item || '?') + ' ×' + (g.qty || 1)).join('\n');
   if (k === 'wardrobes') return nonBlank(v).map((w, i) => (w.name || 'Modular ' + (i + 1)) + ': ' + [w.length, w.width, w.height].map(x => x || '?').join(' × ') + ' cm').join('\n');
   if (k === 'rooms') return nonBlank(v).map((r, i) => (r.name || 'Room ' + (i + 1)) + ': ' + [r.width, r.height, r.depth].map(x => x || '?').join(' × ') + ' cm').join('\n');
-  if (k === 'pineLabsCards') return nonBlank(v).map(c => [c.payee, pineCardName(c), c.emi, c.amount ? rs(c.amount) : ''].filter(Boolean).join(' · ')).join('\n');
+  if (k === 'pineLabsCards') return nonBlank(v).map(c => (isPineCardBlock(c) ? [c.payee, pineCardName(c), c.emi, c.amount ? rs(c.amount) : ''] : [c.method, c.payee, c.bank, c.date, c.amount ? rs(c.amount) : '']).filter(Boolean).join(' · ')).join('\n');
   if (k === 'deliveredItems') return nonBlank(v).map(d => (d && typeof d === 'object') ? (d.code || ('item ' + ((d.i || 0) + 1))) : ('item ' + (Number(d) + 1))).join(', ');
   if (Array.isArray(v)) return nonBlank(v).map(x => typeof x === 'object' ? fmtChangeVal('', x) : String(x)).join(', ');
   if (typeof v === 'boolean') return v ? 'Yes' : 'No';
@@ -2506,7 +2506,10 @@ const BLANK_ORDER = () => ({
   // cardNameOther is the real name. amount/reimbursement hold the money paid on this
   // card and the Godrej reimbursement for it (used from the 2nd card onward — the
   // first card's amount & reimbursement stay in earnest / godrejReimbursement).
-  pineLabsCards:[{payee:'',emi:'No EMI',cardName:'',cardNameOther:'',amount:'',reimbursement:''}],
+  // From the 2nd block onward, `method` says how the rest was paid: another Pine Labs
+  // card (EMI) or a plain Credit / Debit Card, Cash or UPI payment (see PINE_2ND_METHODS);
+  // `date` and `bank` (card / bank name for a plain card payment) belong to that block.
+  pineLabsCards:[{payee:'',emi:'No EMI',cardName:'',cardNameOther:'',amount:'',reimbursement:'',method:'Pine Labs Card',date:'',bank:''}],
   // Bajaj Finance EMI scheme (one of the BAJAJ_EMI_OPTS values, e.g. "0/6").
   bajajEmi:'',
   // Installation Happy Code — required to move the order to "Installation Done".
@@ -2605,7 +2608,14 @@ function b2bDeliveryMissing(o) {
 const PINE_EMI_OPTS  = ['No EMI', '3', '6', '9', '12'];
 const PINE_CARD_OPTS = ['HDFC CREDIT CARD', 'HDFC DEBIT CARD', 'IDFC FIRST BANK', 'AXIS CREDIT CARD', 'SBI CREDIT CARD', 'Other'];
 const BAJAJ_EMI_OPTS = ['0/6', '8/2', '12/4'];
-const BLANK_PINE_CARD = () => ({ payee:'', emi:'No EMI', cardName:'', cardNameOther:'', amount:'', reimbursement:'' });
+const BLANK_PINE_CARD = () => ({ payee:'', emi:'No EMI', cardName:'', cardNameOther:'', amount:'', reimbursement:'', method:'Pine Labs Card', date:'', bank:'' });
+// How the balance of a Pine Labs order (the 2nd payment) can be paid. The first
+// block is always the Pine Labs EMI card.
+const PINE_2ND_METHODS = ['Pine Labs Card', 'Credit Card', 'Debit Card', 'Cash', 'UPI'];
+// Whether a payment block is a Pine Labs card swipe (EMI tenure + card name +
+// Godrej reimbursement) rather than a plain card / cash / UPI payment. Blocks saved
+// before the 2nd-payment method existed have no `method` and are Pine Labs cards.
+function isPineCardBlock(c) { return !c || !c.method || c.method === 'Pine Labs Card'; }
 // Effective card name — the free-typed text when "Other" is chosen, else the preset.
 function pineCardName(c) {
   if (!c) return '';
@@ -2657,7 +2667,7 @@ function FinancePaymentFields({ o, setOrder }) {
   // reimbursement (top-level + per-card) is informational only — never summed into
   // the paid total or the gap check.
   const extraAmt   = cards.slice(1).reduce((s,c)=>s+(Number(c.amount)||0),0);
-  const extraReimb = cards.slice(1).reduce((s,c)=>s+(Number(c.reimbursement)||0),0);
+  const extraReimb = cards.slice(1).filter(isPineCardBlock).reduce((s,c)=>s+(Number(c.reimbursement)||0),0);
   const finAmt=Number(o.earnest)||0, reimb=Number(o.godrejReimbursement)||0;
   const reimbTotal=reimb+extraReimb;
   const paid=finAmt+extraAmt, roundT=Math.round(total), gap=roundT-paid;
@@ -2668,7 +2678,7 @@ function FinancePaymentFields({ o, setOrder }) {
 
   return (
     <React.Fragment>
-      <div style={{padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.ink3,lineHeight:1.45}}>Financed via <b>Pine Labs</b>. Enter the <b>Pine Labs</b> amount &amp; date and the card payment detail(s) below — the card amount(s) make up the order value. The <b>Reimbursement from Godrej</b> is recorded for information only and is not added to or deducted from any total.</div>
+      <div style={{padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.ink3,lineHeight:1.45}}>Financed via <b>Pine Labs</b>. Enter the <b>Pine Labs</b> EMI amount &amp; date and the card detail below. If the customer pays only part of the order on Pine Labs EMI, add a <b>2nd payment</b> for the rest — by Credit / Debit Card, Cash, UPI or another Pine Labs card. Together the payments make up the order value. The <b>Reimbursement from Godrej</b> is recorded for information only and is not added to or deducted from any total.</div>
       <div style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
         <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
           <Field label="Pine Labs Amount" value={o.earnest} onChange={v=>setF('earnest',String(v).replace(/[^\d.]/g,''))} mono type="number" error={paid>roundT?`Exceeds order total ₹${roundT.toLocaleString('en-IN')}`:undefined}/>
@@ -2686,15 +2696,38 @@ function FinancePaymentFields({ o, setOrder }) {
         </div>
       </div>
       <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12,gap:8,flexWrap:'wrap'}}>
-        <span style={{color:T.ink3,fontWeight:600}}>Cards <b style={{fontFamily:T.mono,color:T.ink}}>₹{(finAmt+extraAmt).toLocaleString('en-IN')}</b>{reimbTotal>0 && <span style={{color:T.ink4,fontWeight:500}}> · Godrej reimb ₹{reimbTotal.toLocaleString('en-IN')} (info only)</span>}</span>
+        <span style={{color:T.ink3,fontWeight:600}}>Paid <b style={{fontFamily:T.mono,color:T.ink}}>₹{(finAmt+extraAmt).toLocaleString('en-IN')}</b>{reimbTotal>0 && <span style={{color:T.ink4,fontWeight:500}}> · Godrej reimb ₹{reimbTotal.toLocaleString('en-IN')} (info only)</span>}</span>
         <span style={{color:Math.abs(gap)<=2?T.ok:(gap<0?T.bad:T.warn),fontWeight:700}}>{Math.abs(gap)<=2?'= Order value ✓':(gap<0?`Over by ₹${Math.abs(gap).toLocaleString('en-IN')}`:`₹${gap.toLocaleString('en-IN')} to reach order value`)}</span>
       </div>
       {cards.map((c,idx)=>(
         <div key={idx} style={{borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'9px 14px 3px'}}>
-            <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase'}}>Card Payment{cards.length>1?' '+(idx+1):''}</div>
-            {cards.length>1 && <span onClick={()=>removeCard(idx)} style={{fontSize:11,color:T.bad,fontWeight:700,cursor:'pointer'}}>Remove</span>}
+            <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase'}}>{idx===0?'Pine Labs EMI Payment':(idx+1===2?'2nd':(idx+1)+'th')+' Payment'}</div>
+            {cards.length>1 && idx>0 && <span onClick={()=>removeCard(idx)} style={{fontSize:11,color:T.bad,fontWeight:700,cursor:'pointer'}}>Remove</span>}
           </div>
+          {idx>0 && (
+            <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+              <div style={capStyle}>Payment Method</div>
+              <select value={c.method||'Pine Labs Card'} onChange={e=>setCard(idx,'method',e.target.value)} style={{...selStyle,color:T.ink}}>
+                {PINE_2ND_METHODS.map(x=><option key={x}>{x}</option>)}
+              </select>
+            </div>
+          )}
+          {idx>0 && !isPineCardBlock(c) ? (
+            <React.Fragment>
+              {c.method!=='Cash' && <Field label="Name of Payee" value={c.payee} onChange={v=>setCard(idx,'payee',v)}/>}
+              {(c.method==='Credit Card' || c.method==='Debit Card') && <Field label="Card / Bank Name" value={c.bank} onChange={v=>setCard(idx,'bank',v)}/>}
+              <div style={{display:'flex'}}>
+                <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
+                  <Field label={`Amount Paid by ${c.method}`} value={c.amount} onChange={v=>setCard(idx,'amount',String(v).replace(/[^\d.]/g,''))} mono type="number" hint={gap>0?`₹${gap.toLocaleString('en-IN')} still to reach order value`:'Rest of the order value'}/>
+                </div>
+                <div style={{flex:1}}>
+                  <Field label="Date" value={c.date} onChange={v=>setCard(idx,'date',v)} mono type="date"/>
+                </div>
+              </div>
+            </React.Fragment>
+          ) : (
+          <React.Fragment>
           <Field label="Name of Payee" value={c.payee} onChange={v=>setCard(idx,'payee',v)}/>
           <div style={{display:'flex'}}>
             <div style={{flex:1,borderRight:`1px solid ${T.line}`,borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
@@ -2722,11 +2755,14 @@ function FinancePaymentFields({ o, setOrder }) {
               </div>
             </div>
           )}
+          {idx>0 && <Field label="Date" value={c.date} onChange={v=>setCard(idx,'date',v)} mono type="date"/>}
+          </React.Fragment>
+          )}
         </div>
       ))}
       {cards.length<2 && (
         <div style={{padding:'10px 14px',background:'#fff',borderBottom:`1px solid ${T.line}`}}>
-          <span onClick={addCard} style={{fontSize:13,color:T.green,fontWeight:700,cursor:'pointer'}}>+ Add another card payment</span>
+          <span onClick={addCard} style={{fontSize:13,color:T.green,fontWeight:700,cursor:'pointer'}}>+ Add 2nd payment (Card / Cash / UPI / another Pine Labs card)</span>
         </div>
       )}
     </React.Fragment>
@@ -8202,6 +8238,9 @@ function OrderFormScreen({ctx, viewOnly}) {
     // No / Date / Amount are NOT required to place the order.
     if(!isB2B(o) && !isFinanceScheme(o) && (!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim())) add('payment','Money Receipt No is required');
     if(financeSchemeOf(o.paymentMode)==='Bajaj Finance' && !String(o.bajajEmi||'').trim()) add('payment','Select the Bajaj Finance EMI scheme');
+    // A Pine Labs order's 2nd payment (card / cash / UPI / another Pine Labs card)
+    // must carry the amount paid on it once it has been added.
+    if(financeSchemeOf(o.paymentMode)==='Pine Labs' && pineLabsCardsOf(o).slice(1).some(c=>!(Number(c.amount)>0))) add('payment','Enter the 2nd payment amount (or remove it)');
     return e;
   }
 
@@ -9118,16 +9157,19 @@ function generatePineLabsReimbursementPDF(o){
   const inrAmt = n => 'Rs. ' + (Math.round(Number(n)||0)).toLocaleString('en-IN');
   const payISO = (()=>{ const pd=String((o.moneyReceipts&&o.moneyReceipts[0]&&o.moneyReceipts[0].date)||'').trim(); return /^\d{4}-\d{2}-\d{2}$/.test(pd)?pd:''; })();
   const dateTxt = payISO ? prettyDate(payISO) : '';
-  const cards = pineLabsCardsOf(o);
+  // Only Pine Labs card swipes are reimbursed — a 2nd payment made by plain
+  // card / cash / UPI is left out of this PDF.
+  const cards = pineLabsCardsOf(o).map((c, idx) => ({ c, idx })).filter(({ c, idx }) => idx === 0 || isPineCardBlock(c));
   const ml = 18; let y = 24; const lh = 9;
   doc.setTextColor(0,0,0);
-  cards.forEach((c, idx) => {
-    if (idx>0) y += 6;   // blank gap between two cards
+  cards.forEach(({ c, idx }, n) => {
+    if (n>0) y += 6;   // blank gap between two cards
     // The first card's amount lives in earnest; the 2nd card onward carries its own.
     const cardAmt = inrAmt(idx===0 ? o.earnest : c.amount);
+    const ownISO = idx>0 && /^\d{4}-\d{2}-\d{2}$/.test(String(c.date||'').trim()) ? String(c.date).trim() : '';
     const rows = [
       ['Name of Customer', c.payee||''],
-      ['Date', dateTxt],
+      ['Date', ownISO ? prettyDate(ownISO) : dateTxt],
       ['Tenure', c.emi||''],
       ['Card Name', pineCardName(c)],
       ['Transaction Amount', cardAmt],
