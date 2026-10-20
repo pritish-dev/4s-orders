@@ -8329,6 +8329,11 @@ function OrderFormScreen({ctx, viewOnly}) {
             <Field label="Booking Date" value={dmyToISO(o.date)} onChange={v=>setF('date',isoToDMY(v))} type="date" mono required hint="Manual order — the actual date this order was booked"/>
           </>
         )}
+        {/* Admins can correct the booking date of an already-saved order (manual
+            orders show their own Booking Date field above). */}
+        {isAdmin && !o.manualOrder && !!(o.no || o.internalNo) && (
+          <Field label="Booking Date" value={dmyToISO(o.date)} onChange={v=>{ if(v) setF('date',isoToDMY(v)); }} type="date" mono hint="Admin only — change the date this order was booked"/>
+        )}
         <AccordionHead secKey="customer" n="01" label="Customer" open={openSecs.customer} onToggle={()=>toggleSec('customer')} done={secDone('customer')}/>
         {openSecs.customer && (<>
         <Field label="Customer Name" value={o.customer} onChange={v=>setF('customer',v)} required/>
