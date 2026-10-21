@@ -2269,8 +2269,26 @@ function generatePDF(order, copyType) {
     return y + total;
   }
 
+  // ── COMPLIMENTARY GIFT row — printed on BOTH copies, only when a gift was
+  //    added to the order (no row at all otherwise). Sits above the totals. ──
+  const giftParts = (Array.isArray(order.gifts) ? order.gifts : [])
+    .filter(g => g && String(g.item||'').trim())
+    .map(g => String(g.item).trim() + ' x ' + (Number(g.qty)||1));
+  doc.setFont('helvetica','bold'); doc.setFontSize(7.5);
+  const giftLines = giftParts.length ? doc.splitTextToSize(giftParts.join('     |     '), cw-32) : [];
+  const giftH     = giftLines.length ? 4 + giftLines.length*3.6 : 0;
+  function drawGiftRow(y) {
+    if (!giftLines.length) return y;
+    brd(ml,y,cw,giftH); vln(ml+28,y,y+giftH);
+    lbl(ml+2,y+5,'Complimentary Gift',6.5);
+    doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(...INK);
+    giftLines.forEach((ln,i)=>doc.text(ln, ml+30, y+4.4+i*3.6));
+    return y + giftH;
+  }
+
   // ── TOTALS + RECEIPT + SIGNATURE (final page only) ────────
   function drawTotalsBlock(y) {
+    y = drawGiftRow(y);
     // Every MRP already includes 18% GST, so the subtotal is GST-inclusive. The
     // CGST/SGST rows are carved OUT of that inclusive amount (taxable + CGST +
     // SGST = Total) — the GST is shown for the breakup but never added on top.
@@ -2447,7 +2465,7 @@ function generatePDF(order, copyType) {
 
   // Totals must sit together on one page; move to a fresh page if they don't fit.
   const nTotRows      = 6 + (orderDiscAmt > 0 ? 2 : 0);
-  const totalsBlockH  = Math.max(5.7*nTotRows, 44) + 21 /*receipt*/ + 32 /*terms*/ + 16 /*signature*/;
+  const totalsBlockH  = giftH + Math.max(5.7*nTotRows, 44) + 21 /*receipt*/ + 32 /*terms*/ + 16 /*signature*/;
   if (y + totalsBlockH > itemAreaBottom) {
     drawFooter();
     doc.addPage(); pageNo++;
