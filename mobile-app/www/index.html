@@ -7702,9 +7702,10 @@ function SearchScreen({ctx}) {
         return;
       }
     }
-    // A locker with no ITEM CODE in the sheet: the salesperson types it on the
-    // order form (the price still comes from the sheet's CPL, matched by name).
-    addPriceItemToOrder(item, order, setOrder, ctx.showToast, item.homeLocker && !item.code ? { codeManual: true } : undefined);
+    // A locker with no ITEM CODE / no CPL in the sheet: the salesperson types the
+    // code / MRP on the order form (otherwise both come from the sheet row).
+    const lockerExtra = item.homeLocker ? { ...(!item.code ? { codeManual: true } : {}), ...(!(Number(item.cpl) > 0) ? { priceManual: true } : {}) } : null;
+    addPriceItemToOrder(item, order, setOrder, ctx.showToast, lockerExtra && Object.keys(lockerExtra).length ? lockerExtra : undefined);
   }
 
   // Add a hand-entered item that isn't in the price list. The typed price is the
@@ -7930,6 +7931,7 @@ function SearchScreen({ctx}) {
                     <div style={{fontFamily:T.mono,fontSize:14,fontWeight:700,color:cpl>0?T.ink:T.ink4}}>
                       {cpl > 0 ? '₹' + cpl.toLocaleString('en-IN') : '—'}
                     </div>
+                    {!(cpl > 0) && it.homeLocker && <div style={{fontSize:8,color:T.warn,fontWeight:700,textAlign:'right',marginTop:1}}>enter price on order</div>}
                     {cpl > 0 && <div style={{fontSize:8,color:T.ink4,fontWeight:600,textAlign:'right',marginTop:1}}>incl. 18% GST</div>}
                   </div>
                   <button onClick={e=>{e.stopPropagation();addToOrder(it);}} style={{height:32,padding:'0 12px',borderRadius:6,background:oos?T.warn:T.green,color:'#fff',border:'none',fontSize:13,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:4}}>
@@ -8316,6 +8318,7 @@ function OrderFormScreen({ctx, viewOnly}) {
     if(!o.purchasingFor) add('customer','Select what they are purchasing for');
     if(o.manualOrder && !o.date) add('customer','Set the Booking Date for the manual order');
     (o.items||[]).forEach(it=>{ if(it.codeManual && !String(it.code||'').trim()) add('items','Enter the item code for '+(it.name||'item')); });
+    (o.items||[]).forEach(it=>{ if(it.priceManual && !(Number(it.mrp) > 0)) add('items','Enter the MRP for '+(it.name||'item')); });
     (o.items||[]).forEach(it=>{ if(isUpmodsItem(it) && !it.upmodsType) add('items','Select the Upmods type (Bed / Sofa / Dining …) for '+(it.name||it.code||'item')); });
     if(!o.delivery) add('address','Delivery address is required');
     if(!o.pincode||!String(o.pincode).trim()) add('address','Pincode is required');
@@ -8656,7 +8659,8 @@ function OrderFormScreen({ctx, viewOnly}) {
                         const up=base*(1-discPct);
                         setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,mrp:base,unitPrice:up,total:up*x.qty}:x)}));
                       }}
-                      style={{width:78,border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 6px',fontFamily:T.mono,fontSize:13,fontWeight:700,textAlign:'right',color:T.ink}}
+                      placeholder={it.priceManual?'Enter *':undefined}
+                      style={{width:78,border:`1.5px solid ${it.priceManual&&!(mrpVal>0)?T.bad:T.green}`,borderRadius:4,padding:'3px 6px',fontFamily:T.mono,fontSize:13,fontWeight:700,textAlign:'right',color:T.ink}}
                     />
                     <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>DISC %</span>
                     <NumBox
