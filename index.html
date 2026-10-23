@@ -608,7 +608,7 @@ function itemSchemeEstimate(it) {
 
 // Add a price item (Browse Items / Catalogue) to the order draft — the single
 // line shape used across the app so totals and the PDF stay consistent.
-// ── Home Lockers (OPS "Home Lockers" tab: PRODUCT NAME | ITEM CODE | QUANTITY | CPL)
+// ── Home Lockers (OPS "Home_Locker_Stock" tab: PRODUCT NAME | ITEM CODE | QUANTITY | CPL)
 // A locker is identified by its item code, else by its product name (some lockers
 // have no code). Mirrors _lockerKey in Code.gs, which deducts the sold quantity.
 function lockerKeyOf(code, name) {
@@ -659,8 +659,9 @@ function addPriceItemToOrder(item, order, setOrder, showToast, extra) {
   const basePrice = item.mrp || item.cpl || 0;
   const effCode   = item.altCode || item.code;
   const items     = order.items || [];
-  // Items without a code (e.g. some Home Lockers) are told apart by name.
-  const exists    = items.findIndex(x => x.code === effCode && !x._group && (effCode || x.name === item.name));
+  // Items without a code (e.g. some Home Lockers, whose code the salesperson types
+  // on the order form) are told apart by name.
+  const exists    = items.findIndex(x => !x._group && (effCode ? x.code === effCode : ((x.codeManual || !x.code) && x.name === item.name)));
   let newItems;
   if (exists >= 0) {
     newItems = items.map((x, idx) => idx === exists ? { ...x, qty: x.qty + 1, total: (x.qty + 1) * (x.unitPrice || x.mrp || x.cpl || 0) } : x);
@@ -7652,7 +7653,9 @@ function SearchScreen({ctx}) {
         return;
       }
     }
-    addPriceItemToOrder(item, order, setOrder, ctx.showToast);
+    // A locker with no ITEM CODE in the sheet: the salesperson types it on the
+    // order form (the price still comes from the sheet's CPL, matched by name).
+    addPriceItemToOrder(item, order, setOrder, ctx.showToast, item.homeLocker && !item.code ? { codeManual: true } : undefined);
   }
 
   // Add a hand-entered item that isn't in the price list. The typed price is the
@@ -8263,6 +8266,7 @@ function OrderFormScreen({ctx, viewOnly}) {
     if(!o.purchasePattern||o.purchasePattern.length===0) add('customer','Select the purchase pattern');
     if(!o.purchasingFor) add('customer','Select what they are purchasing for');
     if(o.manualOrder && !o.date) add('customer','Set the Booking Date for the manual order');
+    (o.items||[]).forEach(it=>{ if(it.codeManual && !String(it.code||'').trim()) add('items','Enter the item code for '+(it.name||'item')); });
     (o.items||[]).forEach(it=>{ if(isUpmodsItem(it) && !it.upmodsType) add('items','Select the Upmods type (Bed / Sofa / Dining …) for '+(it.name||it.code||'item')); });
     if(!o.delivery) add('address','Delivery address is required');
     if(!o.pincode||!String(o.pincode).trim()) add('address','Pincode is required');
@@ -8550,11 +8554,14 @@ function OrderFormScreen({ctx, viewOnly}) {
             const gstUnit  = gstInclUnit(it);                   // per-unit MRP after discount
             const lineShown= gstInclLine(it);                   // line total (incl. GST)
             return (
-            <div key={it.code+i} style={{padding:'11px 14px',borderBottom:`1px solid ${T.line}`,...(_isFourS(it.whTag)?{background:'#fff4d6',borderLeft:`4px solid ${T.warn}`}:{})}}>
+            <div key={(it.codeManual?'':it.code)+i} style={{padding:'11px 14px',borderBottom:`1px solid ${T.line}`,...(_isFourS(it.whTag)?{background:'#fff4d6',borderLeft:`4px solid ${T.warn}`}:{})}}>
               <div style={{display:'flex',gap:8,alignItems:'flex-start'}}>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:3,flexWrap:'wrap'}}>
-                    <span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:600}}>{it.code}</span>
+                    {it.codeManual && !viewOnly
+                      ? <input value={it.code||''} placeholder="Enter item code *" onChange={e=>{const v=e.target.value.toUpperCase().trim();setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,code:v}:x)}));}}
+                          style={{fontFamily:T.mono,fontSize:11,fontWeight:700,width:150,padding:'3px 6px',borderRadius:4,border:`1.5px solid ${it.code?T.line:T.bad}`,color:T.ink,background:'#fff'}}/>
+                      : <span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:600}}>{it.code}</span>}
                     {it.inStock>0 && <StockChip branch={it.branch||'STOCK'} count={it.inStock} low={it.inStock<3}/>}
                     {(!it.inStock)&&<Pill tone="warn" size="sm">OOS</Pill>}
                     {it.discontinued&&<Pill tone="bad" size="sm">DISCONTINUED{it.discSince?' since '+it.discSince:''}</Pill>}

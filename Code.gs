@@ -45,7 +45,7 @@ var PRICE_SKIP = [
   'Orders_Master', 'Change_Log', 'Price_Lists',
   'Product Catalog', 'Product Catalogue',
   'sweetener_scheme', 'Sweetener Scheme',
-  'Home Lockers', 'Home Lockers Sold',
+  'Home_Locker_Stock', 'Home Lockers', 'Home Lockers Sold',
   'Sheet1', 'Sheet2', 'Sheet3', 'Sheet4', 'Sheet5',
 ];
 
@@ -917,7 +917,7 @@ function handleGifts() {
 }
 
 // ─── HOME LOCKERS ───────────────────────────────────────────────────────────────
-// Reads the OPS spreadsheet → "Home Lockers" tab. This is the showroom's stock of
+// Reads the OPS spreadsheet → "Home_Locker_Stock" tab. This is the showroom's stock of
 // Godrej home lockers / safes offered for sale in the app. It is a LIVE ledger the
 // app writes back to on every order save (see _syncHomeLockers): QUANTITY is what
 // is still available to sell, and is reduced as lockers are booked.
@@ -927,12 +927,14 @@ function handleGifts() {
 // Optional extra columns, updated by the app when present:
 //   SOLD QTY | LAST SOLD ON
 //
-// A row is identified by ITEM CODE, or by PRODUCT NAME when the code is blank.
+// A row is identified by ITEM CODE, or by PRODUCT NAME when the code is blank (the
+// salesperson then types the code on the order form; the row is still matched by
+// name and its CPL is used as the price).
 // CPL is read the same way as the CPL column of the other price tabs (basic price,
 // GST is added on top in the app).
 function _lockersSheet(opsSS) {
   if (!opsSS) return null;
-  var names = ['Home Lockers', 'HOME LOCKERS', 'Home Locker', 'HOME LOCKER', 'Home_Lockers', 'Lockers', 'LOCKERS'];
+  var names = ['Home_Locker_Stock', 'Home Locker Stock', 'HOME_LOCKER_STOCK', 'Home Lockers', 'HOME LOCKERS', 'Home Locker', 'HOME LOCKER', 'Home_Lockers', 'Lockers', 'LOCKERS'];
   for (var i = 0; i < names.length; i++) {
     var sh = opsSS.getSheetByName(names[i]);
     if (sh) return sh;
@@ -941,12 +943,12 @@ function _lockersSheet(opsSS) {
   var all = opsSS.getSheets();
   for (var j = 0; j < all.length; j++) {
     var n = String(all[j].getName() || '').replace(/[\s_]+/g, '').toUpperCase();
-    if (n === 'HOMELOCKERS' || n === 'HOMELOCKER') return all[j];
+    if (n === 'HOMELOCKERSTOCK' || n === 'HOMELOCKERS' || n === 'HOMELOCKER') return all[j];
   }
   return null;
 }
 
-// Column layout of the "Home Lockers" sheet, resolved from its header row. Shared by
+// Column layout of the "Home_Locker_Stock" sheet, resolved from its header row. Shared by
 // the reader (handleHomeLockers) and the writer (_syncHomeLockers).
 function _lockerCols(hdr) {
   return {
@@ -975,7 +977,7 @@ function handleHomeLockers() {
   if (!sh) {
     // Not a hard error — the app still works, it just shows no lockers until the
     // tab exists.
-    return { ok: true, items: [], syncedAt: new Date().toISOString(), note: 'Add a "Home Lockers" tab (headers: PRODUCT NAME | ITEM CODE | QUANTITY | CPL) to the OPS spreadsheet to sell home lockers.' };
+    return { ok: true, items: [], syncedAt: new Date().toISOString(), note: 'Add a "Home_Locker_Stock" tab (headers: PRODUCT NAME | ITEM CODE | QUANTITY | CPL) to the OPS spreadsheet to sell home lockers.' };
   }
 
   var rows = sh.getDataRange().getValues();
@@ -2418,7 +2420,7 @@ function handleSaveOrder(o) {
     // and log them against the order. Only on a brand-new booking (res.isNew) so a
     // re-save / edit never deducts the same gift twice — mirrors the 4S stock commit.
     if (res.isNew) { try { _commitGifts(o, res.orderNo, res.internalNo); } catch (e) {} }
-    // Keep the "Home Lockers" stock in step with this order. Runs on EVERY save (not
+    // Keep the "Home_Locker_Stock" in step with this order. Runs on EVERY save (not
     // only new bookings): it compares the lockers on the order now with what the
     // "Home Lockers Sold" log already holds for it and applies only the difference,
     // so an edit that adds / removes / changes a locker is reflected exactly once.
@@ -2586,9 +2588,9 @@ function _commitGifts(o, orderNo, internalNo) {
 }
 
 // ─── HOME LOCKERS STOCK WRITE-BACK ──────────────────────────────────────────────
-// Brings the "Home Lockers" stock in line with one order. Every order line whose
+// Brings the "Home_Locker_Stock" in line with one order. Every order line whose
 // item code (or, for lockers without a code, product name) matches a row of the
-// "Home Lockers" tab counts as a locker sale. The "Home Lockers Sold" log (created
+// "Home_Locker_Stock" tab counts as a locker sale. The "Home Lockers Sold" log (created
 // on first use) holds one row per change, with a signed QUANTITY, so the sum of an
 // order's rows is what has already been taken out of stock for it. We compare that
 // with the order's lockers now and apply only the difference:
