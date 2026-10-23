@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v64';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v65';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -45,6 +45,7 @@ var PRICE_SKIP = [
   'Orders_Master', 'Change_Log', 'Price_Lists',
   'Product Catalog', 'Product Catalogue',
   'sweetener_scheme', 'Sweetener Scheme',
+  'Home Lockers', 'Home Lockers Sold',
   'Sheet1', 'Sheet2', 'Sheet3', 'Sheet4', 'Sheet5',
 ];
 
@@ -240,6 +241,7 @@ function doGet(e) {
       case 'stock':          result = handleStock();            break;
       case 'fourSStock':     result = handleFourSStock();       break;
       case 'gifts':          result = handleGifts();            break;
+      case 'homeLockers':    result = handleHomeLockers();      break;
       case 'priceList':      result = handlePriceList(p);       break;
       case 'orders':         result = handleOrders(p);          break;
       case 'mis':            result = handleMisData();          break;
@@ -910,6 +912,90 @@ function handleGifts() {
     var qty  = _toInt(r[cQty]);
     var price= _toInt(r[cPrc]);
     items.push({ item: name, qty: qty, price: price });
+  }
+  return { ok: true, items: items, syncedAt: new Date().toISOString() };
+}
+
+// ─── HOME LOCKERS ───────────────────────────────────────────────────────────────
+// Reads the OPS spreadsheet → "Home Lockers" tab. This is the showroom's stock of
+// Godrej home lockers / safes offered for sale in the app. It is a LIVE ledger the
+// app writes back to on every order save (see _syncHomeLockers): QUANTITY is what
+// is still available to sell, and is reduced as lockers are booked.
+//
+// Expected header row (columns auto-detected, order-independent):
+//   PRODUCT NAME | ITEM CODE | QUANTITY | CPL
+// Optional extra columns, updated by the app when present:
+//   SOLD QTY | LAST SOLD ON
+//
+// A row is identified by ITEM CODE, or by PRODUCT NAME when the code is blank.
+// CPL is read the same way as the CPL column of the other price tabs (basic price,
+// GST is added on top in the app).
+function _lockersSheet(opsSS) {
+  if (!opsSS) return null;
+  var names = ['Home Lockers', 'HOME LOCKERS', 'Home Locker', 'HOME LOCKER', 'Home_Lockers', 'Lockers', 'LOCKERS'];
+  for (var i = 0; i < names.length; i++) {
+    var sh = opsSS.getSheetByName(names[i]);
+    if (sh) return sh;
+  }
+  // Last resort: case-insensitive scan across all tabs (ignoring spaces/underscores).
+  var all = opsSS.getSheets();
+  for (var j = 0; j < all.length; j++) {
+    var n = String(all[j].getName() || '').replace(/[\s_]+/g, '').toUpperCase();
+    if (n === 'HOMELOCKERS' || n === 'HOMELOCKER') return all[j];
+  }
+  return null;
+}
+
+// Column layout of the "Home Lockers" sheet, resolved from its header row. Shared by
+// the reader (handleHomeLockers) and the writer (_syncHomeLockers).
+function _lockerCols(hdr) {
+  return {
+    name:     _hdrIdx(hdr, ['PRODUCT NAME', 'ITEM NAME', 'ITEM DESCRIPTION', 'DESCRIPTION', 'NAME', 'ITEM']),
+    code:     _hdrIdx(hdr, ['ITEM CODE', 'ITEM_CODE', 'LN CODE', 'CODE']),
+    qty:      _hdrIdx(hdr, ['QUANTITY', 'QTY', 'AVAILABLE QTY', 'AVAILABLE', 'STOCK']),
+    cpl:      _hdrIdx(hdr, ['CPL', 'PRICE', 'CONSUMER PRICE', 'MRP', 'RATE']),
+    sold:     _hdrIdx(hdr, ['SOLD QTY', 'SOLD', 'QTY SOLD']),
+    lastSold: _hdrIdx(hdr, ['LAST SOLD ON', 'LAST SOLD', 'LAST SALE DATE'])
+  };
+}
+
+// Stable identity of a locker: its item code, else its product name.
+function _lockerKey(code, name) {
+  var c = String(code || '').toUpperCase().trim();
+  if (c) return 'C:' + c;
+  var n = String(name || '').toUpperCase().replace(/\s+/g, ' ').trim();
+  return n ? 'N:' + n : '';
+}
+
+function handleHomeLockers() {
+  var opsSS = _openOPS();
+  if (!opsSS) return { ok: false, error: 'Cannot open OPS spreadsheet (ID: ' + OPS_SHEET_ID + '). Ensure the script owner has access.' };
+
+  var sh = _lockersSheet(opsSS);
+  if (!sh) {
+    // Not a hard error — the app still works, it just shows no lockers until the
+    // tab exists.
+    return { ok: true, items: [], syncedAt: new Date().toISOString(), note: 'Add a "Home Lockers" tab (headers: PRODUCT NAME | ITEM CODE | QUANTITY | CPL) to the OPS spreadsheet to sell home lockers.' };
+  }
+
+  var rows = sh.getDataRange().getValues();
+  if (rows.length < 2) return { ok: true, items: [], syncedAt: new Date().toISOString() };
+
+  var hdr = rows[0].map(function(c){ return String(c || '').toUpperCase().trim(); });
+  var c   = _lockerCols(hdr);
+  // Positional fallback matching the documented column order.
+  var cName = c.name >= 0 ? c.name : 0;
+  var cCode = c.code >= 0 ? c.code : 1;
+  var cQty  = c.qty  >= 0 ? c.qty  : 2;
+  var cCpl  = c.cpl  >= 0 ? c.cpl  : 3;
+
+  var items = [];
+  for (var i = 1; i < rows.length; i++) {
+    var r    = rows[i];
+    var name = String(r[cName] || '').trim();
+    var code = String(r[cCode] || '').toUpperCase().trim();
+    if (!name && !code) continue;
+    items.push({ code: code, name: name || code, qty: _toInt(r[cQty]), cpl: _numVal(r[cCpl]) });
   }
   return { ok: true, items: items, syncedAt: new Date().toISOString() };
 }
@@ -2332,6 +2418,11 @@ function handleSaveOrder(o) {
     // and log them against the order. Only on a brand-new booking (res.isNew) so a
     // re-save / edit never deducts the same gift twice — mirrors the 4S stock commit.
     if (res.isNew) { try { _commitGifts(o, res.orderNo, res.internalNo); } catch (e) {} }
+    // Keep the "Home Lockers" stock in step with this order. Runs on EVERY save (not
+    // only new bookings): it compares the lockers on the order now with what the
+    // "Home Lockers Sold" log already holds for it and applies only the difference,
+    // so an edit that adds / removes / changes a locker is reflected exactly once.
+    try { _syncHomeLockers(o, res.orderNo, res.internalNo); } catch (e) {}
     // Audit: CREATE for a brand-new booking, EDIT when it already had an order no.
     var who = o.byName || o.by || o.salesExec || '';
     var act = (o.no || o.internalNo) ? 'EDIT_ORDER' : 'CREATE_ORDER';
@@ -2492,6 +2583,106 @@ function _commitGifts(o, orderNo, internalNo) {
                String(o.salesExec || ''), gname, gqty, gprc ]);
   }
   if (out.length) log.getRange(log.getLastRow() + 1, 1, out.length, 9).setValues(out);
+}
+
+// ─── HOME LOCKERS STOCK WRITE-BACK ──────────────────────────────────────────────
+// Brings the "Home Lockers" stock in line with one order. Every order line whose
+// item code (or, for lockers without a code, product name) matches a row of the
+// "Home Lockers" tab counts as a locker sale. The "Home Lockers Sold" log (created
+// on first use) holds one row per change, with a signed QUANTITY, so the sum of an
+// order's rows is what has already been taken out of stock for it. We compare that
+// with the order's lockers now and apply only the difference:
+//   • more lockers than logged  → subtract from QUANTITY (add to SOLD QTY)
+//   • fewer lockers than logged → put them back (edit removed a locker / lowered qty,
+//                                 or the order was deleted — wantLines = [])
+// QUANTITY is floored at 0. Called inside handleSaveOrder's script lock.
+function _syncHomeLockers(o, orderNo, internalNo, wantLines) {
+  var opsSS = _openOPS();
+  var sh = _lockersSheet(opsSS);
+  if (!sh) return;
+
+  var rows = sh.getDataRange().getValues();
+  if (rows.length < 2) return;
+  var hdr = rows[0].map(function(c){ return String(c || '').toUpperCase().trim(); });
+  var c   = _lockerCols(hdr);
+  var cName = c.name >= 0 ? c.name : 0;
+  var cCode = c.code >= 0 ? c.code : 1;
+  var cQty  = c.qty  >= 0 ? c.qty  : 2;
+  var cCpl  = c.cpl  >= 0 ? c.cpl  : 3;
+
+  // Index the ledger rows: key → { row, name, code, cpl }. Both the code key and the
+  // name key point at the row, so a line matches whichever it carries.
+  var byKey = {};
+  for (var r = 1; r < rows.length; r++) {
+    var nm = String(rows[r][cName] || '').trim();
+    var cd = String(rows[r][cCode] || '').toUpperCase().trim();
+    if (!nm && !cd) continue;
+    var ent = { row: r, key: _lockerKey(cd, nm), name: nm, code: cd, cpl: _numVal(rows[r][cCpl]) };
+    var kc = _lockerKey(cd, ''), kn = _lockerKey('', nm);
+    if (kc && !byKey[kc]) byKey[kc] = ent;
+    if (kn && !byKey[kn]) byKey[kn] = ent;
+  }
+
+  // What the order holds now, per ledger row.
+  var want = {};
+  var lines = wantLines || (o && Array.isArray(o.items) ? o.items : []);
+  for (var i = 0; i < lines.length; i++) {
+    var it = lines[i];
+    if (!it) continue;
+    var codes = [it.code, it.priceCode];
+    var hit = null;
+    for (var k = 0; k < codes.length && !hit; k++) {
+      var kk = _lockerKey(codes[k], '');
+      if (kk && byKey[kk]) hit = byKey[kk];
+    }
+    if (!hit) { var kn2 = _lockerKey('', it.name); if (kn2 && byKey[kn2]) hit = byKey[kn2]; }
+    if (!hit) continue;
+    want[hit.key] = (want[hit.key] || 0) + (_toInt(it.qty) || 1);
+  }
+
+  // What the log says this order already took out of stock.
+  var LOG_HDR = ['DATE & TIME', 'ORDER NO', 'INTERNAL NO', 'CUSTOMER', 'CONTACT NUMBER',
+                 'SALES PERSON', 'ITEM CODE', 'PRODUCT NAME', 'QUANTITY', 'CPL'];
+  var log = opsSS.getSheetByName('Home Lockers Sold');
+  var had = {};
+  var intNo = Number(internalNo) || 0;
+  var ordNo = String(orderNo || '').trim();
+  if (log && log.getLastRow() >= 2) {
+    var lv = log.getRange(2, 1, log.getLastRow() - 1, LOG_HDR.length).getValues();
+    for (var l = 0; l < lv.length; l++) {
+      var sameOrder = intNo ? Number(lv[l][2]) === intNo : (ordNo && String(lv[l][1] || '').trim() === ordNo);
+      if (!sameOrder) continue;
+      var lk = _lockerKey(lv[l][6], lv[l][7]);
+      if (lk) had[lk] = (had[lk] || 0) + _toInt(lv[l][8]);
+    }
+  }
+
+  // Apply the differences.
+  var keys = {};
+  for (var a in want) keys[a] = true;
+  for (var b in had)  keys[b] = true;
+  var now = new Date(), out = [];
+  for (var key in keys) {
+    var delta = (want[key] || 0) - (had[key] || 0);
+    if (!delta) continue;
+    var e = null;
+    for (var bk in byKey) { if (byKey[bk].key === key) { e = byKey[bk]; break; } }
+    if (!e) continue;   // row no longer in the ledger — nothing to adjust
+    var sheetRow = e.row + 1;
+    sh.getRange(sheetRow, cQty + 1).setValue(Math.max(0, _toInt(rows[e.row][cQty]) - delta));
+    if (c.sold >= 0) sh.getRange(sheetRow, c.sold + 1).setValue(Math.max(0, _toInt(rows[e.row][c.sold]) + delta));
+    if (c.lastSold >= 0 && delta > 0) sh.getRange(sheetRow, c.lastSold + 1).setValue(now);
+    out.push([ now, ordNo, intNo || '', String((o && o.customer) || ''), String((o && o.phone) || ''),
+               String((o && o.salesExec) || ''), e.code, e.name, delta, e.cpl ]);
+  }
+  if (!out.length) return;
+
+  if (!log) {
+    log = opsSS.insertSheet('Home Lockers Sold');
+    log.getRange(1, 1, 1, LOG_HDR.length).setValues([LOG_HDR]);
+    try { log.getRange(1, 1, 1, LOG_HDR.length).setFontWeight('bold'); } catch (e2) {}
+  }
+  log.getRange(log.getLastRow() + 1, 1, out.length, LOG_HDR.length).setValues(out);
 }
 
 // ─── APP-ORDER SERIAL COUNTER ─────────────────────────────────────────────────
@@ -3882,6 +4073,9 @@ function handleDeleteOrder(body) {
   }
   if (!rows.length) return { ok: false, error: 'Order not found: ' + orderNo };
   for (var j = rows.length - 1; j >= 0; j--) sh.deleteRow(rows[j]);
+
+  // Put any home lockers this order had taken back into stock.
+  try { _syncHomeLockers({}, orderNo, internalNo, []); } catch (e) {}
 
   _appendLog(by, orderNo, 'DELETE_ORDER', 'Deleted ' + rows.length + ' row(s)');
   return { ok: true, rows: rows.length };
