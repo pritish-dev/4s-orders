@@ -8132,9 +8132,12 @@ function OrderFormScreen({ctx, viewOnly}) {
   // Kreation X2 / X3) in the cart makes its measurements mandatory.
   const hasSofa     = (o.items||[]).some(isSofaItem);
   const hasWardrobe = (o.items||[]).some(isWardrobeItem);
-  // Number of modular-wardrobe line items — used to seed the "how many modular
-  // furnitures" picker the first time the block is shown.
-  const wardrobeItemCount = (o.items||[]).filter(isWardrobeItem).length;
+  // Distinct modular furnitures in the cart (Kalista / Kreation X2 / X3) — one
+  // furniture is made of many line items (carcass, shutters, handles …), so the
+  // "how many modular furnitures" picker is seeded per family, not per line item.
+  // Sales can raise the count when the order has more than one of a family.
+  const wardrobeFamilies = [...new Set((o.items||[]).filter(isWardrobeItem).map(it=>modularFamilyOf(it).label))];
+  const wardrobeItemCount = wardrobeFamilies.length;
   const AWARENESS  = ['Social Media','Whatsapp','Newspaper','Friends & Relatives','Website','Others'];
   const PATTERNS   = ['1st Time','2nd Time','3rd Time','More than 3'];
   const PURCHASING = ['New Home','Renovation','Rented Home','Other'];
@@ -8210,7 +8213,9 @@ function OrderFormScreen({ctx, viewOnly}) {
   // Seed the modular-furniture and room blocks the first time they're shown when
   // a modular wardrobe is in the cart (sales can still change either count).
   React.useEffect(()=>{
-    if(hasWardrobe && Array.isArray(o.wardrobes) && o.wardrobes.length===0) setWardrobeCount(Math.max(1,wardrobeItemCount));
+    if(hasWardrobe && Array.isArray(o.wardrobes) && o.wardrobes.length===0)
+      setOrder(prev=> (Array.isArray(prev.wardrobes)&&prev.wardrobes.length) ? prev
+        : {...prev, wardrobes:(wardrobeFamilies.length?wardrobeFamilies:['']).map(name=>({...BLANK_WARDROBE(),name}))});
     if(hasWardrobe && Array.isArray(o.rooms) && o.rooms.length===0) setRoomCount(1);
   },[hasWardrobe,wardrobeItemCount]);
 
