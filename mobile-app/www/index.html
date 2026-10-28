@@ -392,7 +392,7 @@ function rawPriceBook() {
 }
 
 // Map one price-book record to the app's price-item shape. The app stores the
-// PRE-GST base in mrp/cpl and adds 18% GST everywhere for the customer MRP, so we
+// PRE-GST base in mrp/cpl and adds 18% GST everywhere for the customer CPL, so we
 // derive the base from basic_price when present, else from the GST-inclusive MOP
 // (price ÷ 1.18). Furniture rows carry basic_price; mattress rows carry only the
 // MOP (`price`), which is the GST-inclusive consumer price.
@@ -402,7 +402,7 @@ function priceBookItem(r) {
       ? Number(r.basic_price)
       : (r.price != null ? Number(r.price) / (1 + GST_RATE) : 0);
   // Keep the exact (unrounded) base: rounding it here and re-adding 18% GST
-  // later inflates the MRP by ₹1 (e.g. ₹10,000 → 8,475 × 1.18 = ₹10,001).
+  // later inflates the CPL by ₹1 (e.g. ₹10,000 → 8,475 × 1.18 = ₹10,001).
   const base = Number(basic) || 0;
   const isMat = r.file === 'Mattress';
   // Size / thickness / warranty / finish shown under the name so the salesperson
@@ -668,7 +668,10 @@ function lockerKeyOf(code, name) {
 // A "Home Lockers" row in the app's price-item shape. Its QUANTITY becomes the
 // item's stock, so Browse shows the live availability / OUT OF STOCK badge.
 function lockerPriceItem(l) {
-  const base = Number(l.cpl) || 0;   // CPL = basic price; GST is added on top
+  // The sheet's CPL for a locker ALREADY includes GST. The app stores a pre-GST
+  // base and adds 18% everywhere it shows a price, so carve the GST out here —
+  // the locker then shows and bills at exactly the sheet's CPL (no GST on top).
+  const base = (Number(l.cpl) || 0) / (1 + GST_RATE);
   const code = String(l.code || '').toUpperCase().trim();
   return {
     code, name: l.name || code, cat: 'Home Lockers', item: 'Home Locker',
@@ -1027,7 +1030,7 @@ function isoToDMY(iso) {
 }
 
 // Effective per-unit selling price for one line (matches the order form's
-// on-screen "Disc. Price"): an explicit unitPrice wins, else MRP after item disc.
+// on-screen "Disc. Price"): an explicit unitPrice wins, else CPL after item disc.
 function itemUnitPrice(it) {
   const mrpVal  = Number(it.mrp) || Number(it.cpl) || 0;
   const discPct = parseFloat(it.disc || '0') / 100;
@@ -1037,28 +1040,28 @@ function itemUnitPrice(it) {
 // floating-point noise (8474.576…×1.18 = 9999.9999…) so it can't tip a value
 // over a .5 boundary. Intermediate pre-GST values are never rounded.
 function roundRs(n) { return Math.round(Math.round((Number(n) || 0) * 100) / 100); }
-// ── GST-inclusive pricing (MRP) ────────────────────────────────
-// Every price shown in the app is the MRP = list price (CPL) + 18% GST, baked
+// ── GST-inclusive pricing (CPL) ────────────────────────────────
+// Every price shown in the app is the CPL = list price (CPL) + 18% GST, baked
 // in once at the point of display. The GST is ALREADY inside the price, so it is
-// never added again on top: the order total is simply the sum of the MRP lines,
+// never added again on top: the order total is simply the sum of the CPL lines,
 // and CGST/SGST on the bill are BACK-CALCULATED out of that inclusive total (for
 // a valid tax breakup) — never added to it. Editing an item's price does not
-// re-apply GST; the entered value is treated as the final MRP.
+// re-apply GST; the entered value is treated as the final CPL.
 const GST_RATE = 0.18;
 // Specific Instruction dropdown options (first is the default for new orders).
 const INSTALL_NOTE_OPTIONS = ['Installation will be done within 48 hours post Delivery', 'SDDI', 'Marriage Order'];
-// Per-unit MRP = the (possibly edited / discounted) list price with 18% GST in it.
+// Per-unit CPL = the (possibly edited / discounted) list price with 18% GST in it.
 function gstInclUnit(it) { return roundRs(itemUnitPrice(it) * (1 + GST_RATE)); }
 function gstInclLine(it) { return gstInclUnit(it) * (Number(it.qty) || 0); }
 
 function orderTotals(o) {
   const items         = o.items || [];
-  // Each line is the GST-inclusive MRP × qty. The subtotal already includes GST.
+  // Each line is the GST-inclusive CPL × qty. The subtotal already includes GST.
   const itemsSubtotal = items.reduce((s, i) => s + gstInclLine(i), 0);
   const orderDiscPct  = Math.max(0, parseFloat(o.orderDiscount) || 0) / 100;
   const orderDiscAmt  = rnd(itemsSubtotal * orderDiscPct);
-  // Re-derived order value = MRP subtotal less any order-wide discount. GST is NOT
-  // added on top — it is already part of every MRP line.
+  // Re-derived order value = CPL subtotal less any order-wide discount. GST is NOT
+  // added on top — it is already part of every CPL line.
   const derivedTotal  = itemsSubtotal - orderDiscAmt;
   const roundBudget   = 2 + 10 * items.length;
   const billedTotal   = Number(o.amt) || 0;
@@ -1078,7 +1081,7 @@ function orderTotals(o) {
   const cgst          = Math.round(gstTotal / 2);
   const sgst          = cgst;
   const taxable       = total - cgst - sgst;
-  // MRPs are GST-inclusive and every line is rounded to the whole rupee, so a
+  // CPLs are GST-inclusive and every line is rounded to the whole rupee, so a
   // "paid in full" amount can land a few rupees under the rounded total. Treat a
   // residual within the same per-line rounding budget as fully paid so the customer
   // who paid the whole amount never sees a phantom balance.
@@ -1755,7 +1758,7 @@ function customerCopyItems(items) {
     // priced as a single line.
     g._children.push({ code: it.code || '', name: it.name || it.item || '', qty: qty });
   });
-  // For each collapsed family, show on one line: the total price in the MRP
+  // For each collapsed family, show on one line: the total price in the CPL
   // column, the overall (average) discount % in the Disc column, and the net
   // total in the Disc. Price + Total columns.
   out.forEach(g => {
@@ -1839,7 +1842,8 @@ function generatePDF(order, copyType) {
   // always equals the Total exactly.
   const RCV      = orderReceived(order);
   const balance  = RCV.balance;
-  const earnest  = totalAmt - balance;   // amount collected so far (clamped so the block balances)
+  const paid     = totalAmt - balance;   // total paid so far (clamped so the block balances)
+  const earnest  = Math.min(Number(order.earnest) || 0, paid);   // booking advance (money receipt 1)
   const orderDiscPct = T2.orderDiscPct;
   const orderDiscAmt = T2.orderDiscAmt;
   const taxable      = T2.taxable;
@@ -1880,9 +1884,9 @@ function generatePDF(order, copyType) {
   const inr = (n) => 'Rs.' + n.toLocaleString('en-IN');
 
   // Items table columns.
-  //  • Sales copy:    Item Code | Qty | Description | MRP | Disc | Disc. Price | Total
+  //  • Sales copy:    Item Code | Qty | Description | CPL | Disc | Disc. Price | Total
   //  • Customer copy: Item Code | Qty | Description | Price | Total
-  //    (the customer copy never shows the MRP or the discount — only the net
+  //    (the customer copy never shows the CPL or the discount — only the net
   //     price the customer actually pays, per the order form spec).
   const tC = isCustomer ? {
     code: { x:ml,        w:22, t:'Item Code' },
@@ -1894,7 +1898,7 @@ function generatePDF(order, copyType) {
     code:{ x:ml,          w:22, t:'Item Code' },
     qty: { x:ml+22,       w:10, t:'Qty' },
     desc:{ x:ml+32,       w:cw-32-22-14-26-24, t:'Product Description' },
-    mrp: { x:ml+cw-86,    w:22, t:'MRP' },
+    mrp: { x:ml+cw-86,    w:22, t:'CPL' },
     disc:{ x:ml+cw-64,    w:14, t:'Disc' },
     cpl: { x:ml+cw-50,    w:26, t:'Disc. Price' },
     tot: { x:ml+cw-24,    w:24, t:'Total (Rs.)' },
@@ -2248,15 +2252,15 @@ function generatePDF(order, copyType) {
         doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...GR); doc.text(nm[1], tC.desc.x+1.5, y+9);
       }
     }
-    // MRP — the (possibly edited) list price per unit, shown WITH 18% GST in it.
+    // CPL — the (possibly edited) list price per unit, shown WITH 18% GST in it.
     const incl = (n) => roundRs((Number(n) || 0) * (1 + GST_RATE));
     const mrpV = it.mrp||it.cpl||0;                       // pre-GST base (per unit, or line-gross for a collapsed family)
     const dPct = parseFloat(it.disc)||0;
-    // Disc. Price — MRP after the per-item discount
+    // Disc. Price — CPL after the per-item discount
     const cplV = it.unitPrice>0?it.unitPrice:(mrpV>0?mrpV*(1-dPct/100):0);
     const mrpShown = incl(mrpV);
-    // The MRP and Disc columns exist on the SALES copy only — the customer copy
-    // shows just the net price the customer pays (no MRP, no discount %).
+    // The CPL and Disc columns exist on the SALES copy only — the customer copy
+    // shows just the net price the customer pays (no CPL, no discount %).
     if (!isCustomer) {
       doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...INK);
       rval(tC.mrp.x+tC.mrp.w-1.5, y+7, mrpShown>0?mrpShown.toLocaleString('en-IN'):'—');
@@ -2264,7 +2268,7 @@ function generatePDF(order, copyType) {
       doc.setFontSize(7.5); doc.setTextColor(...(dPct>0?DRED:GR));
       doc.text(dPct>0?dPct+'%':'—', tC.disc.x+tC.disc.w/2, y+7, {align:'center'});
     }
-    // Every price column is GST-inclusive (18% baked into each MRP). GST is never
+    // Every price column is GST-inclusive (18% baked into each CPL). GST is never
     // added on top; it is carved back out in the totals block only for the breakup.
     // A collapsed family shows the sum of its members' rounded lines, so the PDF
     // lines always add up to the order total (no ±₹1 per member).
@@ -2338,7 +2342,7 @@ function generatePDF(order, copyType) {
   // ── TOTALS + RECEIPT + SIGNATURE (final page only) ────────
   function drawTotalsBlock(y) {
     y = drawGiftRow(y);
-    // Every MRP already includes 18% GST, so the subtotal is GST-inclusive. The
+    // Every CPL already includes 18% GST, so the subtotal is GST-inclusive. The
     // CGST/SGST rows are carved OUT of that inclusive amount (taxable + CGST +
     // SGST = Total) — the GST is shown for the breakup but never added on top.
     const fRows = [['Sub Total (incl. GST)', inr(subtotal), false]];
@@ -2350,6 +2354,7 @@ function generatePDF(order, copyType) {
     fRows.push(['SGST @ 9%',   inr(sgst),     false]);
     fRows.push(['Total Amt. (incl. GST)',  inr(totalAmt), true ]);
     fRows.push(['Earnest Amt.',inr(earnest),  false]);
+    fRows.push(['Total Paid',  inr(paid),     false]);
     fRows.push(['Balance Amt.',inr(balance),  true ]);
 
     const tsH = Math.max(5.7*fRows.length, 44), tsLW = cw*0.55, tsRW = cw*0.45, tsRX = ml+tsLW;
@@ -2441,7 +2446,7 @@ function generatePDF(order, copyType) {
         lbl(ml+cw/2+2,y+5,'Amount Received :');
         // Each money receipt shows the amount collected against it: receipt 1 is the
         // booking advance (the `earnest` field), receipts 2 & 3 their own `amt`. The
-        // three add up to the total received printed in the "Earnest Amt." row above.
+        // three add up to the total received printed in the "Total Paid" row above.
         const rcptAmt = r===0 ? (Number(order.earnest)||0) : (Number(mr.amt)||0);
         if(rcptAmt) val(ml+cw/2+32,y+5, fit1(inr(rcptAmt),cw/2-34,7.5), 7.5);
         y += rcH;
@@ -4484,7 +4489,7 @@ function _fmtAmt(n){ n = n||0; return n>99999 ? ('₹'+(n/100000).toFixed(2)+'L'
 // "dd.mm.yy" → sortable/comparable ISO "20yy-mm-dd" (matches <input type=date> values).
 function _toISO(dmy){ const p = String(dmy||'').split('.'); return p.length===3 ? ('20'+p[2]+'-'+p[1]+'-'+p[0]) : ''; }
 // Sales figures are reported EX-GST. Every stored order amount (o.amt) is the
-// GST-inclusive bill (18% baked into each MRP), so the tax is carved back out
+// GST-inclusive bill (18% baked into each CPL), so the tax is carved back out
 // here — the sales summary shows the pre-GST sale value, never the taxed total.
 function _exGst(n){ return Math.round((Number(n)||0)/(1+GST_RATE)); }
 // Channel split for the sales summary. Every order line carries a delivery
@@ -6157,7 +6162,7 @@ const CP_Q326 = {
   hfReimb:  [['Over ₹1.5 lakh','16%','1%'],['Over ₹2.5 lakh','20%','5%'],['Over ₹4 lakh','25%','10%']],
   mattress: [['₹5,00,000 & above','7%'],['₹3,00,000 – 4,99,999','5%'],['₹1,00,000 – 2,99,999','4%'],['Up to ₹99,999','3%']],
   npi: 'Mist Pro, Orthomatic Care PT, Space Edge LX, Springomatic, Spinemax Memory, Ortho Plus NX, Orthomatic Deluxe NX, Snugly LX, Ace Pro, Dual Delite, Superb Coir and NPI mattresses launched in the scheme period',
-  // [gift, MRP, Early Bird 02.10–10.11, Golden Window 11.11–30.11, Last Chance 01.12–31.12] — WPL w/o GST
+  // [gift, CPL, Early Bird 02.10–10.11, Golden Window 11.11–30.11, Last Chance 01.12–31.12] — WPL w/o GST
   giftWindows: [['2026-10-02','2026-11-10','Early Bird'],['2026-11-11','2026-11-30','Golden Window'],['2026-12-01','2026-12-31','Last Chance']],
   gifts: [['Double Comforter',5999,680,755,850],['Double Bedsheet',2490,470,545,600],['Single Bedsheet',1499,360,410,450],
           ['Neckfine XL Pillow',3124,1050,1050,1150],['Nixy Pillow',929,225,235,250],['Neon Pillow',527,145,150,160],
@@ -6451,7 +6456,7 @@ function SchemeLibrary({ user }) {
           ))}
           <SchemeBox tone="bad" title="Not from COCO / franchisee">{S.notFromStore.join(', ')} — not to be sold under this scheme. Freshca is outside the scheme — sell at MOP (CPL + GST).</SchemeBox>
           <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Gift items</div>
-          <SchemeTable head={['Gift', 'Item', 'Code', 'MRP']} rows={S.gifts.map(g => [g[0], g[1], g[2], _inr(g[3])])} />
+          <SchemeTable head={['Gift', 'Item', 'Code', 'CPL']} rows={S.gifts.map(g => [g[0], g[1], g[2], _inr(g[3])])} />
           <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Accessories bought on their own</div>
           <SchemeTable head={['Accessory', 'Discount']} rows={S.accessories.map(([k, p]) => [k, p + '%'])} />
           <SchemeBox title="Booking rules">
@@ -6519,7 +6524,7 @@ function SchemeLibrary({ user }) {
           <SchemeTable head={['Invoice value', 'If CP passes HF discount', 'Reimbursed']} rows={CP_Q326.hfReimb} />
           <SchemeBox>
             • GST invoice mandatory; claims audited by branch &amp; HO; one invoice per claim (multiple invoices need site photos after installation).<br />
-            • VIP Luggage won by a customer is billed to the CP at ₹1,730 (MRP ₹8,950, item 53121600SD01180).<br />
+            • VIP Luggage won by a customer is billed to the CP at ₹1,730 (CPL ₹8,950, item 53121600SD01180).<br />
             • ₹5,000 next-purchase vouchers: reimbursed with a minimum assured margin of 15% at HO's discretion.<br />
             • Line discounts are automated — do not enter manually · no other scheme can be clubbed except exchange.
           </SchemeBox>
@@ -6532,7 +6537,7 @@ function SchemeLibrary({ user }) {
             • CP accessory discounts: {CP_Q326.accessories}.
           </SchemeBox>
           <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Gift contribution (WPL w/o GST){win >= 0 ? ` · now: ${CP_Q326.giftWindows[win][2]}` : ''}</div>
-          <SchemeTable head={['Gift', 'MRP', 'Early Bird 2 Oct–10 Nov', 'Golden 11–30 Nov', 'Last Chance 1–31 Dec']} rows={CP_Q326.gifts.map(g => [g[0], _inr(g[1]), _inr(g[2]), _inr(g[3]), _inr(g[4])])} />
+          <SchemeTable head={['Gift', 'CPL', 'Early Bird 2 Oct–10 Nov', 'Golden 11–30 Nov', 'Last Chance 1–31 Dec']} rows={CP_Q326.gifts.map(g => [g[0], _inr(g[1]), _inr(g[2]), _inr(g[3]), _inr(g[4])])} />
           <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Bajaj interest split — scheme period</div>
           <SchemeTable head={['Tenure', 'Interest', 'GI', 'Franchisee / dealer', 'Customer']} rows={EMI_FY27.bajajCp} />
           <SchemeBox>
@@ -6627,7 +6632,7 @@ function OfferZoneScreen({ctx}) {
   const nShown = sec === 'OPS' ? shown.length : finderShown.length;
   const nTotal = sec === 'OPS' ? opsFiltered.length : finderFiltered.length;
 
-  // Add a Bestfest / Sweetener row: MRP = customer basic, discount % and the
+  // Add a Bestfest / Sweetener row: CPL = customer basic, discount % and the
   // sheet's discounted basic as the selling price, flagged with its scheme.
   function addOfferToOrder(o) {
     const so = OFFER_SECTIONS.find(x => x.id === o.sec) || {};
@@ -7166,8 +7171,8 @@ function SwatchChip({src}) {
 // ─── Manual item entry ───────────────────────────────────────────
 // For items that aren't in the price list: the salesperson types the item code,
 // description and price by hand and the item is added to the order like any
-// other. The price entered is the customer-facing MRP (GST-inclusive) — the same
-// terms as the MRP / SELL boxes on the order form — so the rest of the flow
+// other. The price entered is the customer-facing CPL (GST-inclusive) — the same
+// terms as the CPL / SELL boxes on the order form — so the rest of the flow
 // (order form, PDF, GST breakup, saving) treats it identically to a catalog item.
 function ManualItemSheet({onClose, onAdd, initialName}) {
   const [code,setCode] = React.useState('');
@@ -7196,7 +7201,7 @@ function ManualItemSheet({onClose, onAdd, initialName}) {
           <div style={{margin:'12px 16px',border:`1px solid ${T.line}`,borderRadius:12,overflow:'hidden'}}>
             <Field label="Item Code" value={code} onChange={setCode} mono required placeholder="e.g. CUSTOM-001" error={tried&&!codeOk?'Enter the item code':''}/>
             <Field label="Item Description" value={name} onChange={setName} multiline required placeholder="Full product description" error={tried&&!nameOk?'Enter a description':''}/>
-            <Field label="Price ₹ (incl. 18% GST)" value={price} onChange={v=>setPrice(v.replace(/[^\d.]/g,''))} mono required type="tel" placeholder="Customer price incl. GST" hint="The customer-facing MRP. Add a discount later on the order form if needed." error={tried&&!priceOk?'Enter a valid price':''}/>
+            <Field label="Price ₹ (incl. 18% GST)" value={price} onChange={v=>setPrice(v.replace(/[^\d.]/g,''))} mono required type="tel" placeholder="Customer price incl. GST" hint="The customer-facing CPL. Add a discount later on the order form if needed." error={tried&&!priceOk?'Enter a valid price':''}/>
           </div>
           <div style={{padding:'2px 16px 4px'}}>
             <Btn primary full icon={Icon.plus('#fff',15)} onClick={submit} disabled={!valid}>Add to order</Btn>
@@ -7703,13 +7708,13 @@ function SearchScreen({ctx}) {
       }
     }
     // A locker with no ITEM CODE / no CPL in the sheet: the salesperson types the
-    // code / MRP on the order form (otherwise both come from the sheet row).
+    // code / CPL on the order form (otherwise both come from the sheet row).
     const lockerExtra = item.homeLocker ? { ...(!item.code ? { codeManual: true } : {}), ...(!(Number(item.cpl) > 0) ? { priceManual: true } : {}) } : null;
     addPriceItemToOrder(item, order, setOrder, ctx.showToast, lockerExtra && Object.keys(lockerExtra).length ? lockerExtra : undefined);
   }
 
   // Add a hand-entered item that isn't in the price list. The typed price is the
-  // customer MRP (GST-inclusive); store the pre-GST base so the rest of the app —
+  // customer CPL (GST-inclusive); store the pre-GST base so the rest of the app —
   // which adds 18% GST for display — shows exactly what was typed.
   function addManualItem({code, name, price}) {
     const base = Number(price) / (1 + GST_RATE);
@@ -7892,7 +7897,7 @@ function SearchScreen({ctx}) {
           const mto        = isMTOItem(it);
           const oos        = hasStock && stockTotal === 0 && !mto;
           const cplBase = Number(it.cpl) || Number(it.mrp) || 0;
-          // MRP shown to the user = list price (CPL) with 18% GST already added in.
+          // CPL shown to the user = list price (CPL) with 18% GST already added in.
           const cpl = cplBase > 0 ? roundRs(cplBase * (1 + GST_RATE)) : 0;
           const thumb = finderImgOf(it, fc);   // Interio catalogue photo only
           return (
@@ -7927,7 +7932,7 @@ function SearchScreen({ctx}) {
                 {/* Price + Add */}
                 <div style={{flexShrink:0,textAlign:'right',display:'flex',flexDirection:'column',alignItems:'flex-end',gap:8,paddingLeft:6}}>
                   <div>
-                    <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.5,textAlign:'right'}}>MRP</div>
+                    <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.5,textAlign:'right'}}>CPL</div>
                     <div style={{fontFamily:T.mono,fontSize:14,fontWeight:700,color:cpl>0?T.ink:T.ink4}}>
                       {cpl > 0 ? '₹' + cpl.toLocaleString('en-IN') : '—'}
                     </div>
@@ -8151,7 +8156,10 @@ function OrderFormScreen({ctx, viewOnly}) {
     lookupTimer.current = setTimeout(()=>runCustomerLookup(v), 450);
   }
 
-  const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance} = orderTotals(o);
+  const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest} = orderTotals(o);
+  // Total paid = earnest + later money receipts + extra card swipes; the balance
+  // is the order value less everything the customer has paid, not just the earnest.
+  const {received: totalPaid, balance} = orderReceived(o);
   // Guided-form: once the user has tried to save, the validation summary + step
   // progress stay live so they can see what's left and jump straight to it.
   const [triedSave,setTriedSave] = React.useState(false);
@@ -8323,7 +8331,7 @@ function OrderFormScreen({ctx, viewOnly}) {
     if(!o.purchasingFor) add('customer','Select what they are purchasing for');
     if(o.manualOrder && !o.date) add('customer','Set the Booking Date for the manual order');
     (o.items||[]).forEach(it=>{ if(it.codeManual && !String(it.code||'').trim()) add('items','Enter the item code for '+(it.name||'item')); });
-    (o.items||[]).forEach(it=>{ if(it.priceManual && !(Number(it.mrp) > 0)) add('items','Enter the MRP for '+(it.name||'item')); });
+    (o.items||[]).forEach(it=>{ if(it.priceManual && !(Number(it.mrp) > 0)) add('items','Enter the CPL for '+(it.name||'item')); });
     (o.items||[]).forEach(it=>{ if(isUpmodsItem(it) && !it.upmodsType) add('items','Select the Upmods type (Bed / Sofa / Dining …) for '+(it.name||it.code||'item')); });
     if(!o.delivery) add('address','Delivery address is required');
     if(!o.pincode||!String(o.pincode).trim()) add('address','Pincode is required');
@@ -8605,10 +8613,10 @@ function OrderFormScreen({ctx, viewOnly}) {
             const mrpVal   = it.mrp||it.cpl||0;                 // pre-GST list price (base)
             const discPct  = parseFloat(it.disc||'0')/100;
             const curPrice = (it.unitPrice>0) ? it.unitPrice : (mrpVal>0 ? mrpVal*(1-discPct) : 0);
-            // Every price shown includes 18% GST (the MRP). GST is baked in for
-            // display only — never re-applied — so the line total is just MRP × qty.
-            const mrpIncl  = roundRs(mrpVal*(1+GST_RATE));      // per-unit MRP (incl. GST)
-            const gstUnit  = gstInclUnit(it);                   // per-unit MRP after discount
+            // Every price shown includes 18% GST (the CPL). GST is baked in for
+            // display only — never re-applied — so the line total is just CPL × qty.
+            const mrpIncl  = roundRs(mrpVal*(1+GST_RATE));      // per-unit CPL (incl. GST)
+            const gstUnit  = gstInclUnit(it);                   // per-unit CPL after discount
             const lineShown= gstInclLine(it);                   // line total (incl. GST)
             return (
             <div key={(it.codeManual?'':it.code)+i} style={{padding:'11px 14px',borderBottom:`1px solid ${T.line}`,...(_isFourS(it.whTag)?{background:'#fff4d6',borderLeft:`4px solid ${T.warn}`}:{})}}>
@@ -8636,7 +8644,7 @@ function OrderFormScreen({ctx, viewOnly}) {
                       </select>
                     </div>
                   )}
-                  {discPct>0&&gstUnit>0&&<div style={{fontSize:10,color:T.green,marginTop:2,fontWeight:700}}>You save ₹{Math.max(0,mrpIncl-gstUnit).toLocaleString('en-IN')} /unit <span style={{color:T.ink4,fontWeight:600}}>vs MRP (incl. GST)</span></div>}
+                  {discPct>0&&gstUnit>0&&<div style={{fontSize:10,color:T.green,marginTop:2,fontWeight:700}}>You save ₹{Math.max(0,mrpIncl-gstUnit).toLocaleString('en-IN')} /unit <span style={{color:T.ink4,fontWeight:600}}>vs CPL (incl. GST)</span></div>}
                   {priv&&(()=>{const cplU=Number(it.cpl)||Number(it.mrp)||0;const m=Math.round(curPrice-cplU);const mp=cplU>0?Math.round(m/cplU*100):0;return(
                     <div style={{fontSize:10,color:T.ink4,marginTop:2}}>CPL: ₹{Math.round(cplU).toLocaleString('en-IN')} · Margin: <b style={{color:m>=0?T.green:T.bad}}>₹{m.toLocaleString('en-IN')}{cplU>0?` (${mp}%)`:''}</b> <span style={{opacity:.7}}>· pre-GST · mgr only</span></div>
                   );})()}
@@ -8647,18 +8655,18 @@ function OrderFormScreen({ctx, viewOnly}) {
                     <button onClick={()=>updateItemQty(i,1)} style={{width:24,height:24,borderRadius:4,border:`1px solid ${T.line}`,background:'#fff',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,color:T.ink}}>+</button>
                     {(()=>{const lk=lockerOfLine(ctx.homeLockers,it);if(!lk)return null;const left=Math.max(0,lockerLimit(ctx,o,lk)-lockerQtyIn(ctx.homeLockers,o.items,lockerKeyOf(lk.code,lk.name)));return <span style={{fontSize:10,fontWeight:700,color:left>0?T.ok:T.bad}}>{left>0?left+' more in stock':'No more in stock'}</span>;})()}
                   </div>
-                  {/* MRP, Discount % and Selling Price are all editable and kept in
+                  {/* CPL, Discount % and Selling Price are all editable and kept in
                       sync both ways: change the discount and the price updates;
                       type the selling price and the discount % is calculated. All
                       prices are GST-inclusive; GST is never re-added on an edit. */}
                   <div style={{display:'flex',gap:8,marginTop:6,alignItems:'center',flexWrap:'wrap'}}>
-                    <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>MRP ₹</span>
+                    <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>CPL ₹</span>
                     <NumBox
                       value={mrpIncl}
                       onInput={t=>{
                         // Edited in GST-inclusive terms; store the pre-GST list price
                         // so 18% GST never gets re-added to what was typed. Discount %
-                        // is held fixed, so the selling price follows the new MRP.
+                        // is held fixed, so the selling price follows the new CPL.
                         const vIncl=parseFloat(t)||0;
                         const base=vIncl/(1+GST_RATE);
                         const up=base*(1-discPct);
@@ -8672,7 +8680,7 @@ function OrderFormScreen({ctx, viewOnly}) {
                       value={it.disc||''}
                       placeholder="0"
                       onInput={t=>{
-                        // Discount drives the selling price (MRP held fixed).
+                        // Discount drives the selling price (CPL held fixed).
                         const pct=parseFloat(t)||0;
                         const newUp=mrpVal*(1-pct/100);
                         setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,disc:t,unitPrice:newUp,total:newUp*x.qty}:x)}));
@@ -8684,7 +8692,7 @@ function OrderFormScreen({ctx, viewOnly}) {
                       value={gstUnit}
                       onInput={t=>{
                         // Type the selling price → the discount % is auto-calculated
-                        // from the MRP (both GST-inclusive, so GST cancels out). The
+                        // from the CPL (both GST-inclusive, so GST cancels out). The
                         // entered price is stored as-is; GST is never added on top.
                         const sellIncl=parseFloat(t)||0;
                         const up=sellIncl/(1+GST_RATE);
@@ -9047,13 +9055,14 @@ function OrderFormScreen({ctx, viewOnly}) {
           <div style={{background:T.ink,color:'#fff',borderRadius:8,padding:'14px 16px',fontFamily:T.mono}}>
             <div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13}}><span>Items subtotal (incl. GST)</span><span>₹{(total+orderDiscAmt).toLocaleString('en-IN')}</span></div>
             {orderDiscAmt>0&&<div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13,color:'#ffd27a'}}><span>Order disc {(orderDiscPct*100).toLocaleString('en-IN')}%</span><span>−₹{orderDiscAmt.toLocaleString('en-IN')}</span></div>}
-            {/* GST is already inside each MRP — CGST/SGST shown here are carved OUT
+            {/* GST is already inside each CPL — CGST/SGST shown here are carved OUT
                 of the inclusive total (never added on top). */}
             {[['CGST 9% (incl.)',cgst],['SGST 9% (incl.)',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13,color:'rgba(255,255,255,.6)'}}><span>{k}</span><span>₹{v.toLocaleString('en-IN')}</span></div>)}
-            <div style={{fontSize:10,color:'rgba(255,255,255,.55)',marginTop:2}}>18% GST is already included in every MRP — no separate GST is added.</div>
+            <div style={{fontSize:10,color:'rgba(255,255,255,.55)',marginTop:2}}>18% GST is already included in every CPL — no separate GST is added.</div>
             <div style={{height:1,background:'rgba(255,255,255,.2)',margin:'8px 0'}}/>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:18,fontWeight:700}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginTop:4,color:'rgba(255,255,255,.6)'}}><span>Earnest</span><span>₹{earnest.toLocaleString('en-IN')}</span></div>
+            <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginTop:2,color:'rgba(255,255,255,.85)'}}><span>Total Paid</span><span>₹{totalPaid.toLocaleString('en-IN')}</span></div>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:15,fontWeight:700,color:balance<0?'#ff8a80':'#ffd27a',marginTop:2}}><span>{balance<0?'Overpaid':'Balance'}</span><span>₹{Math.abs(balance).toLocaleString('en-IN')}</span></div>
             {priv&&(
               <>
@@ -9178,8 +9187,9 @@ function PartialDeliverySummary({order, onEdit}) {
 // The WhatsApp order-confirmation message, shared by the PDF preview and the
 // order-history row so the wording stays identical everywhere.
 function orderWhatsAppMessage(o) {
-  const {total, earnest, balance} = orderTotals(o);
-  return `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${gstInclLine(i).toLocaleString('en-IN')}`).join('\n')}\n\n*Total (incl. GST):* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${earnest.toLocaleString('en-IN')}\n*Balance:* ₹${balance.toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
+  const {total, earnest} = orderTotals(o);
+  const {received: totalPaid, balance} = orderReceived(o);
+  return `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${gstInclLine(i).toLocaleString('en-IN')}`).join('\n')}\n\n*Total (incl. GST):* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${earnest.toLocaleString('en-IN')}\n*Total Paid:* ₹${totalPaid.toLocaleString('en-IN')}\n*Balance:* ₹${balance.toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
 }
 
 // The native PdfSaver Capacitor plugin, present only inside the installed app
@@ -9356,7 +9366,8 @@ async function sharePineLabsReimbursement(o, showToast){
 // order-form PDF so the team can place the order and reply with the SO No, which
 // is then added back on the order via "+ ADD SO".
 function salesTeamOrderMessage(o) {
-  const {total, earnest, balance} = orderTotals(o);
+  const {total, earnest} = orderTotals(o);
+  const {received: totalPaid, balance} = orderReceived(o);
   const qty = (o.items||[]).reduce((s,i)=>s+(Number(i.qty)||0),0);
   return `*New order — please place in Salesforce* 🧾\n\n`+
     `Order No: *${o.no||'—'}*\n`+
@@ -9365,6 +9376,7 @@ function salesTeamOrderMessage(o) {
     `Items: ${qty} nos\n`+
     `Total (incl. GST): ₹${total.toLocaleString('en-IN')}\n`+
     `Advance Paid: ₹${earnest.toLocaleString('en-IN')}\n`+
+    `Total Paid: ₹${totalPaid.toLocaleString('en-IN')}\n`+
     `Balance: ₹${balance.toLocaleString('en-IN')}\n\n`+
     `Kindly place this order in Salesforce and share the generated *SO No.* so it can be added to the order. Order form attached.\n\n`+
     `4S Interiors, Patia, Bhubaneswar`;
@@ -9405,7 +9417,8 @@ async function shareOrderToSalesTeam(o, showToast) {
 function PDFPreviewScreen({ctx}) {
   const {order,nav,back,showToast} = ctx;
   const o = order;
-  const {itemsSubtotal, orderDiscPct, orderDiscAmt, cgst, sgst, total, earnest, balance} = orderTotals(o);
+  const {itemsSubtotal, orderDiscPct, orderDiscAmt, cgst, sgst, total, earnest} = orderTotals(o);
+  const {received: totalPaid, balance} = orderReceived(o);
   // Order QR — rendered directly into a mounted node via qrcodejs (its intended
   // usage). Earlier versions built the QR in a DETACHED div and read
   // canvas.toDataURL(), which comes back blank in the Android WebView / some
@@ -9505,6 +9518,8 @@ function PDFPreviewScreen({ctx}) {
                 {[['CGST 9% (incl.)',cgst],['SGST 9% (incl.)',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>{k}</span><span>₹{v.toLocaleString('en-IN')}</span></div>)}
                 <div style={{borderTop:`1px solid ${T.ink}`,marginTop:2,paddingTop:3,display:'flex',justifyContent:'space-between',fontWeight:700,fontSize:11,color:T.ink}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
                 <div style={{display:'flex',justifyContent:'space-between',color:T.green,marginTop:1}}><span>Earnest</span><span>₹{earnest.toLocaleString('en-IN')}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between',color:T.green,marginTop:1}}><span>Total Paid</span><span>₹{totalPaid.toLocaleString('en-IN')}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between',fontWeight:700,color:balance>0?T.bad:T.ink,marginTop:1}}><span>Balance</span><span>₹{balance.toLocaleString('en-IN')}</span></div>
               </div>
             </div>
             <div style={{padding:'10px 10px',background:T.greenSoft,border:`1px solid ${T.greenLine}`,borderRadius:4,display:'flex',alignItems:'center',gap:12}}>
