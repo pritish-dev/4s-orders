@@ -668,7 +668,10 @@ function lockerKeyOf(code, name) {
 // A "Home Lockers" row in the app's price-item shape. Its QUANTITY becomes the
 // item's stock, so Browse shows the live availability / OUT OF STOCK badge.
 function lockerPriceItem(l) {
-  const base = Number(l.cpl) || 0;   // CPL = basic price; GST is added on top
+  // The sheet's CPL for a locker ALREADY includes GST. The app stores a pre-GST
+  // base and adds 18% everywhere it shows a price, so carve the GST out here —
+  // the locker then shows and bills at exactly the sheet's CPL (no GST on top).
+  const base = (Number(l.cpl) || 0) / (1 + GST_RATE);
   const code = String(l.code || '').toUpperCase().trim();
   return {
     code, name: l.name || code, cat: 'Home Lockers', item: 'Home Locker',
@@ -1839,7 +1842,8 @@ function generatePDF(order, copyType) {
   // always equals the Total exactly.
   const RCV      = orderReceived(order);
   const balance  = RCV.balance;
-  const earnest  = totalAmt - balance;   // amount collected so far (clamped so the block balances)
+  const paid     = totalAmt - balance;   // total paid so far (clamped so the block balances)
+  const earnest  = Math.min(Number(order.earnest) || 0, paid);   // booking advance (money receipt 1)
   const orderDiscPct = T2.orderDiscPct;
   const orderDiscAmt = T2.orderDiscAmt;
   const taxable      = T2.taxable;
@@ -1894,7 +1898,7 @@ function generatePDF(order, copyType) {
     code:{ x:ml,          w:22, t:'Item Code' },
     qty: { x:ml+22,       w:10, t:'Qty' },
     desc:{ x:ml+32,       w:cw-32-22-14-26-24, t:'Product Description' },
-    mrp: { x:ml+cw-86,    w:22, t:'MRP' },
+    mrp: { x:ml+cw-86,    w:22, t:'CPL' },
     disc:{ x:ml+cw-64,    w:14, t:'Disc' },
     cpl: { x:ml+cw-50,    w:26, t:'Disc. Price' },
     tot: { x:ml+cw-24,    w:24, t:'Total (Rs.)' },
@@ -2350,6 +2354,7 @@ function generatePDF(order, copyType) {
     fRows.push(['SGST @ 9%',   inr(sgst),     false]);
     fRows.push(['Total Amt. (incl. GST)',  inr(totalAmt), true ]);
     fRows.push(['Earnest Amt.',inr(earnest),  false]);
+    fRows.push(['Total Paid',  inr(paid),     false]);
     fRows.push(['Balance Amt.',inr(balance),  true ]);
 
     const tsH = Math.max(5.7*fRows.length, 44), tsLW = cw*0.55, tsRW = cw*0.45, tsRX = ml+tsLW;
@@ -2441,7 +2446,7 @@ function generatePDF(order, copyType) {
         lbl(ml+cw/2+2,y+5,'Amount Received :');
         // Each money receipt shows the amount collected against it: receipt 1 is the
         // booking advance (the `earnest` field), receipts 2 & 3 their own `amt`. The
-        // three add up to the total received printed in the "Earnest Amt." row above.
+        // three add up to the total received printed in the "Total Paid" row above.
         const rcptAmt = r===0 ? (Number(order.earnest)||0) : (Number(mr.amt)||0);
         if(rcptAmt) val(ml+cw/2+32,y+5, fit1(inr(rcptAmt),cw/2-34,7.5), 7.5);
         y += rcH;
@@ -6451,7 +6456,7 @@ function SchemeLibrary({ user }) {
           ))}
           <SchemeBox tone="bad" title="Not from COCO / franchisee">{S.notFromStore.join(', ')} — not to be sold under this scheme. Freshca is outside the scheme — sell at MOP (CPL + GST).</SchemeBox>
           <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Gift items</div>
-          <SchemeTable head={['Gift', 'Item', 'Code', 'MRP']} rows={S.gifts.map(g => [g[0], g[1], g[2], _inr(g[3])])} />
+          <SchemeTable head={['Gift', 'Item', 'Code', 'CPL']} rows={S.gifts.map(g => [g[0], g[1], g[2], _inr(g[3])])} />
           <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Accessories bought on their own</div>
           <SchemeTable head={['Accessory', 'Discount']} rows={S.accessories.map(([k, p]) => [k, p + '%'])} />
           <SchemeBox title="Booking rules">
@@ -6519,7 +6524,7 @@ function SchemeLibrary({ user }) {
           <SchemeTable head={['Invoice value', 'If CP passes HF discount', 'Reimbursed']} rows={CP_Q326.hfReimb} />
           <SchemeBox>
             • GST invoice mandatory; claims audited by branch &amp; HO; one invoice per claim (multiple invoices need site photos after installation).<br />
-            • VIP Luggage won by a customer is billed to the CP at ₹1,730 (MRP ₹8,950, item 53121600SD01180).<br />
+            • VIP Luggage won by a customer is billed to the CP at ₹1,730 (CPL ₹8,950, item 53121600SD01180).<br />
             • ₹5,000 next-purchase vouchers: reimbursed with a minimum assured margin of 15% at HO's discretion.<br />
             • Line discounts are automated — do not enter manually · no other scheme can be clubbed except exchange.
           </SchemeBox>
@@ -6532,7 +6537,7 @@ function SchemeLibrary({ user }) {
             • CP accessory discounts: {CP_Q326.accessories}.
           </SchemeBox>
           <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Gift contribution (WPL w/o GST){win >= 0 ? ` · now: ${CP_Q326.giftWindows[win][2]}` : ''}</div>
-          <SchemeTable head={['Gift', 'MRP', 'Early Bird 2 Oct–10 Nov', 'Golden 11–30 Nov', 'Last Chance 1–31 Dec']} rows={CP_Q326.gifts.map(g => [g[0], _inr(g[1]), _inr(g[2]), _inr(g[3]), _inr(g[4])])} />
+          <SchemeTable head={['Gift', 'CPL', 'Early Bird 2 Oct–10 Nov', 'Golden 11–30 Nov', 'Last Chance 1–31 Dec']} rows={CP_Q326.gifts.map(g => [g[0], _inr(g[1]), _inr(g[2]), _inr(g[3]), _inr(g[4])])} />
           <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Bajaj interest split — scheme period</div>
           <SchemeTable head={['Tenure', 'Interest', 'GI', 'Franchisee / dealer', 'Customer']} rows={EMI_FY27.bajajCp} />
           <SchemeBox>
@@ -7196,7 +7201,7 @@ function ManualItemSheet({onClose, onAdd, initialName}) {
           <div style={{margin:'12px 16px',border:`1px solid ${T.line}`,borderRadius:12,overflow:'hidden'}}>
             <Field label="Item Code" value={code} onChange={setCode} mono required placeholder="e.g. CUSTOM-001" error={tried&&!codeOk?'Enter the item code':''}/>
             <Field label="Item Description" value={name} onChange={setName} multiline required placeholder="Full product description" error={tried&&!nameOk?'Enter a description':''}/>
-            <Field label="Price ₹ (incl. 18% GST)" value={price} onChange={v=>setPrice(v.replace(/[^\d.]/g,''))} mono required type="tel" placeholder="Customer price incl. GST" hint="The customer-facing MRP. Add a discount later on the order form if needed." error={tried&&!priceOk?'Enter a valid price':''}/>
+            <Field label="Price ₹ (incl. 18% GST)" value={price} onChange={v=>setPrice(v.replace(/[^\d.]/g,''))} mono required type="tel" placeholder="Customer price incl. GST" hint="The customer-facing CPL. Add a discount later on the order form if needed." error={tried&&!priceOk?'Enter a valid price':''}/>
           </div>
           <div style={{padding:'2px 16px 4px'}}>
             <Btn primary full icon={Icon.plus('#fff',15)} onClick={submit} disabled={!valid}>Add to order</Btn>
@@ -7927,7 +7932,7 @@ function SearchScreen({ctx}) {
                 {/* Price + Add */}
                 <div style={{flexShrink:0,textAlign:'right',display:'flex',flexDirection:'column',alignItems:'flex-end',gap:8,paddingLeft:6}}>
                   <div>
-                    <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.5,textAlign:'right'}}>MRP</div>
+                    <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.5,textAlign:'right'}}>CPL</div>
                     <div style={{fontFamily:T.mono,fontSize:14,fontWeight:700,color:cpl>0?T.ink:T.ink4}}>
                       {cpl > 0 ? '₹' + cpl.toLocaleString('en-IN') : '—'}
                     </div>
@@ -8151,7 +8156,10 @@ function OrderFormScreen({ctx, viewOnly}) {
     lookupTimer.current = setTimeout(()=>runCustomerLookup(v), 450);
   }
 
-  const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest, balance} = orderTotals(o);
+  const {itemsSubtotal, orderDiscPct, orderDiscAmt, taxable, cgst, sgst, total, earnest} = orderTotals(o);
+  // Total paid = earnest + later money receipts + extra card swipes; the balance
+  // is the order value less everything the customer has paid, not just the earnest.
+  const {received: totalPaid, balance} = orderReceived(o);
   // Guided-form: once the user has tried to save, the validation summary + step
   // progress stay live so they can see what's left and jump straight to it.
   const [triedSave,setTriedSave] = React.useState(false);
@@ -8323,7 +8331,7 @@ function OrderFormScreen({ctx, viewOnly}) {
     if(!o.purchasingFor) add('customer','Select what they are purchasing for');
     if(o.manualOrder && !o.date) add('customer','Set the Booking Date for the manual order');
     (o.items||[]).forEach(it=>{ if(it.codeManual && !String(it.code||'').trim()) add('items','Enter the item code for '+(it.name||'item')); });
-    (o.items||[]).forEach(it=>{ if(it.priceManual && !(Number(it.mrp) > 0)) add('items','Enter the MRP for '+(it.name||'item')); });
+    (o.items||[]).forEach(it=>{ if(it.priceManual && !(Number(it.mrp) > 0)) add('items','Enter the CPL for '+(it.name||'item')); });
     (o.items||[]).forEach(it=>{ if(isUpmodsItem(it) && !it.upmodsType) add('items','Select the Upmods type (Bed / Sofa / Dining …) for '+(it.name||it.code||'item')); });
     if(!o.delivery) add('address','Delivery address is required');
     if(!o.pincode||!String(o.pincode).trim()) add('address','Pincode is required');
@@ -8636,7 +8644,7 @@ function OrderFormScreen({ctx, viewOnly}) {
                       </select>
                     </div>
                   )}
-                  {discPct>0&&gstUnit>0&&<div style={{fontSize:10,color:T.green,marginTop:2,fontWeight:700}}>You save ₹{Math.max(0,mrpIncl-gstUnit).toLocaleString('en-IN')} /unit <span style={{color:T.ink4,fontWeight:600}}>vs MRP (incl. GST)</span></div>}
+                  {discPct>0&&gstUnit>0&&<div style={{fontSize:10,color:T.green,marginTop:2,fontWeight:700}}>You save ₹{Math.max(0,mrpIncl-gstUnit).toLocaleString('en-IN')} /unit <span style={{color:T.ink4,fontWeight:600}}>vs CPL (incl. GST)</span></div>}
                   {priv&&(()=>{const cplU=Number(it.cpl)||Number(it.mrp)||0;const m=Math.round(curPrice-cplU);const mp=cplU>0?Math.round(m/cplU*100):0;return(
                     <div style={{fontSize:10,color:T.ink4,marginTop:2}}>CPL: ₹{Math.round(cplU).toLocaleString('en-IN')} · Margin: <b style={{color:m>=0?T.green:T.bad}}>₹{m.toLocaleString('en-IN')}{cplU>0?` (${mp}%)`:''}</b> <span style={{opacity:.7}}>· pre-GST · mgr only</span></div>
                   );})()}
@@ -8652,7 +8660,7 @@ function OrderFormScreen({ctx, viewOnly}) {
                       type the selling price and the discount % is calculated. All
                       prices are GST-inclusive; GST is never re-added on an edit. */}
                   <div style={{display:'flex',gap:8,marginTop:6,alignItems:'center',flexWrap:'wrap'}}>
-                    <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>MRP ₹</span>
+                    <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>CPL ₹</span>
                     <NumBox
                       value={mrpIncl}
                       onInput={t=>{
@@ -9050,10 +9058,11 @@ function OrderFormScreen({ctx, viewOnly}) {
             {/* GST is already inside each MRP — CGST/SGST shown here are carved OUT
                 of the inclusive total (never added on top). */}
             {[['CGST 9% (incl.)',cgst],['SGST 9% (incl.)',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontSize:13,color:'rgba(255,255,255,.6)'}}><span>{k}</span><span>₹{v.toLocaleString('en-IN')}</span></div>)}
-            <div style={{fontSize:10,color:'rgba(255,255,255,.55)',marginTop:2}}>18% GST is already included in every MRP — no separate GST is added.</div>
+            <div style={{fontSize:10,color:'rgba(255,255,255,.55)',marginTop:2}}>18% GST is already included in every CPL — no separate GST is added.</div>
             <div style={{height:1,background:'rgba(255,255,255,.2)',margin:'8px 0'}}/>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:18,fontWeight:700}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginTop:4,color:'rgba(255,255,255,.6)'}}><span>Earnest</span><span>₹{earnest.toLocaleString('en-IN')}</span></div>
+            <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginTop:2,color:'rgba(255,255,255,.85)'}}><span>Total Paid</span><span>₹{totalPaid.toLocaleString('en-IN')}</span></div>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:15,fontWeight:700,color:balance<0?'#ff8a80':'#ffd27a',marginTop:2}}><span>{balance<0?'Overpaid':'Balance'}</span><span>₹{Math.abs(balance).toLocaleString('en-IN')}</span></div>
             {priv&&(
               <>
@@ -9178,8 +9187,9 @@ function PartialDeliverySummary({order, onEdit}) {
 // The WhatsApp order-confirmation message, shared by the PDF preview and the
 // order-history row so the wording stays identical everywhere.
 function orderWhatsAppMessage(o) {
-  const {total, earnest, balance} = orderTotals(o);
-  return `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${gstInclLine(i).toLocaleString('en-IN')}`).join('\n')}\n\n*Total (incl. GST):* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${earnest.toLocaleString('en-IN')}\n*Balance:* ₹${balance.toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
+  const {total, earnest} = orderTotals(o);
+  const {received: totalPaid, balance} = orderReceived(o);
+  return `Dear ${o.customer||'Customer'},\n\nYour order *#${o.no||'—'}* from 4S Interiors has been confirmed.\n\n*Items:*\n${(o.items||[]).map(i=>`• ${i.name} × ${i.qty} = ₹${gstInclLine(i).toLocaleString('en-IN')}`).join('\n')}\n\n*Total (incl. GST):* ₹${total.toLocaleString('en-IN')}\n*Advance Paid:* ₹${earnest.toLocaleString('en-IN')}\n*Total Paid:* ₹${totalPaid.toLocaleString('en-IN')}\n*Balance:* ₹${balance.toLocaleString('en-IN')}\n\nExpected delivery: ${o.plannedDly||'TBD'}\n\n4S Interiors, Patia, Bhubaneswar\n📞 0674-2744906\n_Authorised Dealer — Godrej Interio_`;
 }
 
 // The native PdfSaver Capacitor plugin, present only inside the installed app
@@ -9356,7 +9366,8 @@ async function sharePineLabsReimbursement(o, showToast){
 // order-form PDF so the team can place the order and reply with the SO No, which
 // is then added back on the order via "+ ADD SO".
 function salesTeamOrderMessage(o) {
-  const {total, earnest, balance} = orderTotals(o);
+  const {total, earnest} = orderTotals(o);
+  const {received: totalPaid, balance} = orderReceived(o);
   const qty = (o.items||[]).reduce((s,i)=>s+(Number(i.qty)||0),0);
   return `*New order — please place in Salesforce* 🧾\n\n`+
     `Order No: *${o.no||'—'}*\n`+
@@ -9365,6 +9376,7 @@ function salesTeamOrderMessage(o) {
     `Items: ${qty} nos\n`+
     `Total (incl. GST): ₹${total.toLocaleString('en-IN')}\n`+
     `Advance Paid: ₹${earnest.toLocaleString('en-IN')}\n`+
+    `Total Paid: ₹${totalPaid.toLocaleString('en-IN')}\n`+
     `Balance: ₹${balance.toLocaleString('en-IN')}\n\n`+
     `Kindly place this order in Salesforce and share the generated *SO No.* so it can be added to the order. Order form attached.\n\n`+
     `4S Interiors, Patia, Bhubaneswar`;
@@ -9405,7 +9417,8 @@ async function shareOrderToSalesTeam(o, showToast) {
 function PDFPreviewScreen({ctx}) {
   const {order,nav,back,showToast} = ctx;
   const o = order;
-  const {itemsSubtotal, orderDiscPct, orderDiscAmt, cgst, sgst, total, earnest, balance} = orderTotals(o);
+  const {itemsSubtotal, orderDiscPct, orderDiscAmt, cgst, sgst, total, earnest} = orderTotals(o);
+  const {received: totalPaid, balance} = orderReceived(o);
   // Order QR — rendered directly into a mounted node via qrcodejs (its intended
   // usage). Earlier versions built the QR in a DETACHED div and read
   // canvas.toDataURL(), which comes back blank in the Android WebView / some
@@ -9505,6 +9518,8 @@ function PDFPreviewScreen({ctx}) {
                 {[['CGST 9% (incl.)',cgst],['SGST 9% (incl.)',sgst]].map(([k,v])=><div key={k} style={{display:'flex',justifyContent:'space-between',padding:'1.5px 0',color:T.ink3}}><span>{k}</span><span>₹{v.toLocaleString('en-IN')}</span></div>)}
                 <div style={{borderTop:`1px solid ${T.ink}`,marginTop:2,paddingTop:3,display:'flex',justifyContent:'space-between',fontWeight:700,fontSize:11,color:T.ink}}><span>TOTAL</span><span>₹{total.toLocaleString('en-IN')}</span></div>
                 <div style={{display:'flex',justifyContent:'space-between',color:T.green,marginTop:1}}><span>Earnest</span><span>₹{earnest.toLocaleString('en-IN')}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between',color:T.green,marginTop:1}}><span>Total Paid</span><span>₹{totalPaid.toLocaleString('en-IN')}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between',fontWeight:700,color:balance>0?T.bad:T.ink,marginTop:1}}><span>Balance</span><span>₹{balance.toLocaleString('en-IN')}</span></div>
               </div>
             </div>
             <div style={{padding:'10px 10px',background:T.greenSoft,border:`1px solid ${T.greenLine}`,borderRadius:4,display:'flex',alignItems:'center',gap:12}}>
