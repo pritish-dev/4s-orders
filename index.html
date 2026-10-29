@@ -8310,12 +8310,11 @@ function OrderFormScreen({ctx, viewOnly}) {
       }
     }
     if(!o.items||o.items.length===0) add('items','Add at least one item');
-    // An existing order (already saved / loaded for edit) already carries its SI No,
-    // Order No and Receipt No — never re-prompt for them on an edit, only require
-    // them when creating a brand-new order.
+    // An existing order (already saved / loaded for edit) already carries its SI No
+    // and Order No — never re-prompt for them on an edit, only require them when
+    // creating a brand-new order. A manual order's Receipt No is optional.
     const isExistingOrder = !!(String(o.no||'').trim() || o.internalNo);
     if(!isExistingOrder && (!o.slNo||!String(o.slNo).trim())) add('commercial','SI No is required');
-    if(!isExistingOrder && o.manualOrder && (!o.orderFormReceiptNo||!String(o.orderFormReceiptNo).trim())) add('commercial','Receipt No is required for a manual order');
     // Payment Mode is required for every order EXCEPT a B2B order. A B2B order is
     // billed against a delivery challan, and its payment + challan details are
     // optional at booking — they only become mandatory when the order is
@@ -8904,7 +8903,7 @@ function OrderFormScreen({ctx, viewOnly}) {
         <Field label="Additional Order Discount %" value={o.orderDiscount} onChange={v=>setF('orderDiscount',v.replace(/[^\d.]/g,''))} mono type="number" hint="Extra discount on the whole order (on top of per-item discounts). Shown on the PDF."/>
         <Field label="SI No" value={o.slNo} onChange={v=>setF('slNo',v)} mono required hint="Mandatory · the order-form SI number · printed as the Sl part of the PDF's Order No. (Sl / Receipt)"/>
         {o.manualOrder
-          ? <Field label="Receipt No" value={o.orderFormReceiptNo} onChange={v=>setF('orderFormReceiptNo',v.replace(/[^\d]/g,''))} mono required type="tel" hint="Manual order — enter the receipt number from the paper order form"/>
+          ? <Field label="Receipt No" value={o.orderFormReceiptNo} onChange={v=>setF('orderFormReceiptNo',v.replace(/[^\d]/g,''))} mono type="tel" hint="Manual order — optional · enter the receipt number from the paper order form"/>
           : <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
               <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:3}}>Order No</div>
               <div style={{fontSize:14,fontFamily:T.mono,fontWeight:600,color:T.ink3}}>{(o.slNo&&String(o.slNo).trim())?String(o.slNo).trim():'SI No'} / {(o.orderFormReceiptNo&&String(o.orderFormReceiptNo).trim())?<span style={{color:T.green}}>{String(o.orderFormReceiptNo).trim()}</span>:<span style={{color:T.ink4}}>…</span>}</div>
