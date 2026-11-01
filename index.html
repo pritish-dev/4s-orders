@@ -596,12 +596,15 @@ function itemSchemeEstimate(it) {
   }
   if (it.accPct) return { tone:'purple', title:it.accName, lines:[`${it.accPct}% off → ~₹${Math.round(mrp * (1 - it.accPct / 100)).toLocaleString('en-IN')}`] };
   if (it.scheme) {
-    const slabs = it.scheme === 'KX3' ? S.kx3 : it.scheme === 'HS' ? S.hs : S.hf;
+    const isHF = it.scheme !== 'KX3' && it.scheme !== 'HS';
+    const H = hfScheme();
+    const slabs = it.scheme === 'KX3' ? S.kx3 : it.scheme === 'HS' ? S.hs : H.hf;
     const sl = it.hsSlab1 ? { ...slabs[0], idx: 0 } : schemeSlab(slabs, mrp);
     const tot = sl.pct + 5;
-    return { tone:'ok', title:`${S.code} · ${it.scheme === 'KX3' ? 'Kreation X3' : it.scheme} scheme`,
-      lines:[`If bought alone → slab ${sl.pct}% + scratch card 5% (assured) = ${tot}% off → ~₹${Math.round(mrp * (1 - tot / 100)).toLocaleString('en-IN')}`,
-             it.hsSlab1 ? 'Storwel Aura / Neo / Neolite / Storease are always HS slab 1.' : 'Slab may go up as more items are added to the order.'] };
+    const lines = [`If bought alone → slab ${sl.pct}% + scratch card 5% (assured) = ${tot}% off → ~₹${Math.round(mrp * (1 - tot / 100)).toLocaleString('en-IN')}`];
+    if (isHF && sl.coin) lines.push(`🪙 ${H.code}: assured ${sl.coin} (Dhanteras / Diwali reward)`);
+    lines.push(it.hsSlab1 ? 'Storwel Aura / Neo / Neolite / Storease are always HS slab 1.' : 'Slab may go up as more items are added to the order.');
+    return { tone:'ok', title:`${isHF ? H.code : S.code} · ${it.scheme === 'KX3' ? 'Kreation X3' : it.scheme} scheme`, lines };
   }
   return null;
 }
@@ -6075,6 +6078,32 @@ const SCHEME_Q326 = {
           ['Marshmallow Wedge','Marshmallow Wedge','52121505SD00091',8701]],
 };
 
+// Dhanteras & Diwali Offer (DDO26) — all India except Tamil Nadu, 30.10.2026 –
+// 10.11.2026. While it is live it REPLACES the Q326 Home Furniture slabs: new
+// assured discount % + digital scratch card + an assured gold / silver coin.
+// HS, Kreation X3, mattress and scratch-card terms stay as in Q326.
+const SCHEME_DDO26 = {
+  code: 'DDO26', name: 'Dhanteras & Diwali Offer',
+  from: '2026-10-30', to: '2026-11-10',
+  // slab = slab no. as printed in the circular (5 and 6 each have two coin tiers).
+  hf: [{max:29999,  pct:3,  slab:1, coin:'',                 label:'Up to ₹29,999'},
+       {max:79999,  pct:5,  slab:2, coin:'',                 label:'₹30,000 – 79,999'},
+       {max:149999, pct:7,  slab:3, coin:'3 gm Silver coin',  label:'₹80,000 – 1,49,999'},
+       {max:249999, pct:9,  slab:4, coin:'5 gm Silver coin',  label:'₹1,50,000 – 2,49,999'},
+       {max:299999, pct:11, slab:5, coin:'10 gm Silver coin', label:'₹2,50,000 – 2,99,999'},
+       {max:349999, pct:11, slab:5, coin:'15 gm Silver coin', label:'₹3,00,000 – 3,49,999'},
+       {max:399999, pct:13, slab:6, coin:'25 gm Silver coin', label:'₹3,50,000 – 3,99,999'},
+       {max:499999, pct:13, slab:6, coin:'0.5 gm Gold coin',  label:'₹4,00,000 – 4,99,999'},
+       {max:849999, pct:15, slab:7, coin:'1 gm Gold coin',    label:'₹5,00,000 – 8,49,999'},
+       {max:Infinity, pct:20, slab:8, coin:'3 gm Gold coin',  label:'₹8,50,000 & above'}],
+};
+// Exchange (+2% HF) is only up to ₹1,49,999 slab value in both Q326 and DDO26.
+const HF_EXCHANGE_MAX = 149999;
+function ddoLive(today) { const d = today || istTodayISO(); return d >= SCHEME_DDO26.from && d <= SCHEME_DDO26.to; }
+// Home Furniture slabs in force today: DDO26 during Dhanteras / Diwali, else Q326.
+function hfScheme(today) { return ddoLive(today) ? SCHEME_DDO26 : SCHEME_Q326; }
+function hfSlabNo(sl) { return sl.slab || sl.idx + 1; }
+
 // Bank tie-up instant discounts (Pinelabs POS, automated). Min txn ₹15,000.
 const BANK_Q3 = {
   emiTill: '2026-10-31', swipeTill: '2026-10-18',
@@ -6178,7 +6207,9 @@ function schemeAdvice(o) {
   const hfValue = sum(['HF']), hsValue = sum(['HS']), hsDistValue = sum(['HSDIST']), kx3Value = sum(['KX3']), matValue = sum(['MAT']);
   // HF slab is decided on HF + HS + Mattress together (sweetener items excluded).
   const hfBasis = hfValue + hsValue + hsDistValue + kx3Value + matValue;
-  const hf  = hfValue > 0 ? { value: hfValue, basis: hfBasis, ...schemeSlab(S.hf, hfBasis) } : null;
+  const H = hfScheme(today), ddo = H === SCHEME_DDO26;
+  const hf  = hfValue > 0 ? { value: hfValue, basis: hfBasis, ...schemeSlab(H.hf, hfBasis) } : null;
+  if (hf) { hf.no = hfSlabNo(hf); hf.noExch = hfBasis > HF_EXCHANGE_MAX; }
   const hs  = hsValue > 0 ? { value: hsValue, ...schemeSlab(S.hs, hsValue) } : null;
   const hsDist = hsDistValue > 0 ? { value: hsDistValue, ...S.hs[0], idx: 0 } : null;
   const kx3 = kx3Value > 0 ? { value: kx3Value, ...schemeSlab(S.kx3, kx3Value) } : null;
@@ -6199,6 +6230,7 @@ function schemeAdvice(o) {
   const assured = (hf ? hf.value * hf.pct : 0) + (hs ? hs.value * hs.pct : 0) + (hsDist ? hsDist.value * hsDist.pct : 0) + (kx3 ? kx3.value * kx3.pct : 0);
   return {
     today, inPeriod: today >= S.from && today <= S.to, b2b: isB2B(o),
+    ddo, hfCode: H.code, coin: hf && ddo ? (hf.coin || '') : '',
     hf, hs, hsDist, kx3, mattress, accessories,
     freshca: lines.filter(l => l.kind === 'FRESHCA').map(l => l.it.name),
     sweet: sweetLines.map(l => l.it.name),
@@ -6279,23 +6311,33 @@ function SchemeAdvisorPanel({ order }) {
           {!a.inPeriod && <SchemeBox tone="warn" title="Outside scheme period">Q326 runs {_fmtD(S.from)} – {_fmtD(S.to)}. Today is {_fmtD(a.today)}.</SchemeBox>}
 
           {(a.hf || a.hs || a.hsDist || a.kx3) && (
-            <SchemeBox tone="purple" title={`Furniture & storage · code ${S.code}`}>
-              {a.hf && <div><b>Home Furniture</b> {_inr(a.hf.value)} → <b>Slab {a.hf.idx + 1}: {pct(a.hf.pct)}</b> + scratch card<div style={{ fontSize: 10.5, color: T.ink4 }}>Slab value (HF + HS + Mattress, CPL + GST) {_inr(a.hf.basis)} · {a.hf.label}</div></div>}
+            <SchemeBox tone="purple" title={`Furniture & storage · code ${a.hf ? a.hfCode : S.code}`}>
+              {a.hf && <div><b>Home Furniture</b> {_inr(a.hf.value)} → <b>Slab {a.hf.no}: {pct(a.hf.pct)}</b> + scratch card{a.coin ? <> + <b>🪙 {a.coin}</b></> : ''}<div style={{ fontSize: 10.5, color: T.ink4 }}>Slab value (HF + HS + Mattress, CPL + GST) {_inr(a.hf.basis)} · {a.hf.label}</div></div>}
               {a.hs && <div style={{ marginTop: 4 }}><b>Home Storage</b> {_inr(a.hs.value)} → <b>Slab {a.hs.idx + 1}: {pct(a.hs.pct)}</b> + scratch card</div>}
               {a.hsDist && <div style={{ marginTop: 4 }}><b>Storwel Aura / Neo / Neolite / Storease</b> {_inr(a.hsDist.value)} → <b>1%</b> + scratch card (always HS slab 1)</div>}
               {a.kx3 && <div style={{ marginTop: 4 }}><b>Kreation X3</b> {_inr(a.kx3.value)} → <b>{pct(a.kx3.pct)}</b> + scratch card</div>}
               <div style={{ marginTop: 6, fontWeight: 800, color: T.purple }}>Assured discount ≈ {_inr(a.assuredAmt)} (on CPL + GST)</div>
               <div style={{ fontSize: 10.5, color: T.ink4, marginTop: 4 }}>
-                Exchange: +2% on HF {a.hf && a.hf.idx > 3 ? <b>(not available — slab {a.hf.idx + 1} is above slab 4; free pick-up only)</b> : '(up to slab 4)'} · +1% on HS (all slabs).
+                Exchange: +2% on HF {a.hf && a.hf.noExch ? <b>(not available — slab value above ₹1,49,999; free pick-up only)</b> : '(up to ₹1,49,999 slab value)'} · +1% on HS (all slabs).
                 Not valid on B2B, modular kitchen, SSD &amp; accessories. Cannot be clubbed with other offers except exchange.
               </div>
             </SchemeBox>
           )}
 
+          {a.ddo && (a.hf || a.hs || a.hsDist || a.kx3 || a.mattress.length > 0) && (
+            <SchemeBox tone="ok" title={`🪔 Dhanteras & Diwali · ${SCHEME_DDO26.code} · till ${_fmtD(SCHEME_DDO26.to)}`}>
+              {!a.hf ? <>No gold / silver coin — an HF item is mandatory. Standalone HS, mattress or HS + mattress is not eligible.</>
+                : a.coin ? <>Assured <b>{a.coin}</b> on slab value {_inr(a.hf.basis)}.</>
+                : <>No coin at this slab — coins start at ₹80,000 slab value (3 gm silver).</>}
+              <div style={{ fontSize: 10.5, color: T.ink4, marginTop: 4 }}>
+                Coin is lost if the scratch card wins 50% / 100% off · delivered after invoicing by Benepik (ASM shares customer data with HO Operations for audit) · no cash in lieu · not on WIX / bulk / liquidation orders · use discount code <b>{SCHEME_DDO26.code}</b>.
+              </div>
+            </SchemeBox>
+          )}
           {a.scratch && (
             <SchemeBox title="Digital scratch card">
               Eligible. Show the customer the printed QR at the counter at booking — never share it on WhatsApp / email.
-              Assured 5%; can also win 50% / 100% off, or 5% + Amazon ₹2,500 / VIP Luggage / ₹5,000 off next purchase (no extra 5% with 50% / 100%).
+              Assured 5%; can also win 50% / 100% off, or 5% + Amazon ₹2,500 / VIP Luggage / ₹5,000 off next purchase (no extra 5% with 50% / 100%).{a.ddo ? ' A 50% / 100% winner does not get the Dhanteras gold / silver coin.' : ''}
             </SchemeBox>
           )}
 
@@ -6355,7 +6397,8 @@ function SchemeLibrary({ user }) {
   const tabs = [['hfhs', 'HF / HS'], ['mattress', 'Mattress'], ['scratch', 'Scratch card'], ['bank', 'Bank offers'], ['emi', 'EMI'], isManager && ['cp', 'Channel partner']].filter(Boolean);
   const live = today >= S.from && today <= S.to;
   const ended = d => today > d ? <Pill tone="bad" size="sm">ENDED</Pill> : <Pill tone="ok" size="sm">TILL {_fmtD(d).toUpperCase()}</Pill>;
-  const hfHi = v ? schemeSlab(S.hf, v).idx : -1, hsHi = v ? schemeSlab(S.hs, v).idx : -1, kxHi = v ? schemeSlab(S.kx3, v).idx : -1;
+  const H = hfScheme(today), ddo = H === SCHEME_DDO26;
+  const hfHi = v ? schemeSlab(H.hf, v).idx : -1, hsHi = v ? schemeSlab(S.hs, v).idx : -1, kxHi = v ? schemeSlab(S.kx3, v).idx : -1;
   const win = CP_Q326.giftWindows.findIndex(w => today >= w[0] && today <= w[1]);
   return (
     <div style={{ margin: '12px 16px 4px', background: '#fff', border: `1.5px solid ${T.purpleLine}`, borderRadius: 12, overflow: 'hidden' }}>
@@ -6365,6 +6408,7 @@ function SchemeLibrary({ user }) {
           {live ? <Pill tone="ok" size="sm">LIVE</Pill> : <Pill tone="bad" size="sm">{today < S.from ? 'NOT STARTED' : 'ENDED'}</Pill>}
         </div>
         <div style={{ fontSize: 15, fontWeight: 900, color: T.ink, marginTop: 2 }}>{S.code} · {S.name}</div>
+        {ddo && <div style={{ fontSize: 12, fontWeight: 800, color: '#a16207', marginTop: 3 }}>🪔 + {SCHEME_DDO26.code} {SCHEME_DDO26.name} · {_fmtD(SCHEME_DDO26.from)} – {_fmtD(SCHEME_DDO26.to)} · gold &amp; silver coins</div>}
         <div style={{ fontSize: 11, color: T.ink3 }}>{_fmtD(S.from)} – {_fmtD(S.to)} · COCO / Franchisee / Dealer · do not share with customers</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 9, padding: '7px 10px', background: '#fff', border: `1px solid ${T.line}`, borderRadius: 8 }}>
           <span style={{ fontSize: 12, color: T.ink3, fontWeight: 700 }}>₹</span>
@@ -6381,8 +6425,21 @@ function SchemeLibrary({ user }) {
       </div>
       <div style={{ padding: '11px 12px 4px' }}>
         {tab === 'hfhs' && (<>
-          <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Home Furniture (HF) — assured discount + scratch card</div>
-          <SchemeTable head={['Slab', 'CPL + GST', 'Discount']} rows={S.hf.map((s, i) => [i + 1, s.label, s.pct + '% + scratch card'])} hi={hfHi} />
+          {ddo ? (<>
+            <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>🪔 Home Furniture (HF) — {SCHEME_DDO26.code} Dhanteras &amp; Diwali · discount + scratch card + coin</div>
+            <SchemeTable head={['Slab', 'CPL + GST', 'Discount', 'Coin reward']} rows={H.hf.map(s => [s.slab, s.label, s.pct + '% + scratch card', s.coin ? '🪙 ' + s.coin : 'NA'])} hi={hfHi} />
+            <SchemeBox tone="ok" title={`${SCHEME_DDO26.code} · coin rules`}>
+              • HF item is mandatory — HF alone, HF + HS, HF + Mattress or HF + HS + Mattress. Standalone HS / mattress / HS + mattress gets no coin.<br />
+              • Slab = total of HF + HS + Mattress (CPL + GST); HS &amp; mattress schemes still apply on their own.<br />
+              • Scratch card win of 50% or 100% off → no gold / silver coin.<br />
+              • Coins are delivered after invoicing, in batches, by M/s. Benepik — the Branch ASM shares eligible customer data with HO Operations for audit.<br />
+              • Coins cannot be exchanged for cash · not on WIX, bulk or liquidation-scheme orders · discount code <b>{SCHEME_DDO26.code}</b>.<br />
+              • From {_fmtD('2026-11-11')} the Q326 HF slabs apply again.
+            </SchemeBox>
+          </>) : (<>
+            <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Home Furniture (HF) — assured discount + scratch card</div>
+            <SchemeTable head={['Slab', 'CPL + GST', 'Discount']} rows={S.hf.map((s, i) => [i + 1, s.label, s.pct + '% + scratch card'])} hi={hfHi} />
+          </>)}
           <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Home Storage (HS)</div>
           <SchemeTable head={['Slab', 'CPL + GST', 'Discount']} rows={S.hs.map((s, i) => [i + 1, s.label, s.pct + '% + scratch card'])} hi={hsHi} />
           <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>Home Storage — Kreation X3</div>
@@ -6390,10 +6447,10 @@ function SchemeLibrary({ user }) {
           <SchemeBox title="Points to note">
             • HF slab is decided on the total of HF + HS + Mattress bought; each scheme still applies on its own.<br />
             • Storwel Aura, Storwel Neo, Neolite &amp; Storease are always HS slab 1 (1%).<br />
-            • Exchange: +2% HF (up to slab 4 only; above that free pick-up &amp; disposal) · +1% HS (all slabs).<br />
+            • Exchange: +2% HF (up to ₹1,49,999 slab value only; above that free pick-up &amp; disposal) · +1% HS (all slabs).<br />
             • Sweetener items: not counted for slabs, no exchange, no NCEMI / LCEMI / EMI or bank cashback.<br />
             • Not valid on B2B, modular kitchen, SSD &amp; accessories · no cancel-and-rebook of pre-scheme orders.<br />
-            • Bestfest items get EMI &amp; cashback offers · use discount code <b>{S.code}</b>.
+            • Bestfest items get EMI &amp; cashback offers · use discount code <b>{ddo ? SCHEME_DDO26.code : S.code}</b>.
           </SchemeBox>
         </>)}
         {tab === 'mattress' && (<>
@@ -6420,7 +6477,7 @@ function SchemeLibrary({ user }) {
           </SchemeBox>
         </>)}
         {tab === 'scratch' && (<>
-          <SchemeBox tone="purple" title="Rewards (HF & HS only)">{S.scratch.map((r, i) => <div key={i}>• {r}</div>)}<div style={{ fontSize: 11, color: T.ink4, marginTop: 3 }}>With 50% or 100% off there is no additional 5%.</div></SchemeBox>
+          <SchemeBox tone="purple" title="Rewards (HF & HS only)">{S.scratch.map((r, i) => <div key={i}>• {r}</div>)}<div style={{ fontSize: 11, color: T.ink4, marginTop: 3 }}>With 50% or 100% off there is no additional 5%{ddo ? ' — and no Dhanteras gold / silver coin' : ''}.</div></SchemeBox>
           <SchemeBox title="Customer flow">
             1. Customer scans the QR at the counter → campaign microsite → Next.<br />
             2. Reads T&amp;C and ticks “I Accept”.<br />
@@ -6842,7 +6899,7 @@ function HomeScreen({ctx}) {
 
   const tiles = [
     { key:'book',    label:'Book an Order',        sub:'New customer order',        emoji:'🛒', bg:'linear-gradient(135deg,#0b6b3a 0%,#0e5c4f 100%)', onClick:()=>{ctx.setOrder({...BLANK_ORDER(),salesExec:user?.name||''});nav('order');} },
-    { key:'offerzone',label:'Offer Zone',           sub:offersLive()?'Q326 schemes · Bestfest & Sweetener':'Q326 schemes', emoji:'🔥', bg:'linear-gradient(135deg,#6d28d9 0%,#4c1d95 100%)', onClick:()=>nav('offerzone') },
+    { key:'offerzone',label:'Offer Zone',           sub:(ddoLive()?'🪔 Dhanteras coins · ':'')+(offersLive()?'Q326 schemes · Bestfest & Sweetener':'Q326 schemes'), emoji:'🔥', bg:'linear-gradient(135deg,#6d28d9 0%,#4c1d95 100%)', onClick:()=>nav('offerzone') },
     { key:'catalogue',label:'Interio Catalogue',    sub:'Designs · key points · sizes', emoji:'🖼️', bg:'linear-gradient(135deg,#b07f00 0%,#1a1b1f 100%)', onClick:()=>nav('catalogue') },
     canManual && { key:'manual', label:'Manual Order', sub:'Admin & owner only',    emoji:'📝', bg:'linear-gradient(135deg,#334155 0%,#1e293b 100%)', onClick:()=>{ctx.setOrder({...BLANK_ORDER(),manualOrder:true,salesExec:user?.name||''});nav('order');} },
     { key:'reports', label:'Sales Summary',        sub:'Month-to-date report',      emoji:'📊', bg:'linear-gradient(135deg,#0e7490 0%,#155e75 100%)', onClick:()=>nav('reports') },
