@@ -115,12 +115,14 @@ client's cached items/orders.
 
 ---
 
-## Sweetener scheme import from Gmail (v66)
+## Sweetener scheme import from Gmail (v68)
 
-`importSweetenerFromEmail()` pulls the newest **"Best Fest_Spotlight_Sweetener
-Product List and Offer"** email's Excel/CSV attachment into the OPS
-`sweetener_scheme` tab (raw copy in `Sweetener_Email_Raw`). Managers can re-run
-it from the app: **Offer Zone → "Fetch latest sweetener list from email"**.
+`importSweetenerFromEmail()` takes the newest email whose subject **contains**
+"Best Fest_Spotlight_Sweetener Product List and Offer" (e.g. "Updated Q3'26 Grand
+Festive Offer | Best Fest_Spotlight_Sweetener Product List and Offer") and imports
+**every sheet** of its Excel/CSV attachment into the OPS `sweetener_scheme` tab
+(raw copy in `Sweetener_Email_Raw`). Managers can re-run it from the app:
+**Offer Zone → "Fetch latest sweetener list from email"**.
 
 This adds the `gmail.readonly` scope, so after the deploy **open the Apps Script
 editor once, select `importSweetenerFromEmail` and click Run**. Approve the new

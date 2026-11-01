@@ -6821,7 +6821,7 @@ function OfferZoneScreen({ctx}) {
           <div style={{margin:'8px 16px 4px',padding:'12px 14px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:10}}>
             <div style={{fontSize:10,fontWeight:800,color:T.purple,letterSpacing:.8,textTransform:'uppercase',marginBottom:6}}>Admin · sweetener scheme list</div>
             <div style={{fontSize:11,color:T.ink3,lineHeight:1.5,marginBottom:10}}>
-              Fetches the attachment from the latest <b>Best Fest_Spotlight_Sweetener Product List and Offer</b> email into the OPS <b>sweetener_scheme</b> tab, then refreshes the offers.
+              Imports every sheet of the attachment on the latest email whose subject contains <b>Best Fest_Spotlight_Sweetener Product List and Offer</b> into the OPS <b>sweetener_scheme</b> tab, then refreshes the offers.
               {swImport && swImport.at && <><br/>Last import: <b>{swImport.rows}</b> items · email of {new Date(swImport.emailDate||swImport.at).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric',timeZone:IST_TZ})} · fetched {new Date(swImport.at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',timeZone:IST_TZ})}</>}
             </div>
             <button onClick={fetchSweetener} disabled={fetchingSw||loading}
