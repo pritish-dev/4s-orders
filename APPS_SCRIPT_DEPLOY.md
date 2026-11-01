@@ -115,7 +115,7 @@ client's cached items/orders.
 
 ---
 
-## Sweetener scheme import from Gmail (v69)
+## Sweetener scheme import from Gmail (v70)
 
 `importSweetenerFromEmail()` takes the newest email whose subject **contains**
 "Best Fest_Spotlight_Sweetener Product List and Offer" (e.g. "Updated Q3'26 Grand
@@ -124,9 +124,11 @@ Festive Offer | Best Fest_Spotlight_Sweetener Product List and Offer") and impor
 (raw copy in `Sweetener_Email_Raw`). Managers can re-run it from the app:
 **Offer Zone → "Fetch latest sweetener list from email"**.
 
-This needs the full Gmail scope `https://mail.google.com/` (Apps Script's
-`GmailApp` does not accept `gmail.readonly`). After the deploy, **open the Apps
-Script editor once, select `importSweetenerFromEmail`, click Run and approve the
-Gmail permission**. That run also does the first import. If anything goes wrong
-the run stops with a red error naming the reason (and, per sheet, the headers it
-found) — the existing `sweetener_scheme` tab is left untouched in that case.
+This needs the read-only Gmail permission (`gmail.readonly`). After the deploy,
+**open the Apps Script editor, select `importSweetenerFromEmail`, click Run**.
+Google's consent screen lists each permission with its own checkbox — **tick
+"View your email messages and settings"** (leaving it unticked authorises
+everything except Gmail, and the import fails with "does not have permission").
+If the box was missed, just Run again: the function re-requests the Gmail
+permission. That run also does the first import. On failure the run stops with a
+red error naming the reason; the existing `sweetener_scheme` tab is untouched.
