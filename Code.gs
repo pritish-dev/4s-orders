@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v70';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v71';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -5201,25 +5201,105 @@ function _attachmentToTables(att) {
   if (/\.csv$/i.test(name) || String(att.getContentType()).toLowerCase() === 'text/csv') {
     return [{ name: 'csv', rows: Utilities.parseCsv(att.getDataAsString()) }];
   }
-  // Excel → temporary Google Sheet via the Drive REST API (no advanced service needed).
-  var boundary = 'swb' + Date.now();
-  var metaJson = JSON.stringify({ name: 'tmp_sweetener_' + Date.now(), mimeType: 'application/vnd.google-apps.spreadsheet' });
-  var head = '--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + metaJson +
-             '\r\n--' + boundary + '\r\nContent-Type: ' + (att.getContentType() || 'application/octet-stream') + '\r\n\r\n';
-  var tail = '\r\n--' + boundary + '--';
-  var payload = Utilities.newBlob(head).getBytes().concat(att.getBytes()).concat(Utilities.newBlob(tail).getBytes());
-  var resp = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
-    method: 'post', contentType: 'multipart/related; boundary=' + boundary, payload: payload,
-    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true
-  });
-  if (resp.getResponseCode() >= 300) throw new Error('Could not convert ' + name + ': ' + resp.getContentText().slice(0, 200));
-  var fileId = JSON.parse(resp.getContentText()).id;
-  try {
-    var ss = SpreadsheetApp.openById(fileId);
-    return ss.getSheets().map(function(s) { return { name: s.getName(), rows: s.getDataRange().getDisplayValues() }; });
-  } finally {
-    try { DriveApp.getFileById(fileId).setTrashed(true); } catch (e) {}
+  if (/\.xls$/i.test(name)) {
+    throw new Error(name + ' is an old-format .xls file — only .xlsx / .csv can be read. Ask for the list as .xlsx.');
   }
+  // .xlsx is a zip of XML parts — read it directly (no Drive API, no temp file).
+  var parts;
+  try { parts = Utilities.unzip(att.copyBlob().setContentType('application/zip')); }
+  catch (e) { throw new Error('Could not open ' + name + ' as an .xlsx file: ' + e.message); }
+  var files = {};
+  parts.forEach(function(b) { files[String(b.getName()).replace(/^\/+/, '')] = b.getDataAsString('UTF-8'); });
+  return _xlsxTablesFromParts(files);
+}
+
+// files: { 'xl/workbook.xml': '<xml…>', … } → [{ name, rows: [[cell text…]] }]
+// in workbook sheet order. Cells come back as text (numbers as their raw value,
+// e.g. a 35% cell → "0.35", which the sweetener parser reads as 35%).
+function _xlsxTablesFromParts(files) {
+  var wb = files['xl/workbook.xml'];
+  if (!wb) throw new Error('Not a valid .xlsx (xl/workbook.xml missing).');
+
+  // Shared strings (rich-text runs are concatenated).
+  var shared = [];
+  var ssXml = files['xl/sharedStrings.xml'] || '';
+  var siRe = /<(?:\w+:)?si\b[^>]*>([\s\S]*?)<\/(?:\w+:)?si>/g, m;
+  while ((m = siRe.exec(ssXml))) shared.push(_xlsxText(m[1]));
+
+  // rId → worksheet path.
+  var rels = {}, relXml = files['xl/_rels/workbook.xml.rels'] || '';
+  var relRe = /<Relationship\b([^>]*)\/?>/g;
+  while ((m = relRe.exec(relXml))) {
+    var id = _xmlAttr(m[1], 'Id'), tg = _xmlAttr(m[1], 'Target');
+    if (id && tg) rels[id] = tg.charAt(0) === '/' ? tg.slice(1) : 'xl/' + tg.replace(/^\.\//, '');
+  }
+
+  var out = [], shRe = /<(?:\w+:)?sheet\b([^>]*)\/?>/g;
+  while ((m = shRe.exec(wb))) {
+    var nm = _xmlDecode(_xmlAttr(m[1], 'name') || '');
+    var rid = _xmlAttr(m[1], 'r:id') || _xmlAttr(m[1], 'id');
+    var path = rels[rid];
+    var xml = path && files[path];
+    if (!xml) continue;
+    out.push({ name: nm, rows: _xlsxSheetRows(xml, shared) });
+  }
+  return out;
+}
+
+function _xlsxSheetRows(xml, shared) {
+  var rows = [], rowRe = /<(?:\w+:)?row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:\w+:)?row>)/g, rm;
+  var cRe = /<(?:\w+:)?c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:\w+:)?c>)/g;
+  var autoR = 0;
+  while ((rm = rowRe.exec(xml))) {
+    var rAttr = parseInt(_xmlAttr(rm[1], 'r'), 10);
+    var ri = (rAttr > 0 ? rAttr : autoR + 1) - 1;
+    autoR = ri + 1;
+    var row = [], cm, autoC = 0;
+    cRe.lastIndex = 0;
+    var body = rm[2] || '';
+    while ((cm = cRe.exec(body))) {
+      var ref = _xmlAttr(cm[1], 'r'), t = _xmlAttr(cm[1], 't') || '';
+      var ci = ref ? _xlsxColIdx(ref) : autoC;
+      autoC = ci + 1;
+      var inner = cm[2] || '', val = '';
+      if (t === 'inlineStr') val = _xlsxText(inner);
+      else {
+        var vm = /<(?:\w+:)?v>([\s\S]*?)<\/(?:\w+:)?v>/.exec(inner);
+        var v = vm ? _xmlDecode(vm[1]) : '';
+        if (t === 's') val = shared[parseInt(v, 10)] || '';
+        else if (t === 'b') val = v === '1' ? 'TRUE' : 'FALSE';
+        else if (t === 'e') val = '';
+        else val = v;
+      }
+      row[ci] = String(val).trim();
+    }
+    for (var k = 0; k < row.length; k++) if (row[k] === undefined) row[k] = '';
+    rows[ri] = row;
+  }
+  for (var i = 0; i < rows.length; i++) if (!rows[i]) rows[i] = [];
+  return rows;
+}
+
+function _xlsxText(frag) {
+  var s = '', tRe = /<(?:\w+:)?t\b[^>]*>([\s\S]*?)<\/(?:\w+:)?t>/g, m;
+  while ((m = tRe.exec(frag))) s += m[1];
+  return _xmlDecode(s);
+}
+function _xlsxColIdx(ref) {
+  var letters = String(ref).replace(/[^A-Z]/gi, '').toUpperCase(), n = 0;
+  for (var i = 0; i < letters.length; i++) n = n * 26 + (letters.charCodeAt(i) - 64);
+  return n - 1;
+}
+function _xmlAttr(attrs, name) {
+  var re = new RegExp('(?:^|\\s)' + name.replace(':', '\\:') + '\\s*=\\s*"([^"]*)"');
+  var m = re.exec(attrs);
+  return m ? m[1] : '';
+}
+function _xmlDecode(s) {
+  return String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, function(_, h) { return String.fromCharCode(parseInt(h, 16)); })
+    .replace(/&#(\d+);/g, function(_, d) { return String.fromCharCode(parseInt(d, 10)); })
+    .replace(/&amp;/g, '&');
 }
 
 // Find the header row (first 20 rows) and pull ITEM CODE / DESCRIPTION / DISCOUNT.
