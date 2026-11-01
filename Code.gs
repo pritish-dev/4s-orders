@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v67';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v68';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -5055,10 +5055,12 @@ function handleSaveOfferConfig(body) {
 // Run importSweetenerFromEmail() once from the Apps Script editor to grant the
 // Gmail permission and do the first import; after that, managers can re-run it
 // from the app (Offer Zone → "Fetch latest sweetener list from email").
-// Gmail treats "Best Fest_Spotlight_Sweetener" as ONE word (underscores join
-// tokens), so subject:Sweetener misses it. Search on the stable phrase, then
-// filter by subject in code (underscores read as spaces).
-var SWEETENER_EMAIL_QUERY = '"Product List and Offer" has:attachment';
+// The subject usually carries a prefix, e.g. "Updated Q3'26 Grand Festive Offer |
+// Best Fest_Spotlight_Sweetener Product List and Offer", so match the phrase
+// anywhere in the subject (exact-phrase subject search, verified in Gmail), then
+// re-check it in code. The newest matching email wins.
+var SWEETENER_EMAIL_SUBJECT = 'Best Fest_Spotlight_Sweetener Product List and Offer';
+var SWEETENER_EMAIL_QUERY = 'subject:"' + SWEETENER_EMAIL_SUBJECT + '" has:attachment';
 var SWEETENER_TAB_NAME    = 'sweetener_scheme';
 var SWEETENER_RAW_TAB     = 'Sweetener_Email_Raw';
 
@@ -5091,20 +5093,19 @@ function _importSweetenerFromEmail(by) {
     catch (e) {
       return { ok: false, error: 'Gmail access not authorised yet. Open the Apps Script editor and run importSweetenerFromEmail() once to grant permission. (' + e.message + ')' };
     }
-    if (!threads || !threads.length) return { ok: false, error: 'No "… Sweetener Product List and Offer" email with an attachment was found.' };
+    if (!threads || !threads.length) return { ok: false, error: 'No email with "' + SWEETENER_EMAIL_SUBJECT + '" in the subject (with an attachment) was found.' };
 
     // Newest message (across the matching threads) with a spreadsheet attachment.
     var picked = null;
     threads.forEach(function(t) {
       t.getMessages().forEach(function(m) {
-        var subj = String(m.getSubject() || '').replace(/_/g, ' ').toUpperCase();
-        if (subj.indexOf('SWEETENER') < 0) return;
+        if (_normSubj(m.getSubject()).indexOf(_normSubj(SWEETENER_EMAIL_SUBJECT)) < 0) return;
         var atts = m.getAttachments({ includeInlineImages: false }).filter(_isSheetAttachment);
         if (!atts.length) return;
         if (!picked || m.getDate() > picked.msg.getDate()) picked = { msg: m, atts: atts };
       });
     });
-    if (!picked) return { ok: false, error: 'The sweetener email was found but has no Excel / CSV attachment.' };
+    if (!picked) return { ok: false, error: 'An email matching "' + SWEETENER_EMAIL_SUBJECT + '" was found but it has no Excel / CSV attachment.' };
 
     var out = [], raw = [], files = [], warnings = [];
     picked.atts.forEach(function(a) {
@@ -5168,6 +5169,9 @@ function _importSweetenerFromEmail(by) {
     return { ok: false, error: e.message };
   }
 }
+
+// Case-, underscore- and spacing-insensitive subject comparison.
+function _normSubj(v) { return String(v || '').replace(/[_\s]+/g, ' ').trim().toUpperCase(); }
 
 function _isSheetAttachment(a) {
   var n = String(a.getName() || '').toLowerCase();
