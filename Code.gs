@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v68';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v69';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -5066,7 +5066,9 @@ var SWEETENER_RAW_TAB     = 'Sweetener_Email_Raw';
 
 function importSweetenerFromEmail() {
   var res = _importSweetenerFromEmail('editor');
-  Logger.log(JSON.stringify(res));
+  console.log(JSON.stringify(res, null, 2));
+  // Fail loudly in the editor so the reason shows as a red error, not a quiet log line.
+  if (!res.ok) throw new Error('Sweetener import failed: ' + res.error);
   return res;
 }
 
@@ -5089,9 +5091,11 @@ function _getSweetenerImportMeta() {
 function _importSweetenerFromEmail(by) {
   try {
     var threads;
+    // GmailApp needs the full https://mail.google.com/ scope (gmail.readonly is
+    // NOT accepted by GmailApp) — see appsscript.json.
     try { threads = GmailApp.search(SWEETENER_EMAIL_QUERY, 0, 10); }
     catch (e) {
-      return { ok: false, error: 'Gmail access not authorised yet. Open the Apps Script editor and run importSweetenerFromEmail() once to grant permission. (' + e.message + ')' };
+      return { ok: false, error: 'Gmail search failed — open the Apps Script editor, run importSweetenerFromEmail() and approve the Gmail permission. Details: ' + e.message };
     }
     if (!threads || !threads.length) return { ok: false, error: 'No email with "' + SWEETENER_EMAIL_SUBJECT + '" in the subject (with an attachment) was found.' };
 
@@ -5107,7 +5111,7 @@ function _importSweetenerFromEmail(by) {
     });
     if (!picked) return { ok: false, error: 'An email matching "' + SWEETENER_EMAIL_SUBJECT + '" was found but it has no Excel / CSV attachment.' };
 
-    var out = [], raw = [], files = [], warnings = [];
+    var out = [], raw = [], files = [], warnings = [], sheets = [];
     picked.atts.forEach(function(a) {
       var tables = _attachmentToTables(a);
       files.push(a.getName());
@@ -5119,12 +5123,14 @@ function _importSweetenerFromEmail(by) {
         }
         var parsed = _parseSweetenerRows(tb.rows, a.getName() + ' › ' + tb.name);
         if (parsed.error) warnings.push(parsed.error);
+        sheets.push(tb.name + ': ' + parsed.rows.length + ' items' + (parsed.header ? ' (header: ' + parsed.header + ')' : ''));
         Array.prototype.push.apply(out, parsed.rows);
       });
     });
 
     if (!out.length) {
-      return { ok: false, error: 'Could not find item-code + discount columns in the attachment(s): ' + files.join(', ') + '. ' + warnings.join(' | ') };
+      return { ok: false, error: 'Could not find item-code + discount columns in the attachment(s): ' + files.join(', ') + '. ' + warnings.join(' | '), sheets: sheets,
+               email: picked.msg.getSubject() + ' (' + picked.msg.getDate() + ')' };
     }
 
     // De-duplicate by item code (first occurrence wins).
@@ -5162,7 +5168,7 @@ function _importSweetenerFromEmail(by) {
     try { CacheService.getScriptCache().remove('pricelist_' + SCRIPT_VERSION + '_meta'); } catch (e) {}
     _appendLog(by || 'system', '', 'SWEETENER_IMPORT', rows.length + ' items from ' + files.join(', ') + ' (' + meta.emailDate + ')');
 
-    var res = { ok: true, rows: rows.length, meta: meta, scriptVersion: SCRIPT_VERSION };
+    var res = { ok: true, rows: rows.length, meta: meta, sheets: sheets, scriptVersion: SCRIPT_VERSION };
     if (warnings.length) res.warnings = warnings;
     return res;
   } catch (e) {
@@ -5214,17 +5220,20 @@ function _parseSweetenerRows(rows, source) {
   var DESC  = ['ITEM DESCRIPTION', 'DESCRIPTION', 'ITEM DESC', 'ITEM NAME', 'PRODUCT NAME', 'PRODUCT DESCRIPTION', 'PRODUCT', 'MATERIAL DESCRIPTION', 'NAME'];
   var DISC  = ['DSICOUNT', 'DISCOUNT', 'DISCOUNT %', 'DISC', 'DISC %', 'SWEETENER', 'SWEETENER DISCOUNT', 'SWEETENER %', 'OFFER DISCOUNT', 'OFFER %', 'SCHEME DISCOUNT', '% OFF', 'OFF %'];
   var LIST  = ['MRP', 'CPL', 'LIST PRICE', 'BASIC', 'BASIC PRICE', 'CUSTOMER BASIC', 'CPL BASIC'];
-  var OFFER = ['OFFER PRICE', 'OFFER BASIC', 'DISCOUNTED BASIC', 'NET PRICE', 'SWEETENER PRICE', 'SPECIAL PRICE'];
+  var OFFER = ['OFFER PRICE', 'OFFER BASIC', 'DISCOUNTED BASIC', 'DISCOUNTED CUSTOMER BASIC', 'DISCOUNTED CPL', 'DISCOUNTED PRICE', 'DISCOUNTED MRP', 'NET PRICE', 'SWEETENER PRICE', 'SPECIAL PRICE'];
 
-  for (var h = 0; h < Math.min(rows.length, 20); h++) {
+  for (var h = 0; h < Math.min(rows.length, 40); h++) {
     var hdr = rows[h].map(function(c) { return String(c || '').toUpperCase().replace(/\s+/g, ' ').trim(); });
     var cCode = _hdrKeyIdx(hdr, CODE);
+    if (cCode < 0) {   // loose: a short header mentioning CODE (e.g. "LN Code No.")
+      for (var k = 0; k < hdr.length; k++) { if (/CODE/.test(hdr[k]) && hdr[k].length <= 25) { cCode = k; break; } }
+    }
     if (cCode < 0) continue;
     var cDesc = _hdrKeyIdx(hdr, DESC, [cCode]);
     var cDisc = _hdrKeyIdx(hdr, DISC, [cCode, cDesc]);
     if (cDisc < 0) {   // loose match: any header mentioning discount / sweetener / % off
       for (var j = 0; j < hdr.length; j++) {
-        if (j !== cCode && j !== cDesc && /DISC|DSIC|SWEET|% ?OFF/.test(hdr[j])) { cDisc = j; break; }
+        if (j !== cCode && j !== cDesc && /DISC|DSIC|SWEET|% ?OFF/.test(hdr[j]) && !/PRICE|BASIC|VALUE|AMOUNT|MRP|CPL|RS/.test(hdr[j])) { cDisc = j; break; }
       }
     }
     var cList = cDisc < 0 ? _hdrKeyIdx(hdr, LIST, [cCode, cDesc]) : -1;
@@ -5244,6 +5253,8 @@ function _parseSweetenerRows(rows, source) {
         // A bare fraction ("0.4") means 40%.
         if (/^0?\.\d+$/.test(disc)) disc = Math.round(parseFloat(disc) * 100) + '%';
         else if (/^\d+(\.\d+)?$/.test(disc)) disc = disc + '%';
+        var dn = parseFloat(disc.replace(/[^\d.]/g, ''));
+        if (!(dn > 0 && dn <= 100)) continue;   // not a sane percentage (e.g. a price column)
       } else {
         var lp = parseFloat(String(r[cList] || '').replace(/[^\d.]/g, '')) || 0;
         var op = parseFloat(String(r[cOffer] || '').replace(/[^\d.]/g, '')) || 0;
@@ -5252,9 +5263,9 @@ function _parseSweetenerRows(rows, source) {
       if (!disc || disc === '0%') continue;
       out.push([code, cDesc >= 0 ? String(r[cDesc] || '').trim() : '', disc, source]);
     }
-    return { rows: out };
+    return { rows: out, header: hdr.filter(String).join(' | ') };
   }
-  return { rows: [], error: source + ': no ITEM CODE header found' };
+  return { rows: [], error: source + ': no item-code header found in the first 40 rows' };
 }
 
 // ─── DEBUG — fast: reads only header row + row count per listed tab ────────────
