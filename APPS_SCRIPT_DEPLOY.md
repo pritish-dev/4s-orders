@@ -112,3 +112,16 @@ Android/iOS apps) onto the new code. **You never have to bump a version by hand.
 The hard localStorage-reset gates (`var V = '…'`) are left alone on purpose: bump
 one of those manually only when a breaking data-format change needs to wipe every
 client's cached items/orders.
+
+---
+
+## Sweetener scheme import from Gmail (v66)
+
+`importSweetenerFromEmail()` pulls the newest **"Best Fest_Spotlight_Sweetener
+Product List and Offer"** email's Excel/CSV attachment into the OPS
+`sweetener_scheme` tab (raw copy in `Sweetener_Email_Raw`). Managers can re-run
+it from the app: **Offer Zone → "Fetch latest sweetener list from email"**.
+
+This adds the `gmail.readonly` scope, so after the deploy **open the Apps Script
+editor once, select `importSweetenerFromEmail` and click Run**. Approve the new
+Gmail permission. That run also does the first import.

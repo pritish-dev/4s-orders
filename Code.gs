@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v65';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v66';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -44,7 +44,7 @@ var PRICE_SKIP = [
   'Stock', 'APP_ORDERING_CREDS', 'Staff',
   'Orders_Master', 'Change_Log', 'Price_Lists',
   'Product Catalog', 'Product Catalogue',
-  'sweetener_scheme', 'Sweetener Scheme',
+  'sweetener_scheme', 'Sweetener Scheme', 'Sweetener_Email_Raw',
   'Home_Locker_Stock', 'Home Lockers', 'Home Lockers Sold',
   'Sheet1', 'Sheet2', 'Sheet3', 'Sheet4', 'Sheet5',
 ];
@@ -302,6 +302,7 @@ function doPost(e) {
       case 'saveLeagueScore': result = handleLeagueSaveScore(body);   break;
       case 'saveLeagueConfig':result = handleLeagueSaveConfig(body);  break;
       case 'saveOfferConfig': result = handleSaveOfferConfig(body);   break;
+      case 'fetchSweetenerEmail': result = handleFetchSweetenerEmail(body); break;
       case 'addLead':         result = handleAddLead(body);           break;
       case 'editLead':        result = handleEditLead(body);          break;
       case 'deleteLead':      result = handleDeleteLead(body);        break;
@@ -1013,7 +1014,7 @@ function handlePriceList(p) {
   var cacheKey  = 'pricelist_' + SCRIPT_VERSION;
   if (!wantFresh) {
     var hit = _cacheGet(cacheKey);
-    if (hit && hit.ok && hit.items && hit.items.length) { hit.cached = true; hit.offerEndDate = _getOfferEndDate(); return hit; }
+    if (hit && hit.ok && hit.items && hit.items.length) { hit.cached = true; hit.offerEndDate = _getOfferEndDate(); hit.sweetenerImport = _getSweetenerImportMeta(); return hit; }
   }
 
   var opsSS = _openOPS();
@@ -1208,7 +1209,7 @@ function handlePriceList(p) {
 
   var result = { ok: true, scriptVersion: SCRIPT_VERSION, mode: usedFallback ? 'auto-scan' : 'config', items: all, counts: counts, totalTabs: Object.keys(counts).length,
                  annotated: { discontinued: annDiscontinued, altCode: annAltCode, addedFromDiscontinued: addedDiscontinued },
-                 catalog: catalogMap, sweeteners: sweeteners, offerEndDate: _getOfferEndDate(),
+                 catalog: catalogMap, sweeteners: sweeteners, offerEndDate: _getOfferEndDate(), sweetenerImport: _getSweetenerImportMeta(),
                  catalogStats: { matched: catMatched, total: all.length, products: Object.keys(catalogMap).length, sample: catUnmatched } };
   if (errors.length) result.tabErrors = errors;
   _cachePut(cacheKey, result);   // speed up the next load
@@ -5040,6 +5041,211 @@ function handleSaveOfferConfig(body) {
     _appendLog(by, '', 'OFFER_END_DATE', v || '(cleared)');
     return { ok: true, offerEndDate: v, scriptVersion: SCRIPT_VERSION };
   } catch (e) { return { ok: false, error: e.message }; }
+}
+
+// ─── Sweetener scheme import from Gmail ───────────────────────────────────────
+// Godrej mails the sweetener product list as an attachment on the
+// "Best Fest_Spotlight_Sweetener Product List and Offer" email. This pulls the
+// newest such email's spreadsheet attachment(s) (xlsx / xls / csv), finds the
+// item-code + discount columns and rewrites the OPS "sweetener_scheme" tab
+// (ITEM CODE | ITEM DESCRIPTION | DSICOUNT | SOURCE) — which is what the app's
+// Offer Zone and SWEETENER tags already read. The attachment is also copied
+// as-is into "Sweetener_Email_Raw" for reference.
+//
+// Run importSweetenerFromEmail() once from the Apps Script editor to grant the
+// Gmail permission and do the first import; after that, managers can re-run it
+// from the app (Offer Zone → "Fetch latest sweetener list from email").
+var SWEETENER_EMAIL_QUERY = 'subject:"Best Fest" subject:Spotlight subject:Sweetener has:attachment';
+var SWEETENER_TAB_NAME    = 'sweetener_scheme';
+var SWEETENER_RAW_TAB     = 'Sweetener_Email_Raw';
+
+function importSweetenerFromEmail() {
+  var res = _importSweetenerFromEmail('editor');
+  Logger.log(JSON.stringify(res));
+  return res;
+}
+
+function handleFetchSweetenerEmail(body) {
+  var by = String((body && body.by) || '').trim();
+  var role = _lookupRole(by);
+  if (role !== 'admin' && role !== 'manager') {
+    return { ok: false, error: 'Only a manager or admin can import the sweetener list.' };
+  }
+  return _importSweetenerFromEmail(by);
+}
+
+function _getSweetenerImportMeta() {
+  try {
+    var v = PropertiesService.getScriptProperties().getProperty('SWEETENER_IMPORT_META');
+    return v ? JSON.parse(v) : null;
+  } catch (e) { return null; }
+}
+
+function _importSweetenerFromEmail(by) {
+  try {
+    var threads;
+    try { threads = GmailApp.search(SWEETENER_EMAIL_QUERY, 0, 10); }
+    catch (e) {
+      return { ok: false, error: 'Gmail access not authorised yet. Open the Apps Script editor and run importSweetenerFromEmail() once to grant permission. (' + e.message + ')' };
+    }
+    if (!threads || !threads.length) return { ok: false, error: 'No email found with subject "Best Fest_Spotlight_Sweetener Product List and Offer" that has an attachment.' };
+
+    // Newest message (across the matching threads) with a spreadsheet attachment.
+    var picked = null;
+    threads.forEach(function(t) {
+      t.getMessages().forEach(function(m) {
+        var atts = m.getAttachments({ includeInlineImages: false }).filter(_isSheetAttachment);
+        if (!atts.length) return;
+        if (!picked || m.getDate() > picked.msg.getDate()) picked = { msg: m, atts: atts };
+      });
+    });
+    if (!picked) return { ok: false, error: 'The sweetener email was found but has no Excel / CSV attachment.' };
+
+    var out = [], raw = [], files = [], warnings = [];
+    picked.atts.forEach(function(a) {
+      var tables = _attachmentToTables(a);
+      files.push(a.getName());
+      tables.forEach(function(tb) {
+        if (tb.rows.length) {
+          raw.push([a.getName() + ' › ' + tb.name]);
+          tb.rows.forEach(function(r) { raw.push(r); });
+          raw.push([]);
+        }
+        var parsed = _parseSweetenerRows(tb.rows, a.getName() + ' › ' + tb.name);
+        if (parsed.error) warnings.push(parsed.error);
+        Array.prototype.push.apply(out, parsed.rows);
+      });
+    });
+
+    if (!out.length) {
+      return { ok: false, error: 'Could not find item-code + discount columns in the attachment(s): ' + files.join(', ') + '. ' + warnings.join(' | ') };
+    }
+
+    // De-duplicate by item code (first occurrence wins).
+    var seen = {}, rows = [];
+    out.forEach(function(r) { var k = r[0].toUpperCase(); if (!seen[k]) { seen[k] = 1; rows.push(r); } });
+
+    var opsSS = _openOPS();
+    if (!opsSS) return { ok: false, error: 'Cannot open OPS sheet: ' + OPS_SHEET_ID };
+
+    var sh = null, names = ['sweetener_scheme', 'Sweetener_Scheme', 'Sweetener Scheme', 'sweetener scheme', 'SWEETENER_SCHEME'];
+    for (var c = 0; c < names.length; c++) { sh = opsSS.getSheetByName(names[c]); if (sh) break; }
+    if (!sh) sh = opsSS.insertSheet(SWEETENER_TAB_NAME);
+    sh.clearContents();
+    var data = [['ITEM CODE', 'ITEM DESCRIPTION', 'DSICOUNT', 'SOURCE']].concat(rows);
+    sh.getRange(1, 1, data.length, 4).setNumberFormat('@').setValues(data);
+    sh.getRange(1, 1, 1, 4).setFontWeight('bold');
+    sh.setFrozenRows(1);
+
+    // Raw copy of the attachment for reference.
+    if (raw.length) {
+      var rs = opsSS.getSheetByName(SWEETENER_RAW_TAB) || opsSS.insertSheet(SWEETENER_RAW_TAB);
+      rs.clearContents();
+      var w = raw.reduce(function(m, r) { return Math.max(m, r.length); }, 1);
+      var grid = raw.map(function(r) { var x = r.slice(); while (x.length < w) x.push(''); return x; });
+      rs.getRange(1, 1, grid.length, w).setValues(grid);
+    }
+
+    var meta = {
+      at: new Date().toISOString(), by: by || '',
+      subject: picked.msg.getSubject(),
+      emailDate: picked.msg.getDate().toISOString(),
+      files: files, rows: rows.length
+    };
+    PropertiesService.getScriptProperties().setProperty('SWEETENER_IMPORT_META', JSON.stringify(meta));
+    try { CacheService.getScriptCache().remove('pricelist_' + SCRIPT_VERSION + '_meta'); } catch (e) {}
+    _appendLog(by || 'system', '', 'SWEETENER_IMPORT', rows.length + ' items from ' + files.join(', ') + ' (' + meta.emailDate + ')');
+
+    var res = { ok: true, rows: rows.length, meta: meta, scriptVersion: SCRIPT_VERSION };
+    if (warnings.length) res.warnings = warnings;
+    return res;
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+function _isSheetAttachment(a) {
+  var n = String(a.getName() || '').toLowerCase();
+  var ct = String(a.getContentType() || '').toLowerCase();
+  return /\.(xlsx|xlsm|xls|csv)$/.test(n) || ct.indexOf('spreadsheet') >= 0 || ct.indexOf('excel') >= 0 || ct === 'text/csv';
+}
+
+// Returns [{ name, rows: [[...]] }] — one entry per sheet in the attachment.
+function _attachmentToTables(att) {
+  var name = String(att.getName() || '');
+  if (/\.csv$/i.test(name) || String(att.getContentType()).toLowerCase() === 'text/csv') {
+    return [{ name: 'csv', rows: Utilities.parseCsv(att.getDataAsString()) }];
+  }
+  // Excel → temporary Google Sheet via the Drive REST API (no advanced service needed).
+  var boundary = 'swb' + Date.now();
+  var metaJson = JSON.stringify({ name: 'tmp_sweetener_' + Date.now(), mimeType: 'application/vnd.google-apps.spreadsheet' });
+  var head = '--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + metaJson +
+             '\r\n--' + boundary + '\r\nContent-Type: ' + (att.getContentType() || 'application/octet-stream') + '\r\n\r\n';
+  var tail = '\r\n--' + boundary + '--';
+  var payload = Utilities.newBlob(head).getBytes().concat(att.getBytes()).concat(Utilities.newBlob(tail).getBytes());
+  var resp = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+    method: 'post', contentType: 'multipart/related; boundary=' + boundary, payload: payload,
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true
+  });
+  if (resp.getResponseCode() >= 300) throw new Error('Could not convert ' + name + ': ' + resp.getContentText().slice(0, 200));
+  var fileId = JSON.parse(resp.getContentText()).id;
+  try {
+    var ss = SpreadsheetApp.openById(fileId);
+    return ss.getSheets().map(function(s) { return { name: s.getName(), rows: s.getDataRange().getDisplayValues() }; });
+  } finally {
+    try { DriveApp.getFileById(fileId).setTrashed(true); } catch (e) {}
+  }
+}
+
+// Find the header row (first 20 rows) and pull ITEM CODE / DESCRIPTION / DISCOUNT.
+// When there is no discount column but there are list + offer price columns, the
+// discount % is computed from them.
+function _parseSweetenerRows(rows, source) {
+  var CODE  = ['ITEM CODE', 'ITEMCODE', 'ITEM NO', 'CODE', 'LN CODE', 'MATERIAL CODE', 'MATERIAL', 'SKU', 'SKU CODE', 'PRODUCT CODE', 'ARTICLE CODE'];
+  var DESC  = ['ITEM DESCRIPTION', 'DESCRIPTION', 'ITEM DESC', 'ITEM NAME', 'PRODUCT NAME', 'PRODUCT DESCRIPTION', 'PRODUCT', 'MATERIAL DESCRIPTION', 'NAME'];
+  var DISC  = ['DSICOUNT', 'DISCOUNT', 'DISCOUNT %', 'DISC', 'DISC %', 'SWEETENER', 'SWEETENER DISCOUNT', 'SWEETENER %', 'OFFER DISCOUNT', 'OFFER %', 'SCHEME DISCOUNT', '% OFF', 'OFF %'];
+  var LIST  = ['MRP', 'CPL', 'LIST PRICE', 'BASIC', 'BASIC PRICE', 'CUSTOMER BASIC', 'CPL BASIC'];
+  var OFFER = ['OFFER PRICE', 'OFFER BASIC', 'DISCOUNTED BASIC', 'NET PRICE', 'SWEETENER PRICE', 'SPECIAL PRICE'];
+
+  for (var h = 0; h < Math.min(rows.length, 20); h++) {
+    var hdr = rows[h].map(function(c) { return String(c || '').toUpperCase().replace(/\s+/g, ' ').trim(); });
+    var cCode = _hdrKeyIdx(hdr, CODE);
+    if (cCode < 0) continue;
+    var cDesc = _hdrKeyIdx(hdr, DESC, [cCode]);
+    var cDisc = _hdrKeyIdx(hdr, DISC, [cCode, cDesc]);
+    if (cDisc < 0) {   // loose match: any header mentioning discount / sweetener / % off
+      for (var j = 0; j < hdr.length; j++) {
+        if (j !== cCode && j !== cDesc && /DISC|DSIC|SWEET|% ?OFF/.test(hdr[j])) { cDisc = j; break; }
+      }
+    }
+    var cList = cDisc < 0 ? _hdrKeyIdx(hdr, LIST, [cCode, cDesc]) : -1;
+    var cOffer = cDisc < 0 ? _hdrKeyIdx(hdr, OFFER, [cCode, cDesc, cList]) : -1;
+    if (cDisc < 0 && (cList < 0 || cOffer < 0)) {
+      return { rows: [], error: source + ': has a code column but no discount column (headers: ' + hdr.filter(String).join(', ') + ')' };
+    }
+
+    var out = [];
+    for (var i = h + 1; i < rows.length; i++) {
+      var r = rows[i];
+      var code = String(r[cCode] || '').trim();
+      if (!code || /^(TOTAL|GRAND TOTAL)$/i.test(code)) continue;
+      var disc = '';
+      if (cDisc >= 0) {
+        disc = String(r[cDisc] || '').trim();
+        // A bare fraction ("0.4") means 40%.
+        if (/^0?\.\d+$/.test(disc)) disc = Math.round(parseFloat(disc) * 100) + '%';
+        else if (/^\d+(\.\d+)?$/.test(disc)) disc = disc + '%';
+      } else {
+        var lp = parseFloat(String(r[cList] || '').replace(/[^\d.]/g, '')) || 0;
+        var op = parseFloat(String(r[cOffer] || '').replace(/[^\d.]/g, '')) || 0;
+        if (lp > 0 && op > 0 && op < lp) disc = Math.round((1 - op / lp) * 100) + '%';
+      }
+      if (!disc || disc === '0%') continue;
+      out.push([code, cDesc >= 0 ? String(r[cDesc] || '').trim() : '', disc, source]);
+    }
+    return { rows: out };
+  }
+  return { rows: [], error: source + ': no ITEM CODE header found' };
 }
 
 // ─── DEBUG — fast: reads only header row + row count per listed tab ────────────
