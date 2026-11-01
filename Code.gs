@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v73';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v74';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -5409,6 +5409,15 @@ function _parseSweetenerRows(rows, source) {
     if (cList === undefined) cList = -1;
     if (cList >= 0 && st[cList].num < 0.5) cList = -1;
     if (cOffer >= 0 && st[cOffer].num < 0.5) cOffer = -1;
+    // Looser header match for prices ("CPL (Rs)", "Customer Basic Price", "Offer Basic Rs." …),
+    // only for columns that really hold prices.
+    var isPriceCol = function(j) { return j !== cCode && j !== cDesc && j !== cDisc && st[j] && st[j].num >= 0.7 && st[j].avgNum > 100; };
+    if (cOffer < 0) for (var po = 0; po < width; po++) {
+      if (isPriceCol(po) && /DISCOUNTED|OFFER|NET|SPECIAL|AFTER/.test(hdr[po] || '')) { cOffer = po; break; }
+    }
+    if (cList < 0) for (var pl = 0; pl < width; pl++) {
+      if (pl !== cOffer && isPriceCol(pl) && /CPL|BASIC|MRP|RATE|PRICE|LIST/.test(hdr[pl] || '') && !/DISCOUNTED|OFFER|NET|SPECIAL|AFTER|STOCK|QTY/.test(hdr[pl] || '')) { cList = pl; break; }
+    }
     if (cDisc < 0) {
       if (cList < 0 || cOffer < 0) {
         // Contents fallback: two price columns (mostly numbers, avg > 500, not
