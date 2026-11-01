@@ -911,6 +911,8 @@ async function loadPriceListItems(forceFresh = false, skipLocalCache = false) {
         // Shared offer end date (yyyy-mm-dd or '' to clear) — mirror it locally so
         // the Offer Zone and the SWEETENER tags reflect it instantly and offline.
         if (res.offerEndDate !== undefined && res.offerEndDate !== null) setOfferEndDateGlobal(String(res.offerEndDate));
+        // When / from which email the OPS sweetener_scheme tab was last imported.
+        if (res.sweetenerImport !== undefined) { try { localStorage.setItem('4s_sweetener_import', JSON.stringify(res.sweetenerImport || null)); } catch (e) {} }
         // Product Catalog (photos + specs), looked up by catKey in Browse Items.
         try {
           localStorage.setItem('4s_catalog_v1', JSON.stringify(res.catalog || {}));
@@ -3858,6 +3860,24 @@ function App() {
     } catch(e) { showToast(e.message,'bad'); return false; }
   }
 
+  // ── Sweetener scheme from email ────────────────────────────────
+  // Manager/admin: ask the backend to pull the newest "Best Fest_Spotlight_
+  // Sweetener Product List and Offer" email attachment into the OPS
+  // sweetener_scheme tab, then re-sync the price list so the Offer Zone and the
+  // SWEETENER tags pick up the new list.
+  async function doFetchSweetenerEmail() {
+    try {
+      const res = await apiPost({ action:'fetchSweetenerEmail', by:user?.username||user?.name||'' }, 1);
+      if (res && res.ok) {
+        try { localStorage.setItem('4s_sweetener_import', JSON.stringify(res.meta || null)); } catch (e) {}
+        showToast(res.rows + ' sweetener items imported from email ✓', 'ok');
+        await syncPriceList();
+        return true;
+      }
+      showToast((res && res.error) || 'Import failed','bad'); return false;
+    } catch(e) { showToast(e.message,'bad'); return false; }
+  }
+
   // ── Leads ──────────────────────────────────────────────────────
   // Pull every salesperson's lead register (grouped by person) from their OPS
   // tabs. Cached locally so the Leads screen shows instantly on open.
@@ -4352,7 +4372,7 @@ function App() {
     leads, leadsLoading, loadLeads, doAddLead, doEditLead, doDeleteLead,
     gmbPhones, ldmPhones, contactTagsLoading, loadContactTags,
     offersSent, loadOffersSent, doMarkOfferSent, doResetOffersSent,
-    offerEndDate, doSaveOfferConfig,
+    offerEndDate, doSaveOfferConfig, doFetchSweetenerEmail,
     changeRequests, loadChangeRequests, doRequestOrderChange, doReviewOrderChange };
 
   const screens = {
@@ -6615,7 +6635,7 @@ function SchemeLibrary({ user }) {
 // today passes it, the zone reads "No offers" and every SWEETENER tag across the
 // app is hidden (see offersLive). Admins/managers set or clear that date here.
 function OfferZoneScreen({ctx}) {
-  const {user, items, priceItems, syncedAt, priceSyncedAt, offerEndDate, doSaveOfferConfig,
+  const {user, items, priceItems, syncedAt, priceSyncedAt, offerEndDate, doSaveOfferConfig, doFetchSweetenerEmail,
          order, setOrder, nav, syncPriceList, loading, showToast} = ctx;
   const isManager = hasManagerAccess(user);
   const live      = offersLive();
@@ -6624,7 +6644,14 @@ function OfferZoneScreen({ctx}) {
   const [q, setQ]               = useState('');
   const [dateDraft, setDateDraft] = useState(offerEndDate || '');
   const [saving, setSaving]     = useState(false);
+  const [fetchingSw, setFetchingSw] = useState(false);
   useEffect(() => { setDateDraft(offerEndDate || ''); }, [offerEndDate]);
+  const swImport = React.useMemo(() => { try { return JSON.parse(localStorage.getItem('4s_sweetener_import')||'null'); } catch { return null; } }, [priceSyncedAt, fetchingSw]);
+  async function fetchSweetener() {
+    if (fetchingSw) return;
+    setFetchingSw(true);
+    try { await doFetchSweetenerEmail(); } finally { setFetchingSw(false); }
+  }
 
   const catalog = React.useMemo(() => { try { return JSON.parse(localStorage.getItem('4s_catalog_v1')||'{}'); } catch { return {}; } }, [priceSyncedAt, priceItems.length]);
 
@@ -6786,6 +6813,21 @@ function OfferZoneScreen({ctx}) {
               {offerEndDate && <button onClick={()=>saveDate('')} disabled={saving}
                 style={{flexShrink:0,padding:'9px 12px',borderRadius:8,background:'#fff',color:T.ink3,border:`1px solid ${T.line}`,fontSize:13,fontWeight:700,cursor:'pointer'}}>Clear</button>}
             </div>
+          </div>
+        )}
+
+        {/* Admin: pull the latest sweetener product list from the Godrej email into the OPS sheet */}
+        {isManager && (
+          <div style={{margin:'8px 16px 4px',padding:'12px 14px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:10}}>
+            <div style={{fontSize:10,fontWeight:800,color:T.purple,letterSpacing:.8,textTransform:'uppercase',marginBottom:6}}>Admin · sweetener scheme list</div>
+            <div style={{fontSize:11,color:T.ink3,lineHeight:1.5,marginBottom:10}}>
+              Fetches the attachment from the latest <b>Best Fest_Spotlight_Sweetener Product List and Offer</b> email into the OPS <b>sweetener_scheme</b> tab, then refreshes the offers.
+              {swImport && swImport.at && <><br/>Last import: <b>{swImport.rows}</b> items · email of {new Date(swImport.emailDate||swImport.at).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric',timeZone:IST_TZ})} · fetched {new Date(swImport.at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',timeZone:IST_TZ})}</>}
+            </div>
+            <button onClick={fetchSweetener} disabled={fetchingSw||loading}
+              style={{width:'100%',padding:'10px 14px',borderRadius:8,background:(fetchingSw||loading)?T.line2:T.purple,color:'#fff',border:'none',fontSize:13,fontWeight:800,cursor:(fetchingSw||loading)?'default':'pointer'}}>
+              {fetchingSw ? 'Fetching from email…' : '📧 Fetch latest sweetener list from email'}
+            </button>
           </div>
         )}
 
