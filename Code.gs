@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v71';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v72';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -5133,7 +5133,7 @@ function _importSweetenerFromEmail(by) {
         }
         var parsed = _parseSweetenerRows(tb.rows, a.getName() + ' › ' + tb.name);
         if (parsed.error) warnings.push(parsed.error);
-        sheets.push(tb.name + ': ' + parsed.rows.length + ' items' + (parsed.header ? ' (header: ' + parsed.header + ')' : ''));
+        sheets.push(tb.name + ': ' + parsed.rows.length + ' items' + (parsed.cols ? ' [' + parsed.cols + ']' : '') + (parsed.header ? ' (header: ' + parsed.header + ')' : ''));
         Array.prototype.push.apply(out, parsed.rows);
       });
     });
@@ -5154,9 +5154,9 @@ function _importSweetenerFromEmail(by) {
     for (var c = 0; c < names.length; c++) { sh = opsSS.getSheetByName(names[c]); if (sh) break; }
     if (!sh) sh = opsSS.insertSheet(SWEETENER_TAB_NAME);
     sh.clearContents();
-    var data = [['ITEM CODE', 'ITEM DESCRIPTION', 'DSICOUNT', 'SOURCE']].concat(rows);
-    sh.getRange(1, 1, data.length, 4).setNumberFormat('@').setValues(data);
-    sh.getRange(1, 1, 1, 4).setFontWeight('bold');
+    var data = [['ITEM CODE', 'ITEM DESCRIPTION', 'DSICOUNT', 'SOURCE', 'CATEGORY']].concat(rows);
+    sh.getRange(1, 1, data.length, 5).setNumberFormat('@').setValues(data);
+    sh.getRange(1, 1, 1, 5).setFontWeight('bold');
     sh.setFrozenRows(1);
 
     // Raw copy of the attachment for reference.
@@ -5302,60 +5302,177 @@ function _xmlDecode(s) {
     .replace(/&amp;/g, '&');
 }
 
-// Find the header row (first 20 rows) and pull ITEM CODE / DESCRIPTION / DISCOUNT.
-// When there is no discount column but there are list + offer price columns, the
-// discount % is computed from them.
+// Find the header row (first 40 rows) and pull ITEM CODE / DESCRIPTION /
+// DISCOUNT (+ the offer CATEGORY like A1 / B2 when present). Header names are
+// only a first guess: every column is also checked by its CONTENTS, so a
+// category column ("A1") is never taken as the discount and the description is
+// the column that actually holds product names. With no discount column, the %
+// is computed from list + discounted price columns.
+// Returns { rows: [[code, desc, disc, source, category]], header, cols }.
 function _parseSweetenerRows(rows, source) {
-  var CODE  = ['ITEM CODE', 'ITEMCODE', 'ITEM NO', 'CODE', 'LN CODE', 'MATERIAL CODE', 'MATERIAL', 'SKU', 'SKU CODE', 'PRODUCT CODE', 'ARTICLE CODE'];
-  var DESC  = ['ITEM DESCRIPTION', 'DESCRIPTION', 'ITEM DESC', 'ITEM NAME', 'PRODUCT NAME', 'PRODUCT DESCRIPTION', 'PRODUCT', 'MATERIAL DESCRIPTION', 'NAME'];
-  var DISC  = ['DSICOUNT', 'DISCOUNT', 'DISCOUNT %', 'DISC', 'DISC %', 'SWEETENER', 'SWEETENER DISCOUNT', 'SWEETENER %', 'OFFER DISCOUNT', 'OFFER %', 'SCHEME DISCOUNT', '% OFF', 'OFF %'];
-  var LIST  = ['MRP', 'CPL', 'LIST PRICE', 'BASIC', 'BASIC PRICE', 'CUSTOMER BASIC', 'CPL BASIC'];
-  var OFFER = ['OFFER PRICE', 'OFFER BASIC', 'DISCOUNTED BASIC', 'DISCOUNTED CUSTOMER BASIC', 'DISCOUNTED CPL', 'DISCOUNTED PRICE', 'DISCOUNTED MRP', 'NET PRICE', 'SWEETENER PRICE', 'SPECIAL PRICE'];
+  var CODE  = ['ITEM CODE', 'ITEMCODE', 'ITEM NO', 'LN CODE', 'LN', 'CODE', 'MATERIAL CODE', 'MATERIAL', 'SKU', 'SKU CODE', 'PRODUCT CODE', 'ARTICLE CODE'];
+  var DESC  = ['ITEM DESCRIPTION', 'DESCRIPTION', 'ITEM DESC', 'LN DESCRIPTION', 'LN DESC', 'ITEM NAME', 'PRODUCT NAME', 'PRODUCT DESCRIPTION', 'PRODUCT DESC',
+               'MATERIAL DESCRIPTION', 'MATERIAL DESC', 'DESC', 'PRODUCT', 'NAME', 'MODEL', 'ITEM'];
+  var DISC  = ['DSICOUNT', 'DISCOUNT', 'DISCOUNT %', 'DISC', 'DISC %', 'SWEETENER DISCOUNT', 'SWEETENER %', 'OFFER DISCOUNT', 'OFFER %',
+               'SCHEME DISCOUNT', 'CONSUMER DISCOUNT', 'CUSTOMER DISCOUNT', 'DISCOUNT ON CPL', '% OFF', 'OFF %', '%'];
+  var LIST  = ['CUSTOMER BASIC', 'CPL', 'CPL BASIC', 'BASIC', 'BASIC PRICE', 'LIST PRICE', 'MRP'];
+  var OFFER = ['DISCOUNTED CUSTOMER BASIC', 'DISCOUNTED BASIC', 'DISCOUNTED CPL', 'DISCOUNTED PRICE', 'DISCOUNTED MRP',
+               'OFFER PRICE', 'OFFER BASIC', 'NET PRICE', 'SWEETENER PRICE', 'SPECIAL PRICE'];
+  var NOT_DISC_HDR = /PRICE|BASIC|VALUE|AMOUNT|MRP|CPL|RS|CAT|CATEGORY|SECTION|CODE|TYPE|STOCK|QTY|SLAB|SCHEME NAME/;
 
   for (var h = 0; h < Math.min(rows.length, 40); h++) {
-    var hdr = rows[h].map(function(c) { return String(c || '').toUpperCase().replace(/\s+/g, ' ').trim(); });
-    var cCode = _hdrKeyIdx(hdr, CODE);
+    var hdr = (rows[h] || []).map(function(c) { return String(c || '').toUpperCase().replace(/\s+/g, ' ').trim(); });
+    var cCode = _hdrKeyIdxAll(hdr, CODE)[0];
+    if (cCode === undefined) cCode = -1;
     if (cCode < 0) {   // loose: a short header mentioning CODE (e.g. "LN Code No.")
       for (var k = 0; k < hdr.length; k++) { if (/CODE/.test(hdr[k]) && hdr[k].length <= 25) { cCode = k; break; } }
     }
     if (cCode < 0) continue;
-    var cDesc = _hdrKeyIdx(hdr, DESC, [cCode]);
-    var cDisc = _hdrKeyIdx(hdr, DISC, [cCode, cDesc]);
-    if (cDisc < 0) {   // loose match: any header mentioning discount / sweetener / % off
-      for (var j = 0; j < hdr.length; j++) {
-        if (j !== cCode && j !== cDesc && /DISC|DSIC|SWEET|% ?OFF/.test(hdr[j]) && !/PRICE|BASIC|VALUE|AMOUNT|MRP|CPL|RS/.test(hdr[j])) { cDisc = j; break; }
+
+    // Data rows = rows below the header with a code-looking value (letters/digits, ≥4 chars).
+    var data = [];
+    for (var i = h + 1; i < rows.length; i++) {
+      var cv = String((rows[i] || [])[cCode] || '').trim();
+      if (cv.length >= 4 && /^[A-Za-z0-9][A-Za-z0-9\-\/\.]*$/.test(cv) && !/^(TOTAL|GRAND)/i.test(cv)) data.push(rows[i]);
+    }
+    if (!data.length) continue;
+
+    var width = hdr.length;
+    data.forEach(function(r) { if (r.length > width) width = r.length; });
+    var st = [];
+    for (var j = 0; j < width; j++) st.push(_swColStats(data, j, hdr[j] || ''));
+
+    // Description: a header match that really holds text, else the wordiest text column.
+    var cDesc = -1, dCand = _hdrKeyIdxAll(hdr, DESC, [cCode]);
+    for (var a = 0; a < dCand.length; a++) if (st[dCand[a]].text >= 0.5 && st[dCand[a]].avgLen > 5) { cDesc = dCand[a]; break; }
+    if (cDesc < 0) {
+      var best = 0;
+      for (j = 0; j < width; j++) {
+        if (j === cCode) continue;
+        var score = st[j].text * st[j].avgLen * (st[j].words >= 1.5 ? 2 : 1);
+        if (st[j].text >= 0.5 && st[j].avgLen > 5 && score > best) { best = score; cDesc = j; }
       }
     }
-    var cList = cDisc < 0 ? _hdrKeyIdx(hdr, LIST, [cCode, cDesc]) : -1;
-    var cOffer = cDisc < 0 ? _hdrKeyIdx(hdr, OFFER, [cCode, cDesc, cList]) : -1;
+
+    // Discount: header match whose values are percentages, else loose header,
+    // else the column whose contents are most consistently percentages.
+    var cDisc = -1, xCand = _hdrKeyIdxAll(hdr, DISC, [cCode, cDesc]);
+    for (a = 0; a < xCand.length; a++) if (st[xCand[a]].pct >= 0.5) { cDisc = xCand[a]; break; }
+    if (cDisc < 0) {
+      for (j = 0; j < width; j++) {
+        if (j === cCode || j === cDesc || NOT_DISC_HDR.test(hdr[j] || '')) continue;
+        if (/DISC|DSIC|SWEET|%|OFF/.test(hdr[j] || '') && st[j].pct >= 0.5) { cDisc = j; break; }
+      }
+    }
+    if (cDisc < 0) {
+      var bestP = 0.6;
+      for (j = 0; j < width; j++) {
+        if (j === cCode || j === cDesc || /PRICE|BASIC|VALUE|AMOUNT|MRP|CPL|STOCK|QTY/.test(hdr[j] || '')) continue;
+        if (st[j].pctStrict >= bestP) { bestP = st[j].pctStrict; cDisc = j; }
+      }
+    }
+
+    var cList = -1, cOffer = -1;
+    if (cDisc < 0) {
+      cOffer = (_hdrKeyIdxAll(hdr, OFFER, [cCode, cDesc])[0]);
+      cList  = (_hdrKeyIdxAll(hdr, LIST, [cCode, cDesc, cOffer])[0]);
+      if (cOffer === undefined) cOffer = -1;
+      if (cList === undefined) cList = -1;
+      if (cList >= 0 && st[cList].num < 0.5) cList = -1;
+      if (cOffer >= 0 && st[cOffer].num < 0.5) cOffer = -1;
+      if (cList < 0 || cOffer < 0) {
+        // Contents fallback: two price columns (mostly numbers, avg > 500, not
+        // stock/qty) where the later one is lower than the earlier in ≥80% of rows.
+        var pc = [];
+        for (j = 0; j < width; j++) {
+          if (j !== cCode && j !== cDesc && st[j].num >= 0.8 && st[j].avgNum > 500 && !/STOCK|QTY|QUANTITY|SR|S NO|SL/.test(hdr[j] || '')) pc.push(j);
+        }
+        var bestPair = null, bestHit = 0.8;
+        for (var x = 0; x < pc.length; x++) for (var y = x + 1; y < pc.length; y++) {
+          var hit = 0, tot = 0;
+          for (i = 0; i < data.length; i++) {
+            var A = _swNum(data[i][pc[x]]), B = _swNum(data[i][pc[y]]);
+            if (A > 0 && B > 0) { tot++; if (B < A && B > A * 0.1) hit++; }
+          }
+          if (tot && hit / tot >= bestHit) { bestHit = hit / tot; bestPair = [pc[x], pc[y]]; }
+        }
+        if (bestPair) { cList = bestPair[0]; cOffer = bestPair[1]; }
+      }
+    }
+
+    // Offer category (A1, B2, D1 …): a CAT/CATEGORY/SECTION column with short values.
+    var cCat = -1;
+    for (j = 0; j < width; j++) {
+      if (j === cCode || j === cDesc || j === cDisc) continue;
+      if (/CAT|SECTION|SLAB|CLASS/.test(hdr[j] || '') && st[j].shortCode >= 0.6) { cCat = j; break; }
+    }
+
     if (cDisc < 0 && (cList < 0 || cOffer < 0)) {
       return { rows: [], error: source + ': has a code column but no discount column (headers: ' + hdr.filter(String).join(', ') + ')' };
     }
 
     var out = [];
-    for (var i = h + 1; i < rows.length; i++) {
-      var r = rows[i];
+    for (i = 0; i < data.length; i++) {
+      var r = data[i];
       var code = String(r[cCode] || '').trim();
-      if (!code || /^(TOTAL|GRAND TOTAL)$/i.test(code)) continue;
       var disc = '';
-      if (cDisc >= 0) {
-        disc = String(r[cDisc] || '').trim();
-        // A bare fraction ("0.4") means 40%.
-        if (/^0?\.\d+$/.test(disc)) disc = Math.round(parseFloat(disc) * 100) + '%';
-        else if (/^\d+(\.\d+)?$/.test(disc)) disc = disc + '%';
-        var dn = parseFloat(disc.replace(/[^\d.]/g, ''));
-        if (!(dn > 0 && dn <= 100)) continue;   // not a sane percentage (e.g. a price column)
-      } else {
-        var lp = parseFloat(String(r[cList] || '').replace(/[^\d.]/g, '')) || 0;
-        var op = parseFloat(String(r[cOffer] || '').replace(/[^\d.]/g, '')) || 0;
+      if (cDisc >= 0) disc = _swPct(r[cDisc], /DISC|DSIC|%|OFF|SWEET/.test(hdr[cDisc] || ''));
+      if (!disc && cList >= 0 && cOffer >= 0) {
+        var lp = _swNum(r[cList]), op = _swNum(r[cOffer]);
         if (lp > 0 && op > 0 && op < lp) disc = Math.round((1 - op / lp) * 100) + '%';
       }
-      if (!disc || disc === '0%') continue;
-      out.push([code, cDesc >= 0 ? String(r[cDesc] || '').trim() : '', disc, source]);
+      if (!disc) continue;
+      out.push([code, cDesc >= 0 ? String(r[cDesc] || '').trim() : '', disc, source, cCat >= 0 ? String(r[cCat] || '').trim() : '']);
     }
-    return { rows: out, header: hdr.filter(String).join(' | ') };
+    var nm = function(c) { return c >= 0 ? (hdr[c] || ('col ' + (c + 1))) : '—'; };
+    return { rows: out, header: hdr.filter(String).join(' | '),
+             cols: 'code=' + nm(cCode) + ', desc=' + nm(cDesc) + ', disc=' + (cDisc >= 0 ? nm(cDisc) : (cList >= 0 ? nm(cList) + '→' + nm(cOffer) : '—')) + ', cat=' + nm(cCat) };
   }
   return { rows: [], error: source + ': no item-code header found in the first 40 rows' };
+}
+
+// Per-column content profile over the data rows.
+function _swColStats(data, j, hdr) {
+  var n = 0, text = 0, num = 0, pct = 0, pctStrict = 0, shortCode = 0, len = 0, words = 0, sumNum = 0;
+  var hdrSaysPct = /DISC|DSIC|%|OFF|SWEET/.test(hdr);
+  for (var i = 0; i < data.length; i++) {
+    var v = String((data[i] || [])[j] === undefined ? '' : data[i][j]).trim();
+    if (!v) continue;
+    n++; len += v.length;
+    if (/[A-Za-z]{3,}/.test(v)) { text++; words += v.split(/\s+/).length; }
+    if (/^-?\d+(\.\d+)?$/.test(v)) { num++; sumNum += parseFloat(v); }
+    if (_swPct(v, hdrSaysPct)) pct++;
+    if (_swPct(v, false)) pctStrict++;
+    if (/^[A-Za-z]{1,2}\d{0,2}$/.test(v)) shortCode++;
+  }
+  if (!n) return { text: 0, num: 0, pct: 0, pctStrict: 0, shortCode: 0, avgLen: 0, words: 0, avgNum: 0 };
+  return { text: text / n, num: num / n, pct: pct / n, pctStrict: pctStrict / n, shortCode: shortCode / n,
+           avgLen: len / n, words: text ? words / text : 0, avgNum: num ? sumNum / num : 0 };
+}
+
+// A cell as a display percentage, or '' if it is not one. Accepts "35%",
+// "15% + Scratch Card", fractions (0.35 → 35%), and — only when the header says
+// it is a discount — bare whole numbers 1-100 (35 → 35%).
+function _swPct(v, allowWhole) {
+  var s = String(v === null || v === undefined ? '' : v).trim();
+  if (!s) return '';
+  var m = /^(\d+(?:\.\d+)?)\s*%/.exec(s);
+  if (m) { var p = parseFloat(m[1]); return (p > 0 && p <= 100) ? s.replace(/\s+/g, ' ') : ''; }
+  if (/^0?\.\d+$/.test(s)) { var f = parseFloat(s); return (f > 0 && f < 1) ? (Math.round(f * 1000) / 10) + '%' : ''; }
+  if (allowWhole && /^\d+(\.\d+)?$/.test(s)) { var w = parseFloat(s); return (w >= 1 && w <= 100) ? (Math.round(w * 10) / 10) + '%' : ''; }
+  return '';
+}
+function _swNum(v) { return parseFloat(String(v === null || v === undefined ? '' : v).replace(/[^\d.]/g, '')) || 0; }
+
+// Like _hdrKeyIdx but returns EVERY matching column, in candidate order.
+function _hdrKeyIdxAll(headers, candidates, exclude) {
+  var normHdr = headers.map(_crmKey), skip = {}, out = [], seen = {};
+  (exclude || []).forEach(function(i) { if (i >= 0) skip[i] = true; });
+  for (var i = 0; i < candidates.length; i++) {
+    var k = _crmKey(candidates[i]);
+    for (var j = 0; j < normHdr.length; j++) if (!skip[j] && !seen[j] && normHdr[j] === k) { seen[j] = 1; out.push(j); }
+  }
+  return out;
 }
 
 // ─── DEBUG — fast: reads only header row + row count per listed tab ────────────
