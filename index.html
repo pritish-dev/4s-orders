@@ -522,6 +522,24 @@ const IMPORTED_OFFER_SECTIONS = [
   {id:'D',    label:'Cat D (HS)',     title:'Sweetener · Cat D (HS)',     sweet:true,  note:'Till stocks last. D2 items are sold on “as is where is” basis without warranty.'},
   {id:'E',    label:'Cat E Mattress', title:'Sweetener · Cat E Mattress', sweet:true,  note:'Only for the qty in the Godrej sheet — inform OEC before booking.'},
 ];
+// Godrej's sheet writes Bestfest / Spotlight discounts as "10% + Scratch Card";
+// the scratch card carries an ASSURED 5% (email: A1 15% = 10% + scratch card).
+// Returns { base, sc, total } — total is what the customer actually gets.
+const SCRATCH_CARD_ASSURED_PCT = 5;
+function offerPctParts(v) {
+  const s = String(v == null ? '' : v);
+  const plus = /(\d+(?:\.\d+)?)\s*%?\s*\+\s*(?:scratch|s\.?\s*c\b)/i.exec(s);
+  if (plus) { const base = parseFloat(plus[1]) || 0; return { base, sc: SCRATCH_CARD_ASSURED_PCT, total: base + SCRATCH_CARD_ASSURED_PCT }; }
+  const m = /(\d+(?:\.\d+)?)/.exec(s);
+  const t = m ? parseFloat(m[1]) || 0 : 0;
+  return { base: t, sc: 0, total: t };
+}
+// Display label: "15% (10% + 5% scratch card)" or just "35%".
+function offerPctLabel(v) {
+  const p = offerPctParts(v);
+  if (!p.total) return String(v == null ? '' : v);
+  return p.sc ? `${p.total}% (${p.base}% + ${p.sc}% scratch card)` : `${p.total}%`;
+}
 function importedOfferRows() {
   try { const v = JSON.parse(localStorage.getItem('4s_sweetener_rows') || '[]'); return Array.isArray(v) ? v : []; } catch (e) { return []; }
 }
@@ -6664,7 +6682,7 @@ function OfferZoneScreen({ctx}) {
   const [sec, setSec]   = useState('A1');
   const [disc, setDisc] = useState('All');
   const [budget, setBudget] = useBudget();
-  const opsFiltered = budget > 0 ? filtered.filter(it => { const b = Number(it.cpl)||Number(it.mrp)||0, p = parseFloat(String(it.sweetenerDiscount).replace(/[^\d.]/g,''))||0; const v = Math.round(b*(1+GST_RATE)*(1-p/100)); return v > 0 && v <= budget; }) : filtered;
+  const opsFiltered = budget > 0 ? filtered.filter(it => { const b = Number(it.cpl)||Number(it.mrp)||0, p = offerPctParts(it.sweetenerDiscount).total; const v = Math.round(b*(1+GST_RATE)*(1-p/100)); return v > 0 && v <= budget; }) : filtered;
   const shown = opsFiltered.length > RENDER_CAP ? opsFiltered.slice(0, RENDER_CAP) : opsFiltered;
 
   // Bestfest & Sweetener rows from the Interio Finder (Q3'26 sheet), with stock.
@@ -6678,18 +6696,23 @@ function OfferZoneScreen({ctx}) {
     const stockMap = {}; (items||[]).forEach(it => { stockMap[String(it.code||'').toUpperCase()] = it; });
     if (useImported) {
       const pb = {}; (priceItems||[]).forEach(pi => { if (pi && pi.code) pb[String(pi.code).toUpperCase()] = pi; });
+      const bundled = {}; finderOffers().forEach(r => { bundled[String(r[1]||'').toUpperCase()] = r; });
       const out = [];
       swRows.forEach((r, i) => {
         const code = String(r[0]||'').toUpperCase();
-        const pct = Math.round((parseFloat(String(r[2]||'').replace(/[^\d.]/g,''))||0) * 10) / 10;
-        const pi = pb[code], si = stockMap[code];
-        // Basic (excl. GST): the sheet's own CPL basic, else the price book's.
-        const basic = Number(r[5]) || (pi && (Number(pi.cpl)||Number(pi.mrp))) || (si && (Number(si.cpl)||Number(si.mrp))) || 0;
-        if (!basic || !pct) return;
-        const dbasic = Number(r[6]) && Number(r[6]) < basic ? Number(r[6]) : basic * (1 - pct/100);
+        const pp = offerPctParts(r[2]);
+        const pct = Math.round(pp.total * 10) / 10;
+        if (!pct) return;
+        const pi = pb[code], si = stockMap[code], bo = bundled[code];
+        // Basic (excl. GST): the sheet's CPL basic → price book → bundled Q3'26
+        // offer list → stock list. Items with no price anywhere are still listed.
+        const basic = Number(r[5]) || (pi && (Number(pi.cpl)||Number(pi.mrp))) || (bo && Number(bo[3])) || (si && (Number(si.cpl)||Number(si.mrp))) || 0;
+        // The sheet's offer basic is used only when there's no scratch-card part
+        // (it's the pre-scratch-card price); otherwise apply the total %.
+        const dbasic = (!pp.sc && Number(r[6]) && Number(r[6]) < basic) ? Number(r[6]) : basic * (1 - pct/100);
         const stock = (si && si.stock) || [];
         const name = r[1] || (pi && pi.name) || code;
-        out.push({ i, sec: importedOfferSection(r[3], r[4]), cat: r[3]||'', code, name, basic, pct, dbasic, launch: 0,
+        out.push({ i, sec: importedOfferSection(r[3], r[4]), cat: r[3]||'', code, name, basic, pct, pctBase: pp.base, pctSc: pp.sc, dbasic, launch: 0,
                    list: roundRs(basic*(1+GST_RATE)), price: roundRs(dbasic*(1+GST_RATE)),
                    stock, stockQ: stock.reduce((s,x)=>s+(x.q||0),0), _s:(name+' '+code+' '+(r[3]||'')).toLowerCase() });
       });
@@ -6713,7 +6736,7 @@ function OfferZoneScreen({ctx}) {
   useEffect(() => { if (secTabs.length && !secTabs.find(t => t.id === sec)) setSec(secTabs[0].id); }, [secTabs]);
   const secBase = SECTIONS.find(x => x.id === sec);
   // Imported sections: the discount line comes from the sheet's actual values.
-  const secObj = secBase && useImported ? { ...secBase, sub: [...new Set(finderAll.filter(o=>o.sec===sec).map(o=>o.pct))].sort((a,b)=>a-b).map(p=>p+'%').join(' / ') + ' off' } : secBase;
+  const secObj = secBase && useImported ? { ...secBase, sub: [...new Set(finderAll.filter(o=>o.sec===sec).map(o=>o.pctSc ? `${o.pct}% (${o.pctBase}% + ${o.pctSc}% assured scratch card)` : o.pct+'%'))].join(' / ') + ' off' } : secBase;
   const discs  = React.useMemo(() => sec==='OPS' ? [] : [...new Set(finderAll.filter(o=>o.sec===sec).map(o=>o.pct))].sort((a,b)=>a-b), [finderAll, sec]);
   const finderFiltered = React.useMemo(() => {
     if (!live || sec === 'OPS') return [];
@@ -6911,21 +6934,24 @@ function OfferZoneScreen({ctx}) {
                     <div style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap',marginBottom:4}}>
                       <span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:700}}>{o.code}</span>
                       <span style={{display:'inline-block',background:T.purple,color:'#fff',fontWeight:800,fontSize:10,padding:'1px 7px',borderRadius:99}}>{o.pct}% OFF</span>
+                      {o.pctSc>0 && <span style={{display:'inline-block',background:'#fdf6df',color:'#8a6d00',border:'1px solid #f2e2a8',fontWeight:800,fontSize:10,padding:'0 7px',borderRadius:99}}>{o.pctBase}% + {o.pctSc}% SCRATCH CARD</span>}
                       {o.stockQ>0 && <Pill tone="ok" size="sm">{o.stockQ} IN STOCK</Pill>}
                       {inCart && <Pill tone="green" size="sm">IN ORDER × {inCart.qty}</Pill>}
                     </div>
                     {o.launch ? <div style={{fontSize:10.5,color:T.warn,fontWeight:700}}>🚧 To be launched shortly</div> : null}
-                    <div style={{fontSize:10,color:T.ink4}}>basic ₹{Math.round(o.dbasic).toLocaleString('en-IN')} + GST</div>
+                    {o.basic > 0
+                      ? <div style={{fontSize:10,color:T.ink4}}>basic ₹{Math.round(o.dbasic).toLocaleString('en-IN')} + GST</div>
+                      : <div style={{fontSize:10,color:T.warn,fontWeight:700}}>Price not in the price book — check the Godrej sheet</div>}
                   </div>
                   <div style={{flexShrink:0,textAlign:'right',display:'flex',flexDirection:'column',alignItems:'flex-end',gap:8,paddingLeft:4}}>
-                    <div>
+                    {o.basic > 0 && <div>
                       <div style={{fontSize:10,color:T.ink4,textDecoration:'line-through',fontFamily:T.mono}}>₹{o.list.toLocaleString('en-IN')}</div>
                       <div style={{fontFamily:T.mono,fontSize:15,fontWeight:800,color:T.purple}}>₹{o.price.toLocaleString('en-IN')}</div>
                       <div style={{fontSize:8,color:T.ink4,fontWeight:600,marginTop:1}}>incl. 18% GST</div>
-                    </div>
-                    <button onClick={()=>addOfferToOrder(o)} style={{height:32,padding:'0 12px',borderRadius:6,background:T.purple,color:'#fff',border:'none',fontSize:13,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:4}}>
+                    </div>}
+                    {o.basic > 0 && <button onClick={()=>addOfferToOrder(o)} style={{height:32,padding:'0 12px',borderRadius:6,background:T.purple,color:'#fff',border:'none',fontSize:13,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:4}}>
                       {Icon.plus('#fff',14)}Add
-                    </button>
+                    </button>}
                   </div>
                 </div>
               </div>
@@ -6938,7 +6964,7 @@ function OfferZoneScreen({ctx}) {
             const oos        = hasStock && stockTotal===0 && !mto;
             const base       = Number(it.cpl)||Number(it.mrp)||0;
             const mrpIncl    = base>0 ? roundRs(base*(1+GST_RATE)) : 0;
-            const pctNum     = parseFloat(String(it.sweetenerDiscount).replace(/[^\d.]/g,'')) || 0;
+            const pctNum     = offerPctParts(it.sweetenerDiscount).total;
             const discIncl   = (mrpIncl>0 && pctNum>0) ? Math.round(mrpIncl*(1-pctNum/100)) : mrpIncl;
             const thumb      = finderImgOf(it, fc);   // Interio catalogue photo only
             return (
@@ -6952,7 +6978,7 @@ function OfferZoneScreen({ctx}) {
                       {it.item && <Pill tone="neutral" size="sm">{it.item}</Pill>}
                       <Pill tone="neutral" size="sm">{(it.sheet||it.cat||'').toUpperCase()}</Pill>
                       {oos && <Pill tone="bad" size="sm">OUT OF STOCK</Pill>}
-                      <Pill tone="purple" size="sm">SWEETENER {it.sweetenerDiscount} OFF</Pill>
+                      <Pill tone="purple" size="sm">SWEETENER {offerPctLabel(it.sweetenerDiscount)} OFF</Pill>
                     </div>
                     {it.extra && <div style={{fontSize:10,color:T.ink4,marginBottom:4}}>{it.extra}</div>}
                     <div style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap'}}>
@@ -7205,7 +7231,7 @@ function ProductSheet({item, cat, onClose, onAdd}) {
             <div style={{display:'flex',alignItems:'center',gap:8,marginTop:4,flexWrap:'wrap'}}>
               {catLabel && <span style={{fontFamily:T.mono,fontSize:10,letterSpacing:1,textTransform:'uppercase',color:T.ink4}}>{catLabel}</span>}
               {(item.altCode||item.code) && <span style={{fontFamily:T.mono,fontSize:10.5,fontWeight:700,color:item.altCode?T.green:T.ink4}}>{item.altCode||item.code}</span>}
-              {item.sweetenerDiscount && offersLive() && <Pill tone="purple" size="sm">SWEETENER {item.sweetenerDiscount} OFF</Pill>}
+              {item.sweetenerDiscount && offersLive() && <Pill tone="purple" size="sm">SWEETENER {offerPctLabel(item.sweetenerDiscount)} OFF</Pill>}
               {stag && <Pill tone={stag[1]} size="sm">{stag[0]}</Pill>}
             </div>
             {item.extra && <div style={{fontSize:11.5,color:T.ink3,marginTop:5}}>{item.extra}</div>}
@@ -8028,7 +8054,7 @@ function SearchScreen({ctx}) {
                     {oos && <Pill tone="bad" size="sm">OUT OF STOCK</Pill>}
                     {it.discontinued && <Pill tone="bad" size="sm">DISCONTINUED{it.discSince?' since '+it.discSince:''}</Pill>}
                     {it.altCode && <Pill tone="warn" size="sm">REPLACES {it.code}</Pill>}
-                    {it.sweetenerDiscount && offersLive() && <Pill tone="purple" size="sm">SWEETENER {it.sweetenerDiscount} OFF</Pill>}
+                    {it.sweetenerDiscount && offersLive() && <Pill tone="purple" size="sm">SWEETENER {offerPctLabel(it.sweetenerDiscount)} OFF</Pill>}
                     {(()=>{ const st = itemSchemeTag(it); return st ? <Pill tone={st[1]} size="sm">{st[0]}</Pill> : null; })()}
                   </div>
                   {/* Extra info (e.g. mattress thickness) */}
