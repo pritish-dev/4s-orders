@@ -115,7 +115,7 @@ client's cached items/orders.
 
 ---
 
-## Sweetener scheme import from Gmail (v70)
+## Sweetener scheme import from Gmail (v71)
 
 `importSweetenerFromEmail()` takes the newest email whose subject **contains**
 "Best Fest_Spotlight_Sweetener Product List and Offer" (e.g. "Updated Q3'26 Grand
@@ -132,3 +132,7 @@ everything except Gmail, and the import fails with "does not have permission").
 If the box was missed, just Run again: the function re-requests the Gmail
 permission. That run also does the first import. On failure the run stops with a
 red error naming the reason; the existing `sweetener_scheme` tab is untouched.
+
+The `.xlsx` attachment is read directly in Apps Script (`Utilities.unzip` + the
+sheet XML), so no Drive API / Google Cloud project setup is needed. Old binary
+`.xls` files are not supported (ask for `.xlsx`).
