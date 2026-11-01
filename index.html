@@ -510,6 +510,34 @@ const OFFER_SECTIONS = [
   {id:'E',   label:'Cat E Mattress', title:'Sweetener · Cat E Mattress', sweet:true,  sub:'55% off · E2 65% off',
    note:'Till stocks last · sold on “as is where is” basis without warranty.'},
 ];
+// Sections for the offer list imported from the latest Godrej email (OPS
+// sweetener_scheme tab). These replace the bundled Q3'26 list above once an
+// import exists, so the Offer Zone always shows the sheet's current discounts.
+const IMPORTED_OFFER_SECTIONS = [
+  {id:'A1',   label:'Cat A1',         title:'Bestfest · Cat A1',          sweet:false, note:'Discount as per the latest Godrej Bestfest sheet. Bestfest items get EMI & bank cashback offers.'},
+  {id:'A23',  label:'Cat A2 & A3',    title:'Bestfest · Cat A2 & A3',     sweet:false, note:'Discount as per the latest Godrej Bestfest sheet.'},
+  {id:'SPOT', label:'Spotlight',      title:'Spotlight · Bedroom',        sweet:false, note:'Discount as per the latest Godrej Spotlight sheet.'},
+  {id:'B',    label:'Cat B',          title:'Sweetener · Cat B',          sweet:true,  note:'Till stocks last · sold on “as is where is” basis without warranty.'},
+  {id:'C',    label:'Cat C',          title:'Sweetener · Cat C',          sweet:true,  note:'Till stocks last · sold on “as is where is” basis without warranty.'},
+  {id:'D',    label:'Cat D (HS)',     title:'Sweetener · Cat D (HS)',     sweet:true,  note:'Till stocks last. D2 items are sold on “as is where is” basis without warranty.'},
+  {id:'E',    label:'Cat E Mattress', title:'Sweetener · Cat E Mattress', sweet:true,  note:'Only for the qty in the Godrej sheet — inform OEC before booking.'},
+];
+function importedOfferRows() {
+  try { const v = JSON.parse(localStorage.getItem('4s_sweetener_rows') || '[]'); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+}
+// Imported row (category like "A1"/"B2", sheet name like "Category A - Bestfest")
+// → Offer Zone section id.
+function importedOfferSection(cat, sheet) {
+  const c = String(cat || '').toUpperCase().replace(/\s+/g, ''), sh = String(sheet || '').toUpperCase();
+  if (/SPOT/.test(c) || /SPOTLIGHT/.test(sh)) return 'SPOT';
+  let m = /^(?:CAT(?:EGORY)?)?([A-E])(\d)?/.exec(c);
+  if (!m) m = /CAT(?:EGORY)?\.?\s*-?\s*([A-E])(\d)?\b/.exec(sh);
+  if (!m && /BEST\s*FEST/.test(sh)) m = [null, 'A', ''];
+  if (!m) return 'B';   // unknown sheet → treat as a sweetener line
+  if (m[1] === 'A') return (m[2] === '2' || m[2] === '3') ? 'A23' : 'A1';
+  return m[1];
+}
+
 // The real beds (no Upmods components / headboards / bedside tables), by price-book id.
 let _finderBeds = null;
 function finderBedIds() {
@@ -865,6 +893,8 @@ async function loadPriceListItems(forceFresh = false, skipLocalCache = false) {
         if (res.offerEndDate !== undefined && res.offerEndDate !== null) setOfferEndDateGlobal(String(res.offerEndDate));
         // When / from which email the OPS sweetener_scheme tab was last imported.
         if (res.sweetenerImport !== undefined) { try { localStorage.setItem('4s_sweetener_import', JSON.stringify(res.sweetenerImport || null)); } catch (e) {} }
+        // Imported Godrej offer rows (OPS sweetener_scheme) — they drive the Offer Zone sections.
+        if (Array.isArray(res.sweetenerRows)) { try { localStorage.setItem('4s_sweetener_rows', JSON.stringify(res.sweetenerRows)); } catch (e) {} }
         // Product Catalog (photos + specs), looked up by catKey in Browse Items.
         try {
           localStorage.setItem('4s_catalog_v1', JSON.stringify(res.catalog || {}));
@@ -6639,8 +6669,32 @@ function OfferZoneScreen({ctx}) {
 
   // Bestfest & Sweetener rows from the Interio Finder (Q3'26 sheet), with stock.
   const {cat:fc} = useFinderCatalog();
+  // Latest Godrej offer list imported into OPS (sweetener_scheme). When present it
+  // replaces the bundled Q3'26 list so discounts always match the current sheet.
+  const swRows = React.useMemo(() => importedOfferRows(), [priceSyncedAt, priceItems.length]);
+  const useImported = swRows.length > 0;
+  const SECTIONS = useImported ? IMPORTED_OFFER_SECTIONS : OFFER_SECTIONS;
   const finderAll = React.useMemo(() => {
     const stockMap = {}; (items||[]).forEach(it => { stockMap[String(it.code||'').toUpperCase()] = it; });
+    if (useImported) {
+      const pb = {}; (priceItems||[]).forEach(pi => { if (pi && pi.code) pb[String(pi.code).toUpperCase()] = pi; });
+      const out = [];
+      swRows.forEach((r, i) => {
+        const code = String(r[0]||'').toUpperCase();
+        const pct = Math.round((parseFloat(String(r[2]||'').replace(/[^\d.]/g,''))||0) * 10) / 10;
+        const pi = pb[code], si = stockMap[code];
+        // Basic (excl. GST): the sheet's own CPL basic, else the price book's.
+        const basic = Number(r[5]) || (pi && (Number(pi.cpl)||Number(pi.mrp))) || (si && (Number(si.cpl)||Number(si.mrp))) || 0;
+        if (!basic || !pct) return;
+        const dbasic = Number(r[6]) && Number(r[6]) < basic ? Number(r[6]) : basic * (1 - pct/100);
+        const stock = (si && si.stock) || [];
+        const name = r[1] || (pi && pi.name) || code;
+        out.push({ i, sec: importedOfferSection(r[3], r[4]), cat: r[3]||'', code, name, basic, pct, dbasic, launch: 0,
+                   list: roundRs(basic*(1+GST_RATE)), price: roundRs(dbasic*(1+GST_RATE)),
+                   stock, stockQ: stock.reduce((s,x)=>s+(x.q||0),0), _s:(name+' '+code+' '+(r[3]||'')).toLowerCase() });
+      });
+      return out;
+    }
     return finderOffers().map((r, i) => {
       const si = stockMap[String(r[1]||'').toUpperCase()];
       const stock = (si && si.stock) || [];
@@ -6648,13 +6702,18 @@ function OfferZoneScreen({ctx}) {
                list: roundRs((Number(r[3])||0)*(1+GST_RATE)), price: roundRs((Number(r[6])||0)*(1+GST_RATE)),
                stock, stockQ: stock.reduce((s,x)=>s+(x.q||0),0), _s:(r[2]+' '+r[1]).toLowerCase() };
     });
-  }, [items]);
+  }, [items, useImported, swRows, priceItems]);
   const secTabs = React.useMemo(() => {
-    const t = OFFER_SECTIONS.map(x => ({ id:x.id, label:x.label, n:finderAll.filter(o=>o.sec===x.id).length }));
+    let t = SECTIONS.map(x => ({ id:x.id, label:x.label, n:finderAll.filter(o=>o.sec===x.id).length }));
+    if (useImported) t = t.filter(x => x.n > 0);
     if (offerItems.length) t.push({ id:'OPS', label:'OPS sheet sweetener', n:offerItems.length });
     return t;
-  }, [finderAll, offerItems.length]);
-  const secObj = OFFER_SECTIONS.find(x => x.id === sec);
+  }, [finderAll, offerItems.length, useImported]);
+  // Keep the selected tab valid (e.g. an imported list with no Cat A1 rows).
+  useEffect(() => { if (secTabs.length && !secTabs.find(t => t.id === sec)) setSec(secTabs[0].id); }, [secTabs]);
+  const secBase = SECTIONS.find(x => x.id === sec);
+  // Imported sections: the discount line comes from the sheet's actual values.
+  const secObj = secBase && useImported ? { ...secBase, sub: [...new Set(finderAll.filter(o=>o.sec===sec).map(o=>o.pct))].sort((a,b)=>a-b).map(p=>p+'%').join(' / ') + ' off' } : secBase;
   const discs  = React.useMemo(() => sec==='OPS' ? [] : [...new Set(finderAll.filter(o=>o.sec===sec).map(o=>o.pct))].sort((a,b)=>a-b), [finderAll, sec]);
   const finderFiltered = React.useMemo(() => {
     if (!live || sec === 'OPS') return [];
@@ -6670,7 +6729,7 @@ function OfferZoneScreen({ctx}) {
   // Add a Bestfest / Sweetener row: CPL = customer basic, discount % and the
   // sheet's discounted basic as the selling price, flagged with its scheme.
   function addOfferToOrder(o) {
-    const so = OFFER_SECTIONS.find(x => x.id === o.sec) || {};
+    const so = SECTIONS.find(x => x.id === o.sec) || {};
     const lines = order.items || [];
     const ex = lines.findIndex(x => x.code === o.code && x.offerSec === o.sec);
     let newItems;
@@ -6785,7 +6844,9 @@ function OfferZoneScreen({ctx}) {
         {/* Offer sections — Bestfest & Sweetener (Interio Finder Q3'26) + OPS sheet sweeteners */}
         {live && (
           <div style={{padding:'12px 16px 4px'}}>
-            <div style={{fontSize:10,fontWeight:800,color:T.purple,letterSpacing:.8,textTransform:'uppercase',marginBottom:7}}>🏷️ Bestfest &amp; Sweetener · Q3'26</div>
+            <div style={{fontSize:10,fontWeight:800,color:T.purple,letterSpacing:.8,textTransform:'uppercase',marginBottom:7}}>🏷️ {useImported
+              ? <>Bestfest, Spotlight &amp; Sweetener · Godrej sheet{swImport && swImport.emailDate ? ' of ' + new Date(swImport.emailDate).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric',timeZone:IST_TZ}) : ''}</>
+              : <>Bestfest &amp; Sweetener · Q3'26</>}</div>
             <div style={{display:'flex',gap:6,overflowX:'auto',paddingBottom:2}}>
               {secTabs.map(t=>(
                 <span key={t.id} onClick={()=>{setSec(t.id);setDisc('All');}} style={{flexShrink:0,padding:'6px 12px',borderRadius:99,cursor:'pointer',whiteSpace:'nowrap',fontSize:12,fontWeight:800,

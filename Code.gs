@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v72';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v73';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -1195,7 +1195,8 @@ function handlePriceList(p) {
   // Sweetener scheme discounts (OPS "sweetener_scheme" tab), keyed by item code.
   // Shipped as a map so the app can badge any matching item (bundled or sheet-
   // sourced) with its scheme discount, and annotated onto the server items too.
-  var sweeteners = {};
+  var sweeteners = {}, sweetenerRows = [];
+  try { sweetenerRows = _getSweetenerRows(opsSS); } catch (e) {}
   try {
     var swMap = _getSweetenerMap(opsSS);
     if (swMap) {
@@ -1209,7 +1210,7 @@ function handlePriceList(p) {
 
   var result = { ok: true, scriptVersion: SCRIPT_VERSION, mode: usedFallback ? 'auto-scan' : 'config', items: all, counts: counts, totalTabs: Object.keys(counts).length,
                  annotated: { discontinued: annDiscontinued, altCode: annAltCode, addedFromDiscontinued: addedDiscontinued },
-                 catalog: catalogMap, sweeteners: sweeteners, offerEndDate: _getOfferEndDate(), sweetenerImport: _getSweetenerImportMeta(),
+                 catalog: catalogMap, sweeteners: sweeteners, sweetenerRows: sweetenerRows, offerEndDate: _getOfferEndDate(), sweetenerImport: _getSweetenerImportMeta(),
                  catalogStats: { matched: catMatched, total: all.length, products: Object.keys(catalogMap).length, sample: catUnmatched } };
   if (errors.length) result.tabErrors = errors;
   _cachePut(cacheKey, result);   // speed up the next load
@@ -1520,6 +1521,32 @@ function _getSweetenerMap(opsSS) {
     map[code] = disc;
   }
   return map;
+}
+
+// Full rows of the sweetener_scheme tab for the app's Offer Zone sections:
+// [code, description, discount, category, sheet name, cpl basic, offer basic].
+// Empty when the tab predates the email import (no SOURCE column).
+function _getSweetenerRows(opsSS) {
+  var sh = null, names = ['sweetener_scheme', 'Sweetener_Scheme', 'Sweetener Scheme', 'sweetener scheme', 'SWEETENER_SCHEME'];
+  for (var c = 0; c < names.length; c++) { sh = opsSS.getSheetByName(names[c]); if (sh) break; }
+  if (!sh) return [];
+  var rows = sh.getDataRange().getDisplayValues();
+  if (rows.length < 2) return [];
+  var hdr = rows[0].map(function(x) { return String(x || '').toUpperCase().trim(); });
+  var ix = function(n) { return hdr.indexOf(n); };
+  var cCode = ix('ITEM CODE'), cDesc = ix('ITEM DESCRIPTION'), cDisc = ix('DSICOUNT'), cSrc = ix('SOURCE'),
+      cCat = ix('CATEGORY'), cB = ix('CPL BASIC'), cO = ix('OFFER BASIC');
+  if (cCode < 0 || cDisc < 0 || cSrc < 0) return [];
+  var g = function(r, i) { return i >= 0 ? String(r[i] || '').trim() : ''; };
+  var out = [];
+  for (var i = 1; i < rows.length; i++) {
+    var code = g(rows[i], cCode).toUpperCase();
+    if (!code || !g(rows[i], cDisc)) continue;
+    var src = g(rows[i], cSrc), sheet = src.indexOf('›') >= 0 ? src.split('›').pop().trim() : src;
+    out.push([code, g(rows[i], cDesc), g(rows[i], cDisc), g(rows[i], cCat), sheet,
+              parseFloat(g(rows[i], cB).replace(/[^\d.]/g, '')) || 0, parseFloat(g(rows[i], cO).replace(/[^\d.]/g, '')) || 0]);
+  }
+  return out;
 }
 
 // Normalise a discount cell to a display string. A percent-formatted cell arrives
@@ -5154,9 +5181,9 @@ function _importSweetenerFromEmail(by) {
     for (var c = 0; c < names.length; c++) { sh = opsSS.getSheetByName(names[c]); if (sh) break; }
     if (!sh) sh = opsSS.insertSheet(SWEETENER_TAB_NAME);
     sh.clearContents();
-    var data = [['ITEM CODE', 'ITEM DESCRIPTION', 'DSICOUNT', 'SOURCE', 'CATEGORY']].concat(rows);
-    sh.getRange(1, 1, data.length, 5).setNumberFormat('@').setValues(data);
-    sh.getRange(1, 1, 1, 5).setFontWeight('bold');
+    var data = [['ITEM CODE', 'ITEM DESCRIPTION', 'DSICOUNT', 'SOURCE', 'CATEGORY', 'CPL BASIC', 'OFFER BASIC']].concat(rows);
+    sh.getRange(1, 1, data.length, 7).setNumberFormat('@').setValues(data);
+    sh.getRange(1, 1, 1, 7).setFontWeight('bold');
     sh.setFrozenRows(1);
 
     // Raw copy of the attachment for reference.
@@ -5318,7 +5345,9 @@ function _parseSweetenerRows(rows, source) {
   var LIST  = ['CUSTOMER BASIC', 'CPL', 'CPL BASIC', 'BASIC', 'BASIC PRICE', 'LIST PRICE', 'MRP'];
   var OFFER = ['DISCOUNTED CUSTOMER BASIC', 'DISCOUNTED BASIC', 'DISCOUNTED CPL', 'DISCOUNTED PRICE', 'DISCOUNTED MRP',
                'OFFER PRICE', 'OFFER BASIC', 'NET PRICE', 'SWEETENER PRICE', 'SPECIAL PRICE'];
-  var NOT_DISC_HDR = /PRICE|BASIC|VALUE|AMOUNT|MRP|CPL|RS|CAT|CATEGORY|SECTION|CODE|TYPE|STOCK|QTY|SLAB|SCHEME NAME/;
+  // Columns that are never the discount (contents are checked as well, so a
+  // price or a category code can't pass as a percentage anyway).
+  var NOT_DISC_HDR = /CAT|SECTION|CODE|TYPE|STOCK|QTY|SLAB|SCHEME NAME|DISCOUNTED/;
 
   for (var h = 0; h < Math.min(rows.length, 40); h++) {
     var hdr = (rows[h] || []).map(function(c) { return String(c || '').toUpperCase().replace(/\s+/g, ' ').trim(); });
@@ -5367,19 +5396,20 @@ function _parseSweetenerRows(rows, source) {
     if (cDisc < 0) {
       var bestP = 0.6;
       for (j = 0; j < width; j++) {
-        if (j === cCode || j === cDesc || /PRICE|BASIC|VALUE|AMOUNT|MRP|CPL|STOCK|QTY/.test(hdr[j] || '')) continue;
+        var hj = hdr[j] || '';
+        if (j === cCode || j === cDesc || NOT_DISC_HDR.test(hj) || (/PRICE|BASIC|VALUE|AMOUNT|MRP/.test(hj) && !/DISC|%/.test(hj))) continue;
         if (st[j].pctStrict >= bestP) { bestP = st[j].pctStrict; cDisc = j; }
       }
     }
 
-    var cList = -1, cOffer = -1;
+    // List + discounted price columns (kept so the app shows the sheet's own prices).
+    var cOffer = (_hdrKeyIdxAll(hdr, OFFER, [cCode, cDesc, cDisc])[0]);
+    var cList  = (_hdrKeyIdxAll(hdr, LIST, [cCode, cDesc, cDisc, cOffer === undefined ? -1 : cOffer])[0]);
+    if (cOffer === undefined) cOffer = -1;
+    if (cList === undefined) cList = -1;
+    if (cList >= 0 && st[cList].num < 0.5) cList = -1;
+    if (cOffer >= 0 && st[cOffer].num < 0.5) cOffer = -1;
     if (cDisc < 0) {
-      cOffer = (_hdrKeyIdxAll(hdr, OFFER, [cCode, cDesc])[0]);
-      cList  = (_hdrKeyIdxAll(hdr, LIST, [cCode, cDesc, cOffer])[0]);
-      if (cOffer === undefined) cOffer = -1;
-      if (cList === undefined) cList = -1;
-      if (cList >= 0 && st[cList].num < 0.5) cList = -1;
-      if (cOffer >= 0 && st[cOffer].num < 0.5) cOffer = -1;
       if (cList < 0 || cOffer < 0) {
         // Contents fallback: two price columns (mostly numbers, avg > 500, not
         // stock/qty) where the later one is lower than the earlier in ≥80% of rows.
@@ -5422,11 +5452,13 @@ function _parseSweetenerRows(rows, source) {
         if (lp > 0 && op > 0 && op < lp) disc = Math.round((1 - op / lp) * 100) + '%';
       }
       if (!disc) continue;
-      out.push([code, cDesc >= 0 ? String(r[cDesc] || '').trim() : '', disc, source, cCat >= 0 ? String(r[cCat] || '').trim() : '']);
+      out.push([code, cDesc >= 0 ? String(r[cDesc] || '').trim() : '', disc, source, cCat >= 0 ? String(r[cCat] || '').trim() : '',
+                cList >= 0 ? String(_swNum(r[cList]) || '') : '', cOffer >= 0 ? String(_swNum(r[cOffer]) || '') : '']);
     }
     var nm = function(c) { return c >= 0 ? (hdr[c] || ('col ' + (c + 1))) : '—'; };
     return { rows: out, header: hdr.filter(String).join(' | '),
-             cols: 'code=' + nm(cCode) + ', desc=' + nm(cDesc) + ', disc=' + (cDisc >= 0 ? nm(cDisc) : (cList >= 0 ? nm(cList) + '→' + nm(cOffer) : '—')) + ', cat=' + nm(cCat) };
+             cols: 'code=' + nm(cCode) + ', desc=' + nm(cDesc) + ', disc=' + (cDisc >= 0 ? nm(cDisc) : (cList >= 0 ? nm(cList) + '→' + nm(cOffer) : '—')) +
+                   ', cat=' + nm(cCat) + ', basic=' + nm(cList) + ', offerBasic=' + nm(cOffer) };
   }
   return { rows: [], error: source + ': no item-code header found in the first 40 rows' };
 }
