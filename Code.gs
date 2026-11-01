@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v66';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v67';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -5055,7 +5055,10 @@ function handleSaveOfferConfig(body) {
 // Run importSweetenerFromEmail() once from the Apps Script editor to grant the
 // Gmail permission and do the first import; after that, managers can re-run it
 // from the app (Offer Zone → "Fetch latest sweetener list from email").
-var SWEETENER_EMAIL_QUERY = 'subject:"Best Fest" subject:Spotlight subject:Sweetener has:attachment';
+// Gmail treats "Best Fest_Spotlight_Sweetener" as ONE word (underscores join
+// tokens), so subject:Sweetener misses it. Search on the stable phrase, then
+// filter by subject in code (underscores read as spaces).
+var SWEETENER_EMAIL_QUERY = '"Product List and Offer" has:attachment';
 var SWEETENER_TAB_NAME    = 'sweetener_scheme';
 var SWEETENER_RAW_TAB     = 'Sweetener_Email_Raw';
 
@@ -5088,12 +5091,14 @@ function _importSweetenerFromEmail(by) {
     catch (e) {
       return { ok: false, error: 'Gmail access not authorised yet. Open the Apps Script editor and run importSweetenerFromEmail() once to grant permission. (' + e.message + ')' };
     }
-    if (!threads || !threads.length) return { ok: false, error: 'No email found with subject "Best Fest_Spotlight_Sweetener Product List and Offer" that has an attachment.' };
+    if (!threads || !threads.length) return { ok: false, error: 'No "… Sweetener Product List and Offer" email with an attachment was found.' };
 
     // Newest message (across the matching threads) with a spreadsheet attachment.
     var picked = null;
     threads.forEach(function(t) {
       t.getMessages().forEach(function(m) {
+        var subj = String(m.getSubject() || '').replace(/_/g, ' ').toUpperCase();
+        if (subj.indexOf('SWEETENER') < 0) return;
         var atts = m.getAttachments({ includeInlineImages: false }).filter(_isSheetAttachment);
         if (!atts.length) return;
         if (!picked || m.getDate() > picked.msg.getDate()) picked = { msg: m, atts: atts };
