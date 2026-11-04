@@ -39,7 +39,10 @@ def main(src_path):
     def compact(r):
         return {k: v for k, v in r.items() if v is not None and v is not False and v != ''}
     price = [compact(r) for r in data]
-    assert all(r['id'] == i for i, r in enumerate(price)), 'ids must equal row index'
+    # ids are stable product ids, not row positions: a later Finder drops
+    # discontinued products and leaves gaps. The app keys on id, so they only
+    # need to be unique.
+    assert len({r['id'] for r in price}) == len(price), 'price-book ids must be unique'
 
     # ── catalogue: images to files, metadata to JSON ─────────────────────────
     os.makedirs('catalog/img', exist_ok=True)
