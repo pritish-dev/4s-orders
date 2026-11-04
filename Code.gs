@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v74';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v75';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -5011,6 +5011,17 @@ function handleLeagueSaveConfig(body) {
         try { rosters = JSON.parse(props.getProperty('LEAGUE_ROSTERS') || '{}') || {}; } catch (e) { rosters = {}; }
         var _clean = function (arr) { return (arr || []).map(function (n) { return String(n || '').trim(); }).filter(String); };
         var r = body.roster;
+        // Only an admin may bring a NEW player into the league. A manager can
+        // re-assign the known players (defaults + anyone in a saved roster).
+        if (role !== 'admin') {
+          var known = { PRITISH: 1, ARCHITA: 1, BISWAJIT: 1, SWATI: 1, ADITYA: 1, SAROJ: 1 };
+          Object.keys(rosters).forEach(function (mk) {
+            var o = rosters[mk] || {};
+            (o.strikers || []).concat(o.titans || []).forEach(function (n) { known[String(n || '').trim().toUpperCase()] = 1; });
+          });
+          var unknown = _clean(r.strikers).concat(_clean(r.titans)).filter(function (n) { return !known[n.toUpperCase()]; });
+          if (unknown.length) return { ok: false, error: 'Only an admin can add a new player (' + unknown.join(', ') + ').' };
+        }
         var caps = (r.captains && typeof r.captains === 'object') ? r.captains : {};
         rosters[monthKey] = {
           strikers: _clean(r.strikers),
