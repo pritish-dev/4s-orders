@@ -4935,18 +4935,36 @@ function LeagueScreen({ctx}) {
   const [assign,setAssign] = useState({});                            // name → 'strikers' | 'titans'
   const [caps,setCaps]     = useState({strikers:'',titans:''});       // captain per team
   const [savingRoster,setSavingRoster] = useState(false);
-  // Pool of assignable players = union of this month's roster and the defaults.
+  const isLeagueAdmin = normRole(user&&user.role)==='admin';         // only an admin can add new players
+  const [extraPlayers,setExtraPlayers] = useState([]);                // players added in this editing session
+  const [newPlayer,setNewPlayer] = useState('');
+  // Pool of assignable players = union of this month's roster, every player
+  // seen in any saved month's roster (so an added player stays available), the
+  // defaults, and any player the admin just added.
   const rosterPool = (()=>{
     const out=[]; const seen={};
-    teams.forEach(t=>t.players.forEach(p=>{ if(!seen[p.name]){seen[p.name]=1;out.push(p.name);} }));
-    LEAGUE_PLAYER_POOL.forEach(n=>{ if(!seen[n]){seen[n]=1;out.push(n);} });
+    const add=n=>{ const k=String(n||'').trim().toUpperCase(); if(k&&!seen[k]){seen[k]=1;out.push(k);} };
+    teams.forEach(t=>t.players.forEach(p=>add(p.name)));
+    LEAGUE_PLAYER_POOL.forEach(add);
+    const rs=(league&&league.rosters)||{};
+    Object.keys(rs).sort().forEach(mk=>{ const r=rs[mk]||{}; (r.strikers||[]).concat(r.titans||[]).forEach(add); });
+    extraPlayers.forEach(add);
     return out;
   })();
+  function addRosterPlayer(){
+    if(!isLeagueAdmin) return;
+    const nm=String(newPlayer||'').trim().toUpperCase();
+    if(!nm){ ctx.showToast&&ctx.showToast('Enter the player name','warn'); return; }
+    if(rosterPool.indexOf(nm)>=0){ ctx.showToast&&ctx.showToast(nm+' is already in the list','warn'); return; }
+    setExtraPlayers(x=>x.concat([nm]));
+    setAssign(a2=>({...a2,[nm]:'strikers'}));
+    setNewPlayer('');
+  }
   function openRosterEditor(){
     const as={}, cp={strikers:'',titans:''};
     teams.forEach(t=>t.players.forEach(p=>{ as[p.name]=t.id; if(p.captain) cp[t.id]=p.name; }));
     rosterPool.forEach(n=>{ if(!as[n]) as[n]='strikers'; });
-    setAssign(as); setCaps(cp); setRosterEdit(true);
+    setAssign(as); setCaps(cp); setExtraPlayers([]); setNewPlayer(''); setRosterEdit(true);
   }
   async function saveRoster(){
     const strikers=rosterPool.filter(n=>assign[n]==='strikers');
@@ -5167,6 +5185,12 @@ function LeagueScreen({ctx}) {
                           </label>
                         </div>
                       ))}
+                      {isLeagueAdmin&&(
+                        <div style={{display:'flex',gap:6,marginTop:10}}>
+                          <input value={newPlayer} onChange={e=>setNewPlayer(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter') addRosterPlayer(); }} placeholder="New player name (as in Sales Exec)" style={{flex:1,minWidth:0,height:32,border:`1px solid ${T.line}`,borderRadius:6,padding:'0 8px',fontSize:12,color:T.ink}}/>
+                          <button onClick={addRosterPlayer} style={{flexShrink:0,height:32,padding:'0 12px',borderRadius:6,background:T.ink,color:'#fff',border:'none',fontSize:11,fontWeight:800,cursor:'pointer'}}>+ Add player</button>
+                        </div>
+                      )}
                       <div style={{display:'flex',gap:8,marginTop:10}}>
                         <button onClick={saveRoster} disabled={savingRoster} style={{flex:1,height:34,borderRadius:6,background:T.green,color:'#fff',border:'none',fontSize:12,fontWeight:800,cursor:'pointer',opacity:savingRoster?.6:1}}>{savingRoster?'Saving…':'Save teams for '+mo.label}</button>
                         <button onClick={()=>setRosterEdit(false)} style={{flexShrink:0,height:34,padding:'0 14px',borderRadius:6,background:'#fff',color:T.ink3,border:`1px solid ${T.line}`,fontSize:12,fontWeight:700,cursor:'pointer'}}>Cancel</button>
