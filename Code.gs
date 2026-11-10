@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v78';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v79';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -302,6 +302,7 @@ function doPost(e) {
       case 'setAppSerial':    result = handleSetAppSerial(body);      break;
       case 'saveLeagueScore': result = handleLeagueSaveScore(body);   break;
       case 'saveLeagueConfig':result = handleLeagueSaveConfig(body);  break;
+      case 'settleLeagueTargetWeeks': result = handleLeagueSettleTargetWeeks(body); break;
       case 'saveOfferConfig': result = handleSaveOfferConfig(body);   break;
       case 'fetchSweetenerEmail': result = handleFetchSweetenerEmail(body); break;
       case 'addLead':         result = handleAddLead(body);           break;
@@ -4852,12 +4853,26 @@ function handleMonthlyTargets(p) {
     if (!name) return null;
     var key = name.toUpperCase().split(' ')[0].replace(/[^A-Z]/g, '');
     if (!key) return null;
-    if (!people[key]) people[key] = { key: key, name: name.toUpperCase(), target: 0, targetLakh: 0, hasTarget: false, invoiced: 0, orders: 0, _so: {} };
+    if (!people[key]) people[key] = { key: key, name: name.toUpperCase(), target: 0, targetLakh: 0, hasTarget: false, invoiced: 0, orders: 0, weekly: {}, _so: {} };
     return people[key];
   }
 
   // ── 1. Achievement from the SALE INVOICE tab ──
-  var invoiceTab = '', invoiceError = '';
+  var invoiceTab = '', invoiceError = '', invoiceDated = false;
+  var dimMonth = new Date(year, mIdx + 1, 0).getDate();
+  // Day of the month (1–31) of an invoice-date cell, or 0 if it isn't in this month.
+  function dayInMonth(v) {
+    var y, m, d;
+    if (v instanceof Date) { y = v.getFullYear(); m = v.getMonth(); d = v.getDate(); }
+    else {
+      var t = String(v == null ? '' : v).trim(), mm;
+      if ((mm = t.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})/))) { y = +mm[1]; m = +mm[2] - 1; d = +mm[3]; }
+      else if ((mm = t.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})/))) { d = +mm[1]; m = +mm[2] - 1; y = +mm[3]; if (y < 100) y += 2000; }
+      else if ((mm = t.match(/^(\d{1,2})[-\s]([A-Za-z]{3})[A-Za-z]*[-\s,]+(\d{2,4})/))) { d = +mm[1]; m = _mtMonthOf(mm[2]); y = +mm[3]; if (y < 100) y += 2000; }
+      else return 0;
+    }
+    return (y === year && m === mIdx && d >= 1 && d <= dimMonth) ? d : 0;
+  }
   try {
     var best = null, bestRank = -1;
     var yr4 = String(year), yr2 = String(year).slice(2);
@@ -4892,6 +4907,9 @@ function handleMonthlyTargets(p) {
         var cTax  = _mtCol(hk, ['TAXABLEVALUE', 'TAXABLEAMOUNT', 'TAXABLE']);
         var cExec = _mtCol(hk, ['SALESEXECUTIVENAME', 'SALESEXECUTIVE', 'SALESEXEC', 'SALESPERSON', 'SALESMAN']);
         var cSO   = _mtCol(hk, ['SALESORDERNO', 'SALESORDERNUMBER', 'SONO', 'SALESORDER']);
+        // Invoice date → lets the league split achievement into its 7-day weeks.
+        var cDate = _mtCol(hk, ['INVOICEDATE', 'INVDATE', 'BILLDATE', 'DATE']);
+        invoiceDated = cDate >= 0;
         if (cExec < 0) {
           invoiceError = '"' + invoiceTab + '" has no Sales Executive Name column.';
         } else {
@@ -4900,7 +4918,12 @@ function handleMonthlyTargets(p) {
             if (/^\s*(GRAND\s*)?TOTAL/i.test(String(row[cExec] || ''))) continue;   // totals row
             var pr = person(row[cExec]);
             if (!pr) continue;                                       // blank row
-            pr.invoiced += _mtNum(row[cTax]);
+            var amt = _mtNum(row[cTax]);
+            pr.invoiced += amt;
+            if (cDate >= 0) {
+              var dd = dayInMonth(row[cDate]);
+              if (dd) { var wk = Math.floor((dd - 1) / 7) + 1; pr.weekly[wk] = (pr.weekly[wk] || 0) + amt; }
+            }
             if (cSO >= 0) { var so = String(row[cSO] || '').trim(); if (so) pr._so[so] = 1; }
           }
         }
@@ -4968,11 +4991,12 @@ function handleMonthlyTargets(p) {
     pr.orders = Object.keys(pr._so).length;
     delete pr._so;
     pr.invoiced = Math.round(pr.invoiced);
+    Object.keys(pr.weekly).forEach(function (w) { pr.weekly[w] = Math.round(pr.weekly[w]); });
     pr.pct = pr.target > 0 ? Math.round(pr.invoiced / pr.target * 1000) / 10 : null;
     return pr;
   }).sort(function (a, b) { return b.invoiced - a.invoiced; });
 
-  return { ok: true, month: mk, monthName: monthName, invoiceTab: invoiceTab, invoiceError: invoiceError,
+  return { ok: true, month: mk, monthName: monthName, invoiceTab: invoiceTab, invoiceError: invoiceError, invoiceDated: invoiceDated,
            targetTab: targetTab, targetError: targetError, people: out, scriptVersion: SCRIPT_VERSION };
 }
 
@@ -5151,7 +5175,11 @@ function handleLeagueGet(p) {
     // Admin-tuned weights for the Salesman-of-the-Month calculation.
     var somWeights = {};
     try { somWeights = JSON.parse(props.getProperty('LEAGUE_SOM_WEIGHTS') || '{}') || {}; } catch (e) { somWeights = {}; }
-    return { ok: true, scores: rows, monthlyTarget: target, weeklyTarget: wTarget, salesmanOfMonth: som, rosters: rosters, points: points, removedPlayers: removedPlayers, somPublished: somPublished, somWeights: somWeights, scriptVersion: SCRIPT_VERSION };
+    // Weekly sales-target points, settled once per finished week:
+    // { 'yyyy-mm-dd' (week start): { month, src, at, by, players: { NAME: { target, achieved, pts } } } }
+    var targetWeeks = {};
+    try { targetWeeks = JSON.parse(props.getProperty('LEAGUE_TARGET_WEEKS') || '{}') || {}; } catch (e) { targetWeeks = {}; }
+    return { ok: true, scores: rows, monthlyTarget: target, weeklyTarget: wTarget, salesmanOfMonth: som, rosters: rosters, points: points, removedPlayers: removedPlayers, somPublished: somPublished, somWeights: somWeights, targetWeeks: targetWeeks, scriptVersion: SCRIPT_VERSION };
   } catch (e) { return { ok: false, error: e.message }; }
 }
 
@@ -5198,6 +5226,63 @@ function handleLeagueSaveScore(body) {
     _appendLog(by, '', 'LEAGUE_SCORE', player + ' @ ' + date);
     return { ok: true, scriptVersion: SCRIPT_VERSION };
   } catch (e) { return { ok: false, error: e.message }; }
+}
+
+// Settle the weekly sales-target points for finished weeks. The app computes each
+// player's ± points (weekly share of the monthly target vs invoiced) when a
+// manager/admin opens the league after a week has ended; this stores them ONCE —
+// a week that is already settled is never overwritten. Weeks before
+// LEAGUE_TARGET_WEEKS_FROM, and weeks that haven't finished yet, are refused.
+var LEAGUE_TARGET_WEEKS_FROM = '2026-11-01';
+function handleLeagueSettleTargetWeeks(body) {
+  var by = String((body && body.by) || '').trim();
+  var role = _lookupRole(by);
+  if (role !== 'admin' && role !== 'manager') return { ok: false, error: 'Only a manager or admin can settle weekly target points.' };
+  var weeks = body && body.weeks;
+  if (!weeks || typeof weeks !== 'object') return { ok: false, error: 'weeks is required.' };
+  var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+  var today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  var lock = LockService.getScriptLock();
+  var haveLock = false;
+  try {
+    haveLock = lock.tryLock(10000);
+    if (!haveLock) return { ok: false, error: 'Busy — try again.' };
+    var props = PropertiesService.getScriptProperties();
+    var stored = {};
+    try { stored = JSON.parse(props.getProperty('LEAGUE_TARGET_WEEKS') || '{}') || {}; } catch (e) { stored = {}; }
+    var added = [];
+    Object.keys(weeks).forEach(function (ws) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ws) || ws < LEAGUE_TARGET_WEEKS_FROM || stored[ws]) return;
+      var y = Number(ws.slice(0, 4)), m = Number(ws.slice(5, 7)) - 1, d = Number(ws.slice(8, 10));
+      if ((d - 1) % 7 !== 0) return;                                   // must be a league week start (1, 8, 15, 22, 29)
+      var dim = new Date(y, m + 1, 0).getDate();
+      var we = ws.slice(0, 8) + ('0' + Math.min(d + 6, dim)).slice(-2);
+      if (we >= today) return;                                         // the week hasn't finished yet
+      var w = weeks[ws] || {}, players = {};
+      Object.keys(w.players || {}).forEach(function (n) {
+        var pl = w.players[n] || {};
+        var nm = String(n || '').trim().toUpperCase();
+        if (!nm) return;
+        players[nm] = {
+          target:   Math.max(0, Math.round(Number(pl.target) || 0)),
+          achieved: Math.max(0, Math.round(Number(pl.achieved) || 0)),
+          pts:      Math.max(-100, Math.min(100, Math.round(Number(pl.pts) || 0)))
+        };
+      });
+      stored[ws] = { month: ws.slice(0, 7), end: we, src: String(w.src || ''), players: players, by: by,
+                     at: Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss') };
+      added.push(ws);
+    });
+    if (added.length) {
+      props.setProperty('LEAGUE_TARGET_WEEKS', JSON.stringify(stored));
+      _appendLog(by, '', 'LEAGUE_TARGET_WEEKS', 'Settled ' + added.join(', '));
+    }
+    return { ok: true, added: added, targetWeeks: stored, scriptVersion: SCRIPT_VERSION };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
+  }
 }
 
 // Set league-wide config (monthly target, salesman of the month). Admin/manager only.
@@ -5297,7 +5382,7 @@ function handleLeagueSaveConfig(body) {
     // Admin-adjustable point weights. Merge any provided keys over the stored map
     // (validated against the known criteria; values rounded to whole points).
     if (body && body.points && typeof body.points === 'object') {
-      var POINT_KEYS = ['salesConv','review','happyCalling','leadConv','teleConv','teleConvReview','followupMissed','timingPenalty','dressCode'];
+      var POINT_KEYS = ['salesConv','review','happyCalling','leadConv','teleConv','teleConvReview','followupMissed','timingPenalty','dressCode','targetWeek'];
       var pts = {};
       try { pts = JSON.parse(props.getProperty('LEAGUE_POINTS') || '{}') || {}; } catch (e) { pts = {}; }
       POINT_KEYS.forEach(function (k) {
