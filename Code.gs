@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v79';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v80';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -5175,7 +5175,7 @@ function handleLeagueGet(p) {
     // Admin-tuned weights for the Salesman-of-the-Month calculation.
     var somWeights = {};
     try { somWeights = JSON.parse(props.getProperty('LEAGUE_SOM_WEIGHTS') || '{}') || {}; } catch (e) { somWeights = {}; }
-    // Weekly sales-target points, settled once per finished week:
+    // Weekly sales-target points, settled once per week on its last day (7th, 14th, 21st, 28th, month end):
     // { 'yyyy-mm-dd' (week start): { month, src, at, by, players: { NAME: { target, achieved, pts } } } }
     var targetWeeks = {};
     try { targetWeeks = JSON.parse(props.getProperty('LEAGUE_TARGET_WEEKS') || '{}') || {}; } catch (e) { targetWeeks = {}; }
@@ -5231,8 +5231,9 @@ function handleLeagueSaveScore(body) {
 // Settle the weekly sales-target points for finished weeks. The app computes each
 // player's ± points (weekly share of the monthly target vs invoiced) when a
 // manager/admin opens the league after a week has ended; this stores them ONCE —
-// a week that is already settled is never overwritten. Weeks before
-// LEAGUE_TARGET_WEEKS_FROM, and weeks that haven't finished yet, are refused.
+// a week that is already settled is never overwritten. A week can be settled
+// from its LAST DAY (the 7th, 14th, 21st, 28th or month end) onward. Weeks
+// before LEAGUE_TARGET_WEEKS_FROM, and weeks whose last day hasn't come, are refused.
 var LEAGUE_TARGET_WEEKS_FROM = '2026-11-01';
 function handleLeagueSettleTargetWeeks(body) {
   var by = String((body && body.by) || '').trim();
@@ -5257,7 +5258,7 @@ function handleLeagueSettleTargetWeeks(body) {
       if ((d - 1) % 7 !== 0) return;                                   // must be a league week start (1, 8, 15, 22, 29)
       var dim = new Date(y, m + 1, 0).getDate();
       var we = ws.slice(0, 8) + ('0' + Math.min(d + 6, dim)).slice(-2);
-      if (we >= today) return;                                         // the week hasn't finished yet
+      if (we > today) return;                                          // the week's last day hasn't come yet
       var w = weeks[ws] || {}, players = {};
       Object.keys(w.players || {}).forEach(function (n) {
         var pl = w.players[n] || {};
