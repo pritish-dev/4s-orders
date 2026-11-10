@@ -3958,7 +3958,7 @@ function App() {
     finally { if (!silent) setLeagueLoading(false); }
     return null;
   }
-  // Monthly target (Incentive_Quaterly_Targets) vs achievement (SALES INVOICE -
+  // Monthly target (Incentive_Quaterly_Targets) vs achievement (SALE INVOICE -
   // <Month> taxable value) for one month, read from the OPS sheet. Cached per month.
   async function loadMonthlyTargets(monthKey, opts) {
     const silent = opts && opts.silent;
@@ -5003,7 +5003,7 @@ function _lakh(n){ return '₹'+((Number(n)||0)/100000).toFixed(2)+' L'; }
 // MONTHLY TARGET — target vs invoiced achievement, per sales executive
 // ═══════════════════════════════════════════════════════════
 // Target: OPS "Incentive_Quaterly_Targets" (in lakh). Achievement: the sum of
-// Taxable Value per Sales Executive Name in OPS "SALES INVOICE - <Month>".
+// Taxable Value per Sales Executive Name in OPS "SALE INVOICE - <Month>".
 function MonthlyTargetScreen({ctx}) {
   const {nav, monthTargets, loadMonthlyTargets} = ctx;
   const [off,setOff] = useState(0);
@@ -5094,7 +5094,7 @@ function MonthlyTargetScreen({ctx}) {
               </table>
             </div>
           )}
-          {d && <div style={{marginTop:10,fontSize:10.5,color:T.ink4,lineHeight:1.5}}>Achieved = sum of <b>Taxable Value</b> per Sales Executive in <b>{d.invoiceTab||'SALES INVOICE - '+mo.label.split(' ')[0]}</b>. Target from <b>{d.targetTab||'Incentive_Quaterly_Targets'}</b> (in lakh).{st.loading?' Refreshing…':''}</div>}
+          {d && <div style={{marginTop:10,fontSize:10.5,color:T.ink4,lineHeight:1.5}}>Achieved = sum of <b>Taxable Value</b> per Sales Executive in <b>{d.invoiceTab||'SALE INVOICE - '+mo.label.split(' ')[0]}</b>. Target from <b>{d.targetTab||'Incentive_Quaterly_Targets'}</b> (in lakh).{st.loading?' Refreshing…':''}</div>}
         </div>
         <div style={{height:28}}/>
       </div>

@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v77';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v78';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -4789,7 +4789,7 @@ function _leagueDate(v) {
 // ─── MONTHLY TARGET vs ACHIEVEMENT (sales invoices) ───────────────────────────
 // GET ?action=monthlyTargets&month=yyyy-mm  (any logged-in user)
 //
-// Achievement: OPS sheet → "SALES INVOICE - <Month>" tab (e.g. "SALES INVOICE -
+// Achievement: OPS sheet → "SALE INVOICE - <Month>" tab (e.g. "SALE INVOICE -
 // November"). Taxable Value is summed per Sales Executive Name, and distinct
 // Sales Order Nos are counted. If several tabs exist for the month, one naming
 // the right year wins; a tab naming a different year is ignored.
@@ -4856,25 +4856,27 @@ function handleMonthlyTargets(p) {
     return people[key];
   }
 
-  // ── 1. Achievement from the SALES INVOICE tab ──
+  // ── 1. Achievement from the SALE INVOICE tab ──
   var invoiceTab = '', invoiceError = '';
   try {
     var best = null, bestRank = -1;
     var yr4 = String(year), yr2 = String(year).slice(2);
     ss.getSheets().forEach(function (sh) {
       var k = _mtKey(sh.getName());
-      if (k.indexOf('SALESINVOICE') !== 0) return;
-      var rest = k.slice('SALESINVOICE'.length);
+      // "SALE INVOICE - November" (also accepts "SALES INVOICE - November").
+      var pre = k.indexOf('SALEINVOICE') === 0 ? 'SALEINVOICE' : (k.indexOf('SALESINVOICE') === 0 ? 'SALESINVOICE' : '');
+      if (!pre) return;
+      var rest = k.slice(pre.length);
       if (rest.indexOf(monthName.slice(0, 3)) !== 0) return;
       var digits = rest.replace(/[^0-9]/g, '');
       var rank;
-      if (!digits) rank = 1;                                          // "SALES INVOICE - November"
+      if (!digits) rank = 1;                                          // "SALE INVOICE - November"
       else if (digits.indexOf(yr4) >= 0 || digits.slice(-2) === yr2) rank = 2;  // names this year
       else return;                                                    // names a different year
       if (rank > bestRank) { best = sh; bestRank = rank; }
     });
     if (!best) {
-      invoiceError = 'No "SALES INVOICE - ' + monthName.charAt(0) + monthName.slice(1).toLowerCase() + '" tab in the OPS sheet.';
+      invoiceError = 'No "SALE INVOICE - ' + monthName.charAt(0) + monthName.slice(1).toLowerCase() + '" tab in the OPS sheet.';
     } else {
       invoiceTab = best.getName();
       var vals = best.getDataRange().getValues();
