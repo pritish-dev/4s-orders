@@ -3640,6 +3640,8 @@ function App() {
   // 4S Premier League — manual daily scores + config (monthly target, salesman of the month).
   const [league,        setLeague]       = useState(() => { try { return JSON.parse(localStorage.getItem('4s_league')||'{"scores":[],"monthlyTarget":0,"weeklyTarget":0,"salesmanOfMonth":""}'); } catch { return {scores:[],monthlyTarget:0,weeklyTarget:0,salesmanOfMonth:''}; } });
   const [leagueLoading, setLeagueLoading]= useState(false);
+  // Monthly target vs invoiced achievement, per month: { 'yyyy-mm': {loading, data, error} }.
+  const [monthTargets,  setMonthTargets] = useState(() => { try { return JSON.parse(localStorage.getItem('4s_month_targets')||'{}')||{}; } catch { return {}; } });
   // Leads — per-salesperson lead register, grouped by person ({ SWATI:[…], … }).
   const [leads,         setLeads]        = useState(() => { try { return JSON.parse(localStorage.getItem('4s_leads')||'{}'); } catch { return {}; } });
   const [leadsLoading,  setLeadsLoading] = useState(false);
@@ -3995,13 +3997,33 @@ function App() {
     try {
       const res = await apiGet('leagueScores', {}, 30000, 2);
       if (res && res.ok) {
-        const data = { scores: res.scores || [], monthlyTarget: Number(res.monthlyTarget)||0, weeklyTarget: Number(res.weeklyTarget)||0, salesmanOfMonth: res.salesmanOfMonth || '', rosters: (res.rosters && typeof res.rosters==='object') ? res.rosters : {}, points: (res.points && typeof res.points==='object') ? res.points : {} };
+        const data = { scores: res.scores || [], monthlyTarget: Number(res.monthlyTarget)||0, weeklyTarget: Number(res.weeklyTarget)||0, salesmanOfMonth: res.salesmanOfMonth || '', rosters: (res.rosters && typeof res.rosters==='object') ? res.rosters : {}, points: (res.points && typeof res.points==='object') ? res.points : {}, removedPlayers: (res.removedPlayers && typeof res.removedPlayers==='object') ? res.removedPlayers : {}, somPublished: (res.somPublished && typeof res.somPublished==='object') ? res.somPublished : {}, somWeights: (res.somWeights && typeof res.somWeights==='object') ? res.somWeights : {} };
         setLeague(data);
         localStorage.setItem('4s_league', JSON.stringify(data));
         return data;
       } else if (!silent) showToast((res && res.error) || 'Failed to load league scores','bad');
     } catch(e) { if (!silent) showToast('Could not reach the server','warn'); }
     finally { if (!silent) setLeagueLoading(false); }
+    return null;
+  }
+  // Monthly target (Incentive_Quaterly_Targets) vs achievement (SALES INVOICE -
+  // <Month> taxable value) for one month, read from the OPS sheet. Cached per month.
+  async function loadMonthlyTargets(monthKey, opts) {
+    const silent = opts && opts.silent;
+    setMonthTargets(m=>({ ...m, [monthKey]: { ...(m[monthKey]||{}), loading:true } }));
+    try {
+      const res = await apiGet('monthlyTargets', { month: monthKey }, 45000, 1);
+      if (res && res.ok) {
+        setMonthTargets(m=>{ const n={ ...m, [monthKey]: { loading:false, data:res, error:'' } }; try{ localStorage.setItem('4s_month_targets', JSON.stringify(n)); }catch(e){} return n; });
+        return res;
+      }
+      const err=(res && res.error) || 'Failed to load monthly targets';
+      setMonthTargets(m=>({ ...m, [monthKey]: { ...(m[monthKey]||{}), loading:false, error:err } }));
+      if (!silent) showToast(err,'bad');
+    } catch(e) {
+      setMonthTargets(m=>({ ...m, [monthKey]: { ...(m[monthKey]||{}), loading:false, error:'Could not reach the server' } }));
+      if (!silent) showToast('Could not reach the server','warn');
+    }
     return null;
   }
   // Upsert one player's manual scores for one date (admin/manager only).
@@ -4548,6 +4570,7 @@ function App() {
     svcRequests, loadServiceRequests, doCreateServiceRequest, doUpdateServiceRequest,
     mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen,
     league, leagueLoading, loadLeague, doSaveLeagueScore, doSaveLeagueConfig,
+    monthTargets, loadMonthlyTargets,
     leads, leadsLoading, loadLeads, doAddLead, doEditLead, doDeleteLead,
     gmbPhones, ldmPhones, contactTagsLoading, loadContactTags,
     offersSent, loadOffersSent, doMarkOfferSent, doResetOffersSent,
@@ -4574,6 +4597,7 @@ function App() {
     reports: <ReportsScreen ctx={ctx}/>,
     collect: <CollectiblesScreen ctx={ctx}/>,
     league:  <LeagueScreen ctx={ctx}/>,
+    targets: <MonthlyTargetScreen ctx={ctx}/>,
     leads:   <LeadsScreen ctx={ctx}/>,
     mycustomers: <MyCustomerScreen ctx={ctx}/>,
     offerzone: <OfferZoneScreen ctx={ctx}/>,
@@ -4786,6 +4810,9 @@ const LEAGUE_MANUAL_FIELDS = [
   { key:'followupMissed', ptsKey:'followupMissed', label:'Missed follow-ups', tone:'bad'  },
   { key:'timingPenalty',  ptsKey:'timingPenalty',  label:'Timing',            tone:'bad'  },
   { key:'dressCode',      ptsKey:'dressCode',      label:'Dress code',        tone:'bad'  },
+  // Signed: the admin adds (+) or deducts (−) points for the sales target, judged
+  // against the weekly share of the player's monthly target. Each unit = 1 point.
+  { key:'targetAdj',      ptsKey:null,             label:'Target ± points',   tone:'signed', signed:true },
 ];
 const _pad2 = n => String(n).padStart(2,'0');
 function _isoOf(d){ return d.getFullYear()+'-'+_pad2(d.getMonth()+1)+'-'+_pad2(d.getDate()); }
@@ -4883,7 +4910,7 @@ function leagueAuto(orders, matchKey, startISO, endISO, leadPhones){
 }
 // Manual scores for one player, summed across the period.
 function leagueManualSum(scores, playerName, startISO, endISO){
-  const acc={reviews:0,followupMissed:0,timingPenalty:0,dressCode:0,teleConv:0,teleConvReview:0};
+  const acc={reviews:0,followupMissed:0,timingPenalty:0,dressCode:0,teleConv:0,teleConvReview:0,targetAdj:0};
   (scores||[]).forEach(s=>{
     if(String(s.player||'').trim().toLowerCase()!==playerName.toLowerCase()) return;
     const d=String(s.date||'').slice(0,10);
@@ -4920,7 +4947,8 @@ function computeWeek(orders, league, teams, win, leadMap){
         + auto.leadConv*PTS.leadConv                // per converted lead (order matched to a lead by phone)
         + man.followupMissed*PTS.followupMissed
         + man.timingPenalty*PTS.timingPenalty
-        + man.dressCode*PTS.dressCode;
+        + man.dressCode*PTS.dressCode
+        + man.targetAdj;                            // admin's target bonus / penalty (signed, 1 pt each)
       return { ...pl, auto, man, pts };
     });
     const teamBasic  = players.reduce((s,p)=>s+p.auto.basic,0);
@@ -4964,7 +4992,164 @@ function computeMonth(orders, league, mo, leadMap){
   const capStd = computeWeek(orders, league, teams,
     { year:mo.year, month:mo.month, startISO:mo.startISO, endISO:mo.endISO, days:mo.dim }, leadMap);
   return { teams, weekResults, wins, decidedWeeks, monthOver, champion,
-    orangeCap: capStd.orangeCap, purpleCap: capStd.purpleCap };
+    orangeCap: capStd.orangeCap, purpleCap: capStd.purpleCap, monthStd: capStd };
+}
+
+// ── SALESMAN OF THE MONTH — points-based calculation (admin only) ──────────────
+// Five criteria over the whole month. Each player's figure is scored RELATIVE to
+// the rest of the league, so the result adapts to how the month actually went:
+//   • "more is better" criteria: points = weight × (player ÷ best player)
+//   • negative markings (fewer is better): weight × (worst − player) ÷ (worst − best);
+//     if everyone has the same count, everyone gets the full weight
+//   • target achieved: invoiced taxable value ÷ the player's monthly target (%),
+//     scored like "more is better"; over-achievement is capped at 150%.
+// Ties go to the higher target %, then the higher sales value.
+const SOM_CRITERIA = [
+  { key:'orders',    label:'Orders',            short:'Orders',  hint:'most orders booked (excl. B2B)', dir:1 },
+  { key:'sales',     label:'Sales value',       short:'Sales',   hint:'highest net basic booked',      dir:1 },
+  { key:'reviews',   label:'Reviews',           short:'Reviews', hint:'most reviews',                  dir:1 },
+  { key:'negatives', label:'Negative markings', short:'Neg.',    hint:'fewest missed follow-ups, timing & dress-code marks', dir:-1 },
+  { key:'target',    label:'Target achieved',   short:'Target',  hint:'invoiced (taxable) ÷ monthly target', dir:1 },
+];
+const SOM_DEFAULT_W = { orders:20, sales:25, reviews:15, negatives:15, target:25 };
+function somWeightsOf(league){
+  const o=(league&&league.somWeights)||{}; const w={...SOM_DEFAULT_W};
+  Object.keys(w).forEach(k=>{ if(o[k]!==undefined&&o[k]!==null&&o[k]!=='') w[k]=Math.max(0,Number(o[k])||0); });
+  return w;
+}
+// The OPS target/invoice row for a league player (matched on first name).
+function targetRowFor(people, pl){
+  const m=String((pl&&(pl.match||pl.name))||'').trim().toLowerCase(); if(!m) return null;
+  return (people||[]).find(r=>String(r.key||'').toLowerCase()===m)
+      || (people||[]).find(r=>String(r.name||'').toLowerCase().includes(m)) || null;
+}
+function computeSOM(players, people, W){
+  const rows = players.map(p=>{
+    const tr  = targetRowFor(people, p);
+    const neg = (Number(p.man.followupMissed)||0)+(Number(p.man.timingPenalty)||0)+(Number(p.man.dressCode)||0);
+    const pct = (tr && tr.target>0) ? tr.invoiced/tr.target*100 : null;
+    return { name:p.name, team:p.team, captain:p.captain, tr, pts:{},
+      raw:{ orders:p.auto.orderCount, sales:p.auto.basic, reviews:Number(p.man.reviews)||0, negatives:neg, target:pct } };
+  });
+  const val=(r,k)=> k==='target' ? Math.min(r.raw.target||0,150) : (Number(r.raw[k])||0);
+  SOM_CRITERIA.forEach(c=>{
+    const vs=rows.map(r=>val(r,c.key));
+    const max=Math.max(0,...vs), min=Math.min(...vs);
+    rows.forEach(r=>{
+      const v=val(r,c.key);
+      const f = c.dir>0 ? (max>0 ? v/max : 0) : (max===min ? 1 : (max-v)/(max-min));
+      r.pts[c.key]=Math.round(f*(W[c.key]||0)*10)/10;
+    });
+  });
+  rows.forEach(r=>{ r.total=Math.round(SOM_CRITERIA.reduce((s2,c)=>s2+r.pts[c.key],0)*10)/10; });
+  rows.sort((a,b)=> (b.total-a.total) || ((b.raw.target||0)-(a.raw.target||0)) || (b.raw.sales-a.raw.sales));
+  return rows;
+}
+// ₹ in lakh, e.g. 1500000 → "₹15.00 L".
+function _lakh(n){ return '₹'+((Number(n)||0)/100000).toFixed(2)+' L'; }
+
+// ═══════════════════════════════════════════════════════════
+// MONTHLY TARGET — target vs invoiced achievement, per sales executive
+// ═══════════════════════════════════════════════════════════
+// Target: OPS "Incentive_Quaterly_Targets" (in lakh). Achievement: the sum of
+// Taxable Value per Sales Executive Name in OPS "SALES INVOICE - <Month>".
+function MonthlyTargetScreen({ctx}) {
+  const {nav, monthTargets, loadMonthlyTargets} = ctx;
+  const [off,setOff] = useState(0);
+  const mo = leagueMonth(off);
+  useEffect(()=>{ loadMonthlyTargets(mo.monthKey, {silent:true}); },[mo.monthKey]);
+  const st = (monthTargets||{})[mo.monthKey] || {};
+  const d  = st.data;
+  const people = ((d&&d.people)||[]).slice().sort((a,b)=>{
+    if (!!b.hasTarget !== !!a.hasTarget) return b.hasTarget ? 1 : -1;
+    return ((b.pct==null?-1:b.pct)-(a.pct==null?-1:a.pct)) || (b.invoiced-a.invoiced);
+  });
+  const totT = people.reduce((s2,r)=>s2+(r.target||0),0);
+  const totA = people.reduce((s2,r)=>s2+(r.invoiced||0),0);
+  const totP = totT>0 ? Math.round(totA/totT*1000)/10 : null;
+  const pctColor = pc => pc==null ? T.ink4 : (pc>=100 ? T.ok : (pc>=70 ? '#e07b1a' : T.bad));
+  const th = {padding:'8px 6px',fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:.4,textAlign:'right',borderBottom:`1px solid ${T.line}`,whiteSpace:'nowrap'};
+  const td = {padding:'9px 6px',fontSize:12,fontFamily:T.mono,color:T.ink,textAlign:'right',borderBottom:`1px solid ${T.line}`,whiteSpace:'nowrap'};
+  return (
+    <div className="screen">
+      <div style={{flexShrink:0,background:'linear-gradient(100deg,#15803d 0%,#14532d 100%)',color:'#fff',padding:'12px 16px 14px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.12)',border:'1px solid rgba(255,255,255,.2)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.home('#fff',18)}</button>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,opacity:.8}}>🎯 TARGET VS INVOICED</div>
+            <div style={{fontSize:20,fontWeight:900,letterSpacing:-0.5}}>Monthly Target</div>
+          </div>
+          <button onClick={()=>loadMonthlyTargets(mo.monthKey)} title="Refresh" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.12)',border:'1px solid rgba(255,255,255,.2)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.refresh('#fff',15)}</button>
+        </div>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:12,background:'rgba(0,0,0,.22)',borderRadius:8,padding:'6px 8px'}}>
+          <button onClick={()=>setOff(w=>w-1)} style={{width:28,height:28,borderRadius:6,background:'rgba(255,255,255,.14)',border:'none',color:'#fff',fontSize:15,cursor:'pointer'}}>‹</button>
+          <div style={{textAlign:'center'}}>
+            <div style={{fontSize:13,fontWeight:800}}>{mo.label}</div>
+            <div style={{fontSize:9.5,opacity:.75,letterSpacing:.5}}>{off===0?'THIS MONTH · SO FAR':'PREVIOUS MONTH'}</div>
+          </div>
+          <button onClick={()=>setOff(w=>w+1)} disabled={off>=0} style={{width:28,height:28,borderRadius:6,background:off>=0?'rgba(255,255,255,.05)':'rgba(255,255,255,.14)',border:'none',color:'#fff',fontSize:15,cursor:off>=0?'default':'pointer',opacity:off>=0?.4:1}}>›</button>
+        </div>
+      </div>
+      <div className="scroll" style={{background:T.paper}}>
+        <div style={{padding:'12px 16px'}}>
+          {/* Showroom total */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:12}}>
+            {[['TARGET',totT>0?_lakh(totT):'—',T.ink],['ACHIEVED',_lakh(totA),T.ink],['ACHIEVED %',totP==null?'—':totP+'%',pctColor(totP)]].map(x=>(
+              <div key={x[0]} style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:10,padding:'10px 10px'}}>
+                <div style={{fontSize:9,fontWeight:800,color:T.ink4,letterSpacing:.6}}>{x[0]}</div>
+                <div style={{fontSize:15,fontWeight:900,fontFamily:T.mono,color:x[2],marginTop:3}}>{x[1]}</div>
+              </div>
+            ))}
+          </div>
+          {st.loading && !d && <div style={{display:'flex',justifyContent:'center',padding:30}}><Spinner size={24}/></div>}
+          {st.error && !d && <div style={{background:'#fff',border:`1px solid ${T.bad}`,color:T.bad,borderRadius:10,padding:'10px 12px',fontSize:12}}>{st.error}</div>}
+          {d && (d.invoiceError||d.targetError) && (
+            <div style={{background:T.badSoft||'#fdecec',color:T.bad,borderRadius:8,padding:'8px 10px',fontSize:11,marginBottom:10,lineHeight:1.5}}>
+              {d.invoiceError&&<div>⚠️ {d.invoiceError}</div>}
+              {d.targetError&&<div>⚠️ {d.targetError}</div>}
+            </div>
+          )}
+          {d && (
+            <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:10,overflowX:'auto'}}>
+              <table style={{width:'100%',borderCollapse:'collapse'}}>
+                <thead><tr>
+                  <th style={{...th,textAlign:'left'}}>SALES EXECUTIVE</th>
+                  <th style={th}>TARGET</th>
+                  <th style={th}>ACHIEVED</th>
+                  <th style={th}>%</th>
+                </tr></thead>
+                <tbody>
+                  {people.length===0 && <tr><td colSpan={4} style={{...td,textAlign:'center',fontFamily:'inherit',color:T.ink4}}>No target or invoice rows for {mo.label}.</td></tr>}
+                  {people.map(r=>(
+                    <tr key={r.key}>
+                      <td style={{...td,textAlign:'left',fontFamily:'inherit',fontWeight:700,whiteSpace:'normal'}}>
+                        {r.name}
+                        {r.hasTarget && r.pct!=null && <div style={{height:4,borderRadius:99,background:T.paper2||'#eee',marginTop:4,overflow:'hidden'}}><div style={{height:'100%',width:Math.min(100,r.pct)+'%',background:pctColor(r.pct)}}/></div>}
+                      </td>
+                      <td style={td}>{r.hasTarget?_lakh(r.target):'—'}</td>
+                      <td style={td}>{_lakh(r.invoiced)}</td>
+                      <td style={{...td,fontWeight:900,color:pctColor(r.pct)}}>{r.pct==null?'—':r.pct+'%'}</td>
+                    </tr>
+                  ))}
+                  {people.length>0 && (
+                    <tr style={{background:T.paper2||'#f7f7f8'}}>
+                      <td style={{...td,textAlign:'left',fontFamily:'inherit',fontWeight:900}}>TOTAL</td>
+                      <td style={{...td,fontWeight:900}}>{totT>0?_lakh(totT):'—'}</td>
+                      <td style={{...td,fontWeight:900}}>{_lakh(totA)}</td>
+                      <td style={{...td,fontWeight:900,color:pctColor(totP)}}>{totP==null?'—':totP+'%'}</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {d && <div style={{marginTop:10,fontSize:10.5,color:T.ink4,lineHeight:1.5}}>Achieved = sum of <b>Taxable Value</b> per Sales Executive in <b>{d.invoiceTab||'SALES INVOICE - '+mo.label.split(' ')[0]}</b>. Target from <b>{d.targetTab||'Incentive_Quaterly_Targets'}</b> (in lakh).{st.loading?' Refreshing…':''}</div>}
+        </div>
+        <div style={{height:28}}/>
+      </div>
+      <BottomNav screen="home" nav={nav}/>
+    </div>
+  );
 }
 
 // A player avatar — initials on the team accent (no photos stored → lean file).
@@ -5043,7 +5228,7 @@ function LeagueTeamCard({team, isLeader, decided, pts}) {
 }
 
 function LeagueScreen({ctx}) {
-  const {user,orders,league,leads,nav,loadLeague,leagueLoading,doSaveLeagueScore,doSaveLeagueConfig} = ctx;
+  const {user,orders,league,leads,nav,loadLeague,leagueLoading,doSaveLeagueScore,doSaveLeagueConfig,monthTargets,loadMonthlyTargets} = ctx;
   const canEdit = hasManagerAccess(user);         // manager or admin
   const PTS = React.useMemo(()=>leaguePts(league),[league&&league.points]);   // effective (admin-adjustable) point weights
   const leadMap = React.useMemo(()=>leadContactMap(leads),[leads]);  // player → lead phones (for conversions)
@@ -5074,12 +5259,44 @@ function LeagueScreen({ctx}) {
   const [a,b]   = wstd.teams;
   const [wa,wb] = mstd.wins;                        // weeks-won tally (per team)
 
+  // ── Salesman of the Month (points-based; the calculation is admin only) ──
+  const isAdmin = normRole(user&&user.role)==='admin';
+  useEffect(()=>{ if(isAdmin&&loadMonthlyTargets) loadMonthlyTargets(mo.monthKey,{silent:true}); },[mo.monthKey,isAdmin]);
+  const tgtPeople = ((((monthTargets||{})[mo.monthKey]||{}).data)||{}).people || [];
+  const somW    = somWeightsOf(league);
+  const somRows = isAdmin ? computeSOM(mstd.monthStd.teams.reduce((acc,t)=>acc.concat(t.players.map(p=>({...p,team:t}))),[]), tgtPeople, somW) : [];
+  const somMax  = SOM_CRITERIA.reduce((s2,c)=>s2+(somW[c.key]||0),0);
+  const somPub  = ((league&&league.somPublished)||{})[mo.monthKey] || null;
+  // Players see the name only once the admin has made it visible. Before this
+  // feature the name was set by hand — keep showing that for the current month
+  // until the admin publishes / hides a result.
+  const somShown = somPub ? (somPub.visible ? somPub.name : '') : (monthOff===0 ? ((league&&league.salesmanOfMonth)||'') : '');
+  const [showSom,setShowSom] = useState(false);
+  const [somPick,setSomPick] = useState('');
+  const [somWDraft,setSomWDraft] = useState({});
+  const [somBusy,setSomBusy] = useState(false);
+  useEffect(()=>{ const w={}; SOM_CRITERIA.forEach(c=>w[c.key]=String(somW[c.key])); setSomWDraft(w); },[league&&league.somWeights]);
+  useEffect(()=>{ setSomPick(''); },[mo.monthKey]);
+  async function publishSom(visible){
+    const name = visible===false && somPub ? somPub.name : (somPick || (somRows[0]&&somRows[0].name) || '');
+    if(!name){ ctx.showToast&&ctx.showToast('No player to publish','warn'); return; }
+    const row = somRows.find(r=>r.name===name);
+    setSomBusy(true);
+    await doSaveLeagueConfig({ somPublish:{ month:mo.monthKey, name, score: row?row.total:(somPub?somPub.score:0), visible } });
+    setSomBusy(false);
+  }
+  async function saveSomWeights(){
+    setSomBusy(true);
+    const w={}; SOM_CRITERIA.forEach(c=>w[c.key]=Math.max(0,Math.round(Number(somWDraft[c.key])||0)));
+    await doSaveLeagueConfig({ somWeights:w });
+    setSomBusy(false);
+  }
+
   // ── Admin editor state ──
   const [editDate,setEditDate] = useState(_todayISO());
   const [monthlyTarget,setMonthlyTarget] = useState(String((league&&league.monthlyTarget)||''));
   const [weeklyTarget,setWeeklyTarget]   = useState(String((league&&league.weeklyTarget)||''));
-  const [som,setSom] = useState((league&&league.salesmanOfMonth)||'');
-  useEffect(()=>{ setMonthlyTarget(String((league&&league.monthlyTarget)||'')); setWeeklyTarget(String((league&&league.weeklyTarget)||'')); setSom((league&&league.salesmanOfMonth)||''); },[league&&league.monthlyTarget,league&&league.weeklyTarget,league&&league.salesmanOfMonth]);
+  useEffect(()=>{ setMonthlyTarget(String((league&&league.monthlyTarget)||'')); setWeeklyTarget(String((league&&league.weeklyTarget)||'')); },[league&&league.monthlyTarget,league&&league.weeklyTarget]);
   // ── Points-system editor (admin adjusts the points per criterion) ──
   const [ptsDraft,setPtsDraft] = useState({});
   const [savingPts,setSavingPts] = useState(false);
@@ -5111,9 +5328,27 @@ function LeagueScreen({ctx}) {
   }
   function setDraft(player,key,val){ setDraftRows(p=>({...p,[player]:{...(p[player]||{}),[key]:val}})); }
   // Counter step: +1 / −1 a manual criterion, clamped at 0 (never negative counts).
-  function setDraftDelta(player,key,delta){ setDraftRows(p=>{ const cur=Number((p[player]||{})[key])||0; const next=Math.max(0,cur+delta); return {...p,[player]:{...(p[player]||{}),[key]:String(next)}}; }); }
+  function setDraftDelta(player,key,delta){ const signed=LEAGUE_MANUAL_FIELDS.some(f=>f.key===key&&f.signed); setDraftRows(p=>{ const cur=Number((p[player]||{})[key])||0; const next=signed?cur+delta:Math.max(0,cur+delta); return {...p,[player]:{...(p[player]||{}),[key]:String(next)}}; }); }
   // Live points from the current (unsaved) draft, so the admin sees the tally build.
-  function draftManualPts(player){ const dr=draftRows[player]||{}; return (Number(dr.reviews)||0)*PTS.review + (Number(dr.followupMissed)||0)*PTS.followupMissed + (Number(dr.timingPenalty)||0)*PTS.timingPenalty + (Number(dr.dressCode)||0)*PTS.dressCode; }
+  function draftManualPts(player){ const dr=draftRows[player]||{}; return (Number(dr.reviews)||0)*PTS.review + (Number(dr.followupMissed)||0)*PTS.followupMissed + (Number(dr.timingPenalty)||0)*PTS.timingPenalty + (Number(dr.dressCode)||0)*PTS.dressCode + (Number(dr.targetAdj)||0); }
+  // Target helper for the score entry: the player's monthly target split into the
+  // 7-day block (1–7, 8–14, …) that holds the score date, plus what they booked
+  // in that block — so the admin can decide the ± target points.
+  const editMonthKey = String(editDate||'').slice(0,7);
+  useEffect(()=>{ if(showAdmin&&isAdmin&&loadMonthlyTargets&&/^\d{4}-\d{2}$/.test(editMonthKey)) loadMonthlyTargets(editMonthKey,{silent:true}); },[showAdmin,editMonthKey,isAdmin]);
+  const editWeek = (()=>{
+    const y=Number(editMonthKey.slice(0,4)), m=Number(editMonthKey.slice(5,7))-1, d=Number(String(editDate).slice(8,10));
+    if(!(y&&d>0)) return null;
+    const dim=_daysInMonth(y,m), sd=Math.floor((d-1)/7)*7+1, ed=Math.min(sd+6,dim);
+    return { dim, days:ed-sd+1, startISO:editMonthKey+'-'+_pad2(sd), endISO:editMonthKey+'-'+_pad2(ed), label:sd+'–'+ed };
+  })();
+  function targetHint(pl){
+    if(!editWeek) return null;
+    const tr = targetRowFor(((((monthTargets||{})[editMonthKey]||{}).data)||{}).people, pl);
+    const booked = leagueAuto(orders, pl.match, editWeek.startISO, editWeek.endISO).basic;
+    const share = tr&&tr.target>0 ? Math.round(tr.target*editWeek.days/editWeek.dim) : 0;
+    return { tr, share, booked };
+  }
 
   // ── Monthly team-roster editor (admin — teams can be re-picked once a month) ──
   const rosterSet = !!((league&&league.rosters)||{})[mo.monthKey];   // custom roster already set this month?
@@ -5316,11 +5551,78 @@ function LeagueScreen({ctx}) {
             <span style={{fontSize:24}}>🏆</span>
             <div style={{flex:1}}>
               <div style={{fontSize:11,fontWeight:800,letterSpacing:.5,opacity:.9}}>SALESMAN OF THE MONTH</div>
-              <div style={{fontSize:9.5,opacity:.75}}>Player of the series · chosen by management</div>
+              <div style={{fontSize:9.5,opacity:.75}}>{somPub&&somPub.visible?('Points-based · '+somPub.score+' pts'):'Player of the series · decided on points'}</div>
+              {isAdmin&&somPub&&!somPub.visible&&<div style={{fontSize:9.5,opacity:.9,marginTop:2}}>🔒 {somPub.name} saved · hidden from players</div>}
             </div>
-            <div style={{fontSize:15,fontWeight:900}}>{(league&&league.salesmanOfMonth)||'TBD'}</div>
+            <div style={{fontSize:15,fontWeight:900}}>{somShown||'TBD'}</div>
           </div>
         </div>
+
+        {/* Salesman of the Month — calculation (ADMIN ONLY) */}
+        {isAdmin&&(
+          <div style={{padding:'4px 16px 8px'}}>
+            <button onClick={()=>setShowSom(v=>!v)} style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 14px',background:'linear-gradient(100deg,#3a2a00,#7a5a00)',color:'#fff',border:'none',borderRadius:10,cursor:'pointer'}}>
+              <span style={{fontSize:13,fontWeight:800}}>🏅 Salesman of the Month · points (admin)</span>
+              <span style={{fontSize:12,opacity:.8}}>{showSom?'Hide ▲':'Open ▼'}</span>
+            </button>
+            {showSom&&(
+              <div style={{background:'#fff',border:`1px solid ${T.line}`,borderTop:'none',borderRadius:'0 0 10px 10px',marginTop:-2,padding:'10px 12px 14px'}}>
+                <div style={{fontSize:10.5,color:T.ink4,lineHeight:1.5,marginBottom:8}}>{mo.label} · each player is scored against the best in the league on every criterion (fewest negatives wins that one). Only you can see this.</div>
+                <div style={{overflowX:'auto',border:`1px solid ${T.line}`,borderRadius:8}}>
+                  <table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
+                    <thead><tr style={{background:T.paper2||'#f7f7f8'}}>
+                      <th style={{padding:'6px',textAlign:'left',fontSize:9.5,color:T.ink4}}>#</th>
+                      <th style={{padding:'6px',textAlign:'left',fontSize:9.5,color:T.ink4}}>PLAYER</th>
+                      {SOM_CRITERIA.map(c=><th key={c.key} style={{padding:'6px',textAlign:'right',fontSize:9.5,color:T.ink4,whiteSpace:'nowrap'}}>{c.short.toUpperCase()}<div style={{fontWeight:600}}>/{somW[c.key]}</div></th>)}
+                      <th style={{padding:'6px',textAlign:'right',fontSize:9.5,color:T.ink4}}>TOTAL<div style={{fontWeight:600}}>/{somMax}</div></th>
+                    </tr></thead>
+                    <tbody>
+                      {somRows.map((r,i)=>(
+                        <tr key={r.name} style={{borderTop:`1px solid ${T.line}`,background:i===0?'#fff8e1':'#fff'}}>
+                          <td style={{padding:'6px',fontWeight:900,color:i===0?'#b8860b':T.ink3}}>{i===0?'🏆':i+1}</td>
+                          <td style={{padding:'6px',fontWeight:800,color:r.team.accent,whiteSpace:'nowrap'}}>{r.name}</td>
+                          {SOM_CRITERIA.map(c=>{
+                            const v=r.raw[c.key];
+                            const shown = c.key==='sales' ? _fmtAmt(v) : (c.key==='target' ? (v==null?'no target':(Math.round(v*10)/10)+'%') : v);
+                            return <td key={c.key} style={{padding:'6px',textAlign:'right',whiteSpace:'nowrap'}}><div style={{fontFamily:T.mono,fontWeight:800,color:T.ink}}>{r.pts[c.key]}</div><div style={{fontSize:9,color:T.ink4}}>{shown}</div></td>;
+                          })}
+                          <td style={{padding:'6px',textAlign:'right',fontFamily:T.mono,fontWeight:900,fontSize:13,color:T.ink}}>{r.total}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {!tgtPeople.length&&<div style={{fontSize:10,color:T.bad,marginTop:6}}>Target data for {mo.label} isn't loaded yet (or the OPS tabs are missing) — the Target column scores 0 until it is. Check the Monthly Target screen.</div>}
+                {/* Weights */}
+                <div style={{fontSize:10,fontWeight:800,color:T.ink,letterSpacing:.3,margin:'12px 0 4px'}}>WEIGHTS (max points per criterion)</div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:6}}>
+                  {SOM_CRITERIA.map(c=>(
+                    <label key={c.key} title={c.hint} style={{fontSize:9,fontWeight:700,color:T.ink4,textAlign:'center'}}>{c.short}
+                      <input type="number" min="0" value={somWDraft[c.key]!==undefined?somWDraft[c.key]:''} onChange={e=>setSomWDraft(d2=>({...d2,[c.key]:e.target.value}))} style={{width:'100%',height:30,marginTop:2,border:`1px solid ${T.line}`,borderRadius:6,textAlign:'center',fontFamily:T.mono,fontSize:13,fontWeight:800,color:T.ink}}/>
+                    </label>
+                  ))}
+                </div>
+                <div style={{display:'flex',gap:8,marginTop:8}}>
+                  <button onClick={saveSomWeights} disabled={somBusy} style={{flex:1,height:32,borderRadius:6,background:T.green,color:'#fff',border:'none',fontSize:11.5,fontWeight:800,cursor:'pointer',opacity:somBusy?.6:1}}>Save weights</button>
+                  <button onClick={()=>{const w={};SOM_CRITERIA.forEach(c=>w[c.key]=String(SOM_DEFAULT_W[c.key]));setSomWDraft(w);}} style={{flexShrink:0,height:32,padding:'0 12px',borderRadius:6,background:'#fff',color:T.ink3,border:`1px solid ${T.line}`,fontSize:11.5,fontWeight:700,cursor:'pointer'}}>Defaults</button>
+                </div>
+                {/* Publish */}
+                <div style={{fontSize:10,fontWeight:800,color:T.ink,letterSpacing:.3,margin:'14px 0 4px'}}>RESULT ON THE 4SPL PAGE</div>
+                <div style={{fontSize:10.5,color:T.ink3,marginBottom:6}}>{somPub?(somPub.visible?('✅ '+somPub.name+' is visible to everyone ('+somPub.score+' pts).'):('🔒 '+somPub.name+' is saved but hidden from players.')):'Nothing published for '+mo.label+' yet — players see "TBD".'}</div>
+                <div style={{display:'flex',gap:6}}>
+                  <select value={somPick} onChange={e=>setSomPick(e.target.value)} style={{flex:1,minWidth:0,height:32,border:`1px solid ${T.line}`,borderRadius:6,padding:'0 6px',fontSize:12,color:T.ink}}>
+                    <option value="">{somRows[0]?('Top scorer — '+somRows[0].name):'— no players —'}</option>
+                    {somRows.map(r=><option key={r.name} value={r.name}>{r.name} ({r.total} pts)</option>)}
+                  </select>
+                </div>
+                <div style={{display:'flex',gap:8,marginTop:8}}>
+                  <button onClick={()=>publishSom(true)} disabled={somBusy} style={{flex:1,height:34,borderRadius:6,background:'#b8860b',color:'#fff',border:'none',fontSize:12,fontWeight:800,cursor:'pointer',opacity:somBusy?.6:1}}>Show to everyone</button>
+                  <button onClick={()=>publishSom(false)} disabled={somBusy||(!somPub&&!somRows.length)} style={{flexShrink:0,height:34,padding:'0 12px',borderRadius:6,background:'#fff',color:T.ink3,border:`1px solid ${T.line}`,fontSize:12,fontWeight:700,cursor:'pointer'}}>Hide</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Rules (collapsible) */}
         <div style={{padding:'4px 16px 8px'}}>
@@ -5340,6 +5642,8 @@ function LeagueScreen({ctx}) {
                 ['Negative points',_ptsTxt(PTS.followupMissed)+' missed follow-ups, '+_ptsTxt(PTS.timingPenalty)+' timings, '+_ptsTxt(PTS.dressCode)+' dress code / presentation'],
                 ['Happy calling',_ptsTxt(PTS.happyCalling)+' per order with a Happy Code (auto)'],
                 ['Lead converted',_ptsTxt(PTS.leadConv)+' when a lead you added books an order (auto, matched by phone)'],
+                ['Sales target','the admin can add or deduct points each week against your weekly share of the monthly target'],
+                ['Salesman of the Month','decided on points: orders, sales value, reviews, fewest negative marks and monthly target achieved (invoiced)'],
                 ['Orange & Purple cap','decided over the whole month — top sales value & most orders'],
               ].map((r,i,arr)=>(
                 <div key={i} style={{display:'flex',gap:8,padding:'6px 0',borderBottom:i<arr.length-1?`1px solid ${T.line}`:'none'}}>
@@ -5427,16 +5731,6 @@ function LeagueScreen({ctx}) {
                     {weeklyTarget!==''&&Number(weeklyTarget)>0&&<button onClick={()=>{setWeeklyTarget('0');doSaveLeagueConfig({weeklyTarget:0});}} style={{marginTop:4,fontSize:10,color:T.ink4,background:'none',border:'none',textDecoration:'underline',cursor:'pointer',padding:0}}>clear (use monthly)</button>}
                   </div>
                 </div>
-                <div style={{marginBottom:12}}>
-                  <label style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:.5}}>SALESMAN OF THE MONTH</label>
-                  <div style={{display:'flex',gap:6,marginTop:4}}>
-                    <select value={som} onChange={e=>setSom(e.target.value)} style={{...inputStyle,textAlign:'left',padding:'0 6px'}}>
-                      <option value="">— none —</option>
-                      {teams.reduce((a2,t)=>a2.concat(t.players),[]).map(p=><option key={p.name} value={p.name}>{p.name}</option>)}
-                    </select>
-                    <button onClick={()=>doSaveLeagueConfig({salesmanOfMonth:som})} style={{flexShrink:0,height:32,padding:'0 12px',borderRadius:6,background:T.green,color:'#fff',border:'none',fontSize:12,fontWeight:700,cursor:'pointer'}}>Save</button>
-                  </div>
-                </div>
                 {/* Points system — admin adjusts the points each criterion is worth */}
                 <div style={{border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px',marginBottom:12,background:T.paper2||'#f7f7f8'}}>
                   <div style={{fontSize:11,fontWeight:800,color:T.ink,letterSpacing:.3}}>🎯 POINTS SYSTEM</div>
@@ -5474,10 +5768,27 @@ function LeagueScreen({ctx}) {
                           <span title="Manual points from the current entry" style={{fontSize:11,fontWeight:900,fontFamily:T.mono,color:dpts<0?T.bad:(dpts>0?T.green:T.ink4),background:T.paper2||'#f7f7f8',borderRadius:99,padding:'3px 9px'}}>{dpts>0?'+':''}{dpts} pt</span>
                           <button onClick={()=>savePlayerRow(team,pl)} disabled={savingPlayer===pl.name} style={{height:28,padding:'0 12px',borderRadius:6,background:team.accent,color:'#fff',border:'none',fontSize:11,fontWeight:800,cursor:'pointer',opacity:savingPlayer===pl.name?.6:1}}>{savingPlayer===pl.name?'…':'Save'}</button>
                         </div>
+                        {/* Target helper — weekly share of the monthly target (admin) */}
+                        {isAdmin&&(()=>{ const h=targetHint(pl); if(!h) return null; return (
+                          <div style={{fontSize:10,color:T.ink3,background:T.paper2||'#f7f7f8',borderRadius:6,padding:'6px 8px',marginBottom:8,lineHeight:1.5}}>
+                            🎯 {h.tr&&h.tr.target>0?<>Month target <b>{_lakh(h.tr.target)}</b> · invoiced <b>{_lakh(h.tr.invoiced)}</b> ({h.tr.pct}%) · week {editWeek.label} share <b>{_lakh(h.share)}</b></>:<>No monthly target found in OPS</>} · booked this week <b>{_fmtAmt(h.booked)}</b>
+                          </div>
+                        ); })()}
                         {/* +1 / −1 counter per criterion */}
                         <div style={{display:'flex',flexDirection:'column',gap:6}}>
-                          {LEAGUE_MANUAL_FIELDS.map(f=>{
+                          {LEAGUE_MANUAL_FIELDS.filter(f=>!f.signed||isAdmin).map(f=>{
                             const val=Number((draftRows[pl.name]||{})[f.key])||0;
+                            if(f.signed){ return (
+                            <div key={f.key} style={{display:'flex',alignItems:'center',gap:8,padding:'5px 8px',background:val>0?(T.okSoft||'#deefe3'):(val<0?(T.badSoft||'#fdecec'):(T.paper2||'#f7f7f8')),border:`1px solid ${val>0?T.ok:(val<0?T.bad:T.line)}`,borderRadius:8}}>
+                              <div style={{flex:1,minWidth:0}}>
+                                <div style={{fontSize:11,fontWeight:700,color:T.ink2}}>{f.label}</div>
+                                <div style={{fontSize:9,color:T.ink4}}>+ bonus / − penalty · 1 pt each</div>
+                              </div>
+                              <button onClick={()=>setDraftDelta(pl.name,f.key,-1)} title="Deduct a point" style={{width:30,height:30,borderRadius:99,border:`1.5px solid ${T.bad}`,background:'#fff',color:T.bad,fontSize:19,fontWeight:800,lineHeight:1,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>−</button>
+                              <span style={{minWidth:26,textAlign:'center',fontFamily:T.mono,fontSize:16,fontWeight:900,color:val<0?T.bad:(val>0?T.ok:T.ink)}}>{val>0?'+':''}{val}</span>
+                              <button onClick={()=>setDraftDelta(pl.name,f.key,+1)} title="Add a point" style={{width:30,height:30,borderRadius:99,border:`1.5px solid ${T.ok}`,background:T.ok,color:'#fff',fontSize:19,fontWeight:800,lineHeight:1,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>+</button>
+                            </div>
+                            ); }
                             const bad=f.tone==='bad';
                             return (
                             <div key={f.key} style={{display:'flex',alignItems:'center',gap:8,padding:'5px 8px',background:val>0?(bad?(T.badSoft||'#fdecec'):(T.greenSoft||'#eaf6ee')):(T.paper2||'#f7f7f8'),border:`1px solid ${val>0?(bad?T.bad:T.green):T.line}`,borderRadius:8}}>
@@ -7268,6 +7579,7 @@ function HomeScreen({ctx}) {
     canManual && { key:'manual', label:'Manual Order', sub:'Admin & owner only',    emoji:'📝', bg:'linear-gradient(135deg,#334155 0%,#1e293b 100%)', onClick:()=>{ctx.setOrder({...BLANK_ORDER(),manualOrder:true,salesExec:user?.name||''});nav('order');} },
     { key:'reports', label:'Sales Summary',        sub:'Month-to-date report',      emoji:'📊', bg:'linear-gradient(135deg,#0e7490 0%,#155e75 100%)', onClick:()=>nav('reports') },
     { key:'league',  label:'4S Premier League',    sub:'Live scoreboard',           emoji:'🏆', bg:'linear-gradient(135deg,#1e3a8a 0%,#7a1420 100%)', onClick:()=>nav('league') },
+    { key:'targets', label:'Monthly Target',       sub:'Target vs invoiced',        emoji:'🎯', bg:'linear-gradient(135deg,#15803d 0%,#14532d 100%)', onClick:()=>nav('targets') },
     { key:'leads',   label:'Leads',                sub:leadTotal+(leadTotal===1?' lead':' leads'), emoji:'🎯', bg:'linear-gradient(135deg,#b45309 0%,#92400e 100%)', onClick:()=>nav('leads') },
     { key:'cust',    label:'My Customers',         sub:custToday>0?(custToday+' today'):(custEvs.length+' this month'), emoji:'🎉', bg:'linear-gradient(135deg,#be185d 0%,#9d174d 100%)', onClick:()=>nav('mycustomers') },
     { key:'collect', label:'Outstanding Payments', sub:dueTotal>0?('₹'+Math.round(dueTotal).toLocaleString('en-IN')+' to collect'):'All clear', emoji:'💰', bg:'linear-gradient(135deg,#9f1239 0%,#7a1420 100%)', onClick:()=>nav('collect') },
