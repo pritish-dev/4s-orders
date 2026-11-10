@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v76';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v77';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -249,6 +249,7 @@ function doGet(e) {
       case 'getAppSerial':   result = handleGetAppSerial();     break;
       case 'auditLog':       result = handleAuditLog(p);        break;
       case 'leagueScores':   result = handleLeagueGet(p);       break;
+      case 'monthlyTargets': result = handleMonthlyTargets(p);  break;
       case 'lookupCustomer': result = handleLookupCustomer(p);  break;
       case 'serviceRequests':result = handleListServiceRequests(); break;
       case 'leads':          result = handleLeads(p);           break;
@@ -4752,8 +4753,10 @@ var LEAGUE_TAB_NAME = 'League_Scores';
 var LEAGUE_HEADERS = [
   'Date', 'Player', 'Team',
   'Reviews', 'HappyCalling', 'FollowupMissed', 'TimingPenalty', 'DressCode',
-  'TeleConv', 'TeleConvReview', 'Notes', 'UpdatedBy', 'UpdatedAt'
+  'TeleConv', 'TeleConvReview', 'Notes', 'UpdatedBy', 'UpdatedAt',
+  'TargetAdj'   // signed ± points an admin awards / deducts for the sales target
 ];
+var LEAGUE_TARGETADJ_COL = 14;   // 1-based column of TargetAdj
 // Manual numeric fields the client sends / receives (order matters for the row).
 var LEAGUE_NUM_FIELDS = ['reviews','happyCalling','followupMissed','timingPenalty','dressCode','teleConv','teleConvReview'];
 
@@ -4765,6 +4768,12 @@ function _leagueTab() {
     sh.appendRow(LEAGUE_HEADERS);
     try { sh.setFrozenRows(1); } catch (e) {}
   }
+  // Older tabs pre-date the TargetAdj column — add its header once.
+  try {
+    if (!String(sh.getRange(1, LEAGUE_TARGETADJ_COL).getValue() || '').trim()) {
+      sh.getRange(1, LEAGUE_TARGETADJ_COL).setValue('TargetAdj');
+    }
+  } catch (e) {}
   return sh;
 }
 
@@ -4775,6 +4784,194 @@ function _leagueDate(v) {
     return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
   }
   return String(v || '').trim();
+}
+
+// ─── MONTHLY TARGET vs ACHIEVEMENT (sales invoices) ───────────────────────────
+// GET ?action=monthlyTargets&month=yyyy-mm  (any logged-in user)
+//
+// Achievement: OPS sheet → "SALES INVOICE - <Month>" tab (e.g. "SALES INVOICE -
+// November"). Taxable Value is summed per Sales Executive Name, and distinct
+// Sales Order Nos are counted. If several tabs exist for the month, one naming
+// the right year wins; a tab naming a different year is ignored.
+//
+// Target: OPS sheet → "Incentive_Quaterly_Targets" tab (SALES PERSON | FY |
+// QUARTER | MONTH | TARGET). TARGET is in LAKH — 15 means ₹15,00,000. FY is the
+// Indian financial year (Apr–Mar), e.g. "2026-27" / "FY27".
+var _MONTH_NAMES = ['JANUARY','FEBRUARY','MARCH','APRIL','MAY','JUNE','JULY','AUGUST','SEPTEMBER','OCTOBER','NOVEMBER','DECEMBER'];
+
+function _mtKey(v) { return String(v == null ? '' : v).toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+function _mtNum(v) {
+  if (typeof v === 'number') return v;
+  var n = parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g, ''));
+  return isNaN(n) ? 0 : n;
+}
+// Index of the first header whose normalised text equals one of `keys`
+// (or, failing that, contains one of them).
+function _mtCol(hdrKeys, keys) {
+  for (var k = 0; k < keys.length; k++) for (var i = 0; i < hdrKeys.length; i++) if (hdrKeys[i] === keys[k]) return i;
+  for (var k2 = 0; k2 < keys.length; k2++) for (var j = 0; j < hdrKeys.length; j++) if (hdrKeys[j] && hdrKeys[j].indexOf(keys[k2]) >= 0) return j;
+  return -1;
+}
+// Month index (0–11) named by a cell: a Date, a number 1–12, or a month name/abbrev.
+function _mtMonthOf(v) {
+  if (v instanceof Date) return v.getMonth();
+  if (typeof v === 'number') return (v >= 1 && v <= 12) ? v - 1 : -1;
+  var k = _mtKey(v);
+  if (/^\d{1,2}$/.test(k)) { var n = Number(k); return (n >= 1 && n <= 12) ? n - 1 : -1; }
+  for (var i = 0; i < 12; i++) if (k.indexOf(_MONTH_NAMES[i].slice(0, 3)) === 0) return i;
+  return -1;
+}
+// Does an FY cell match the financial year that starts in `fyStart`?
+// true / false, or null when the cell is blank / unreadable.
+function _mtFyMatch(v, fyStart) {
+  if (v instanceof Date) return v.getFullYear() === fyStart || v.getFullYear() === fyStart + 1;
+  if (typeof v === 'number') return v === fyStart || v === fyStart + 1 || v === (fyStart + 1) % 100;
+  var s = String(v == null ? '' : v);
+  var four = s.match(/\d{4}/g);
+  if (four && four.length) return Number(four[0]) === fyStart;                // "2026-27", "2026-2027"
+  var two = s.match(/\d{2}/g);
+  if (two && two.length >= 2) return Number(two[0]) === fyStart % 100;        // "26-27"
+  if (two && two.length === 1) return Number(two[0]) === (fyStart + 1) % 100; // "FY27" (the year it ends)
+  return null;
+}
+
+function handleMonthlyTargets(p) {
+  var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+  var mk = String((p && p.month) || '').slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(mk)) mk = Utilities.formatDate(new Date(), tz, 'yyyy-MM');
+  var year = Number(mk.slice(0, 4)), mIdx = Number(mk.slice(5, 7)) - 1;
+  var monthName = _MONTH_NAMES[mIdx];
+  var fyStart = mIdx >= 3 ? year : year - 1;
+
+  var ss = _openOPS();
+  if (!ss) return { ok: false, error: 'Cannot open OPS spreadsheet (ID: ' + OPS_SHEET_ID + ').' };
+
+  var people = {};   // key (first name, upper-case) → row
+  function person(rawName) {
+    var name = String(rawName || '').trim().replace(/\s+/g, ' ');
+    if (!name) return null;
+    var key = name.toUpperCase().split(' ')[0].replace(/[^A-Z]/g, '');
+    if (!key) return null;
+    if (!people[key]) people[key] = { key: key, name: name.toUpperCase(), target: 0, targetLakh: 0, hasTarget: false, invoiced: 0, orders: 0, _so: {} };
+    return people[key];
+  }
+
+  // ── 1. Achievement from the SALES INVOICE tab ──
+  var invoiceTab = '', invoiceError = '';
+  try {
+    var best = null, bestRank = -1;
+    var yr4 = String(year), yr2 = String(year).slice(2);
+    ss.getSheets().forEach(function (sh) {
+      var k = _mtKey(sh.getName());
+      if (k.indexOf('SALESINVOICE') !== 0) return;
+      var rest = k.slice('SALESINVOICE'.length);
+      if (rest.indexOf(monthName.slice(0, 3)) !== 0) return;
+      var digits = rest.replace(/[^0-9]/g, '');
+      var rank;
+      if (!digits) rank = 1;                                          // "SALES INVOICE - November"
+      else if (digits.indexOf(yr4) >= 0 || digits.slice(-2) === yr2) rank = 2;  // names this year
+      else return;                                                    // names a different year
+      if (rank > bestRank) { best = sh; bestRank = rank; }
+    });
+    if (!best) {
+      invoiceError = 'No "SALES INVOICE - ' + monthName.charAt(0) + monthName.slice(1).toLowerCase() + '" tab in the OPS sheet.';
+    } else {
+      invoiceTab = best.getName();
+      var vals = best.getDataRange().getValues();
+      // Header row = the first of the top 10 rows that has a Taxable Value column.
+      var hRow = -1, hk = [];
+      for (var r = 0; r < Math.min(10, vals.length); r++) {
+        var keys = vals[r].map(_mtKey);
+        if (_mtCol(keys, ['TAXABLEVALUE', 'TAXABLEAMOUNT', 'TAXABLE']) >= 0) { hRow = r; hk = keys; break; }
+      }
+      if (hRow < 0) {
+        invoiceError = '"' + invoiceTab + '" has no Taxable Value column.';
+      } else {
+        var cTax  = _mtCol(hk, ['TAXABLEVALUE', 'TAXABLEAMOUNT', 'TAXABLE']);
+        var cExec = _mtCol(hk, ['SALESEXECUTIVENAME', 'SALESEXECUTIVE', 'SALESEXEC', 'SALESPERSON', 'SALESMAN']);
+        var cSO   = _mtCol(hk, ['SALESORDERNO', 'SALESORDERNUMBER', 'SONO', 'SALESORDER']);
+        if (cExec < 0) {
+          invoiceError = '"' + invoiceTab + '" has no Sales Executive Name column.';
+        } else {
+          for (var i = hRow + 1; i < vals.length; i++) {
+            var row = vals[i];
+            if (/^\s*(GRAND\s*)?TOTAL/i.test(String(row[cExec] || ''))) continue;   // totals row
+            var pr = person(row[cExec]);
+            if (!pr) continue;                                       // blank row
+            pr.invoiced += _mtNum(row[cTax]);
+            if (cSO >= 0) { var so = String(row[cSO] || '').trim(); if (so) pr._so[so] = 1; }
+          }
+        }
+      }
+    }
+  } catch (e) { invoiceError = 'Could not read the sales invoice tab: ' + e.message; }
+
+  // ── 2. Targets from Incentive_Quaterly_Targets ──
+  var targetTab = '', targetError = '';
+  try {
+    var tsh = null;
+    ss.getSheets().forEach(function (sh) {
+      var k = _mtKey(sh.getName());
+      if (!tsh && k.indexOf('INCENTIVE') === 0 && k.indexOf('TARGET') >= 0) tsh = sh;
+    });
+    if (!tsh) {
+      targetError = 'No "Incentive_Quaterly_Targets" tab in the OPS sheet.';
+    } else {
+      targetTab = tsh.getName();
+      var tv = tsh.getDataRange().getValues();
+      var thRow = -1, thk = [];
+      for (var t = 0; t < Math.min(10, tv.length); t++) {
+        var tk = tv[t].map(_mtKey);
+        if (_mtCol(tk, ['TARGET']) >= 0 && _mtCol(tk, ['SALESPERSON', 'SALESEXECUTIVE', 'NAME']) >= 0) { thRow = t; thk = tk; break; }
+      }
+      if (thRow < 0) {
+        targetError = '"' + targetTab + '" needs SALES PERSON and TARGET headers.';
+      } else {
+        var cP  = _mtCol(thk, ['SALESPERSON', 'SALESEXECUTIVE', 'NAME']);
+        var cFY = _mtCol(thk, ['FY', 'FINANCIALYEAR']);
+        var cM  = _mtCol(thk, ['MONTH']);
+        var cT  = _mtCol(thk, ['TARGET']);
+        if (cM < 0) {
+          targetError = '"' + targetTab + '" has no MONTH column.';
+        } else {
+          // Rows for this month. A row whose FY names another year is skipped; if
+          // any row matches the FY exactly, rows with a blank FY are ignored.
+          var exact = [], loose = [];
+          for (var j = thRow + 1; j < tv.length; j++) {
+            var tr = tv[j];
+            if (!String(tr[cP] || '').trim()) continue;
+            if (_mtMonthOf(tr[cM]) !== mIdx) continue;
+            var fm = cFY >= 0 ? _mtFyMatch(tr[cFY], fyStart) : null;
+            if (fm === false) continue;
+            (fm === true ? exact : loose).push(tr);
+          }
+          (exact.length ? exact : loose).forEach(function (tr) {
+            var pr2 = person(tr[cP]);
+            if (!pr2) return;
+            var raw = _mtNum(tr[cT]);
+            // TARGET is in lakh (15 → ₹15,00,000). A figure of 1000+ is taken as
+            // already being in rupees.
+            pr2.targetLakh = raw >= 1000 ? Math.round(raw / 1000) / 100 : raw;
+            pr2.target     = raw >= 1000 ? Math.round(raw) : Math.round(raw * 100000);
+            pr2.hasTarget  = true;
+            pr2.name       = String(tr[cP]).trim().replace(/\s+/g, ' ').toUpperCase();   // the target sheet's spelling wins
+          });
+        }
+      }
+    }
+  } catch (e) { targetError = 'Could not read the targets tab: ' + e.message; }
+
+  var out = Object.keys(people).map(function (k) {
+    var pr = people[k];
+    pr.orders = Object.keys(pr._so).length;
+    delete pr._so;
+    pr.invoiced = Math.round(pr.invoiced);
+    pr.pct = pr.target > 0 ? Math.round(pr.invoiced / pr.target * 1000) / 10 : null;
+    return pr;
+  }).sort(function (a, b) { return b.invoiced - a.invoiced; });
+
+  return { ok: true, month: mk, monthName: monthName, invoiceTab: invoiceTab, invoiceError: invoiceError,
+           targetTab: targetTab, targetError: targetError, people: out, scriptVersion: SCRIPT_VERSION };
 }
 
 // ─── BIRTHDAY / ANNIVERSARY OFFER LOCK ────────────────────────────────────────
@@ -4925,6 +5122,7 @@ function handleLeagueGet(p) {
         o.notes     = String(r[10] || '');
         o.updatedBy = String(r[11] || '');
         o.updatedAt = _leagueDate(r[12]) ? String(r[12]) : '';
+        o.targetAdj = Math.round(Number(r[LEAGUE_TARGETADJ_COL - 1]) || 0);
         rows.push(o);
       });
     }
@@ -4943,7 +5141,15 @@ function handleLeagueGet(p) {
     // Players an admin removed from the league: { NAME: 'yyyy-mm' (month removed) }.
     var removedPlayers = {};
     try { removedPlayers = JSON.parse(props.getProperty('LEAGUE_REMOVED_PLAYERS') || '{}') || {}; } catch (e) { removedPlayers = {}; }
-    return { ok: true, scores: rows, monthlyTarget: target, weeklyTarget: wTarget, salesmanOfMonth: som, rosters: rosters, points: points, removedPlayers: removedPlayers, scriptVersion: SCRIPT_VERSION };
+    // Salesman of the Month — published per month by an admin:
+    // { 'yyyy-mm': { name, score, visible, by, at } }. A hidden entry stays stored
+    // (the admin still sees it); players see it only when visible is true.
+    var somPublished = {};
+    try { somPublished = JSON.parse(props.getProperty('LEAGUE_SOM_PUBLISHED') || '{}') || {}; } catch (e) { somPublished = {}; }
+    // Admin-tuned weights for the Salesman-of-the-Month calculation.
+    var somWeights = {};
+    try { somWeights = JSON.parse(props.getProperty('LEAGUE_SOM_WEIGHTS') || '{}') || {}; } catch (e) { somWeights = {}; }
+    return { ok: true, scores: rows, monthlyTarget: target, weeklyTarget: wTarget, salesmanOfMonth: som, rosters: rosters, points: points, removedPlayers: removedPlayers, somPublished: somPublished, somWeights: somWeights, scriptVersion: SCRIPT_VERSION };
   } catch (e) { return { ok: false, error: e.message }; }
 }
 
@@ -4966,6 +5172,7 @@ function handleLeagueSaveScore(body) {
     var row = [date, player, team];
     LEAGUE_NUM_FIELDS.forEach(function (f) { row.push(Math.round(Number(body && body[f]) || 0)); });
     row.push(String((body && body.notes) || ''), by, stamp);
+    row.push(Math.round(Number(body && body.targetAdj) || 0));   // signed target ± points
 
     // Find an existing (date, player) row to overwrite.
     var last = sh.getLastRow();
@@ -4978,6 +5185,10 @@ function handleLeagueSaveScore(body) {
           foundRow = i + 2; break;
         }
       }
+    }
+    // Target ± points are ADMIN ONLY — anyone else keeps the stored value.
+    if (role !== 'admin') {
+      row[LEAGUE_TARGETADJ_COL - 1] = foundRow > 0 ? (Math.round(Number(sh.getRange(foundRow, LEAGUE_TARGETADJ_COL).getValue()) || 0)) : 0;
     }
     if (foundRow > 0) sh.getRange(foundRow, 1, 1, LEAGUE_HEADERS.length).setValues([row]);
     else              sh.appendRow(row);
@@ -5021,6 +5232,36 @@ function handleLeagueSaveConfig(body) {
     }
     // Monthly team roster — merge one month's roster into the stored map. The
     // teams can be re-picked once a month; this replaces that month's entry.
+    // Salesman of the Month — publish / hide one month's result. ADMIN ONLY.
+    if (body && body.somPublish && typeof body.somPublish === 'object') {
+      if (role !== 'admin') return { ok: false, error: 'Only an admin can publish the Salesman of the Month.' };
+      var sp = body.somPublish;
+      var smk = String(sp.month || '').slice(0, 7);
+      if (!/^\d{4}-\d{2}$/.test(smk)) return { ok: false, error: 'Invalid month for Salesman of the Month.' };
+      var somMap = {};
+      try { somMap = JSON.parse(props.getProperty('LEAGUE_SOM_PUBLISHED') || '{}') || {}; } catch (e) { somMap = {}; }
+      somMap[smk] = {
+        name: String(sp.name || '').trim().toUpperCase(),
+        score: Math.round((Number(sp.score) || 0) * 10) / 10,
+        visible: !!sp.visible,
+        by: by,
+        at: Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Kolkata', 'yyyy-MM-dd HH:mm:ss')
+      };
+      props.setProperty('LEAGUE_SOM_PUBLISHED', JSON.stringify(somMap));
+      _appendLog(by, '', 'LEAGUE_SOM', smk + ' ' + somMap[smk].name + (somMap[smk].visible ? ' (visible)' : ' (hidden)'));
+    }
+    // Salesman-of-the-Month calculation weights. ADMIN ONLY.
+    if (body && body.somWeights && typeof body.somWeights === 'object') {
+      if (role !== 'admin') return { ok: false, error: 'Only an admin can change the Salesman of the Month weights.' };
+      var SW_KEYS = ['orders', 'sales', 'reviews', 'negatives', 'target'];
+      var sw = {};
+      SW_KEYS.forEach(function (k) {
+        var v = body.somWeights[k];
+        if (v !== undefined && v !== null && v !== '') sw[k] = Math.max(0, Math.round(Number(v) || 0));
+      });
+      props.setProperty('LEAGUE_SOM_WEIGHTS', JSON.stringify(sw));
+      _appendLog(by, '', 'LEAGUE_SOM_WEIGHTS', JSON.stringify(sw));
+    }
     if (body && body.rosterMonth && body.roster && typeof body.roster === 'object') {
       var monthKey = String(body.rosterMonth).slice(0, 7);
       if (/^\d{4}-\d{2}$/.test(monthKey)) {
