@@ -3949,7 +3949,7 @@ function App() {
     try {
       const res = await apiGet('leagueScores', {}, 30000, 2);
       if (res && res.ok) {
-        const data = { scores: res.scores || [], monthlyTarget: Number(res.monthlyTarget)||0, weeklyTarget: Number(res.weeklyTarget)||0, salesmanOfMonth: res.salesmanOfMonth || '', rosters: (res.rosters && typeof res.rosters==='object') ? res.rosters : {}, points: (res.points && typeof res.points==='object') ? res.points : {}, removedPlayers: (res.removedPlayers && typeof res.removedPlayers==='object') ? res.removedPlayers : {}, somPublished: (res.somPublished && typeof res.somPublished==='object') ? res.somPublished : {}, somWeights: (res.somWeights && typeof res.somWeights==='object') ? res.somWeights : {} };
+        const data = { scores: res.scores || [], monthlyTarget: Number(res.monthlyTarget)||0, weeklyTarget: Number(res.weeklyTarget)||0, salesmanOfMonth: res.salesmanOfMonth || '', rosters: (res.rosters && typeof res.rosters==='object') ? res.rosters : {}, points: (res.points && typeof res.points==='object') ? res.points : {}, removedPlayers: (res.removedPlayers && typeof res.removedPlayers==='object') ? res.removedPlayers : {}, somPublished: (res.somPublished && typeof res.somPublished==='object') ? res.somPublished : {}, somWeights: (res.somWeights && typeof res.somWeights==='object') ? res.somWeights : {}, targetWeeks: (res.targetWeeks && typeof res.targetWeeks==='object') ? res.targetWeeks : {} };
         setLeague(data);
         localStorage.setItem('4s_league', JSON.stringify(data));
         return data;
@@ -3993,6 +3993,19 @@ function App() {
       if (res && res.ok) { await loadLeague({silent:true}); showToast('Settings saved ✓'); return true; }
       showToast((res && res.error) || 'Save failed','bad'); return false;
     } catch(e) { showToast(e.message,'bad'); return false; }
+  }
+
+  // Store the weekly sales-target ± points for finished weeks (manager/admin).
+  // The server keeps the first result for a week and never overwrites it.
+  async function doSettleTargetWeeks(weeks) {
+    try {
+      const res = await apiPost({ action:'settleLeagueTargetWeeks', by:user?.username||user?.name||'', weeks });
+      if (res && res.ok) {
+        if (res.added && res.added.length) { await loadLeague({silent:true}); showToast('Weekly target points settled ✓'); }
+        return true;
+      }
+    } catch(e) {}
+    return false;
   }
 
   // ── Offer end date ─────────────────────────────────────────────
@@ -4521,7 +4534,7 @@ function App() {
     svcRequests, loadServiceRequests, doCreateServiceRequest, doUpdateServiceRequest,
     mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen,
     league, leagueLoading, loadLeague, doSaveLeagueScore, doSaveLeagueConfig,
-    monthTargets, loadMonthlyTargets,
+    monthTargets, loadMonthlyTargets, doSettleTargetWeeks,
     leads, leadsLoading, loadLeads, doAddLead, doEditLead, doDeleteLead,
     gmbPhones, ldmPhones, contactTagsLoading, loadContactTags,
     offersSent, loadOffersSent, doMarkOfferSent, doResetOffersSent,
@@ -4712,7 +4725,30 @@ const LEAGUE_TEAMS = [
 // Default point weights straight off the league rulebook. An admin can override
 // any of these from the app (the "Points system" editor); the overrides are kept
 // in the backend and merged over these defaults by leaguePts().
-const LEAGUE_PTS = { salesConv:1, review:1, happyCalling:1, teleConv:4, teleConvReview:6, leadConv:6, followupMissed:-1, timingPenalty:-1, dressCode:-1 };
+const LEAGUE_PTS = { salesConv:1, review:1, happyCalling:1, teleConv:4, teleConvReview:6, leadConv:6, followupMissed:-1, timingPenalty:-1, dressCode:-1, targetWeek:5 };
+// Weekly sales-target points are settled automatically from this week onward.
+const TARGET_WEEKS_FROM = '2026-11-01';
+// One player's weekly target result for league week `w` of a month with `dim`
+// days, from the monthly-target data `d` (OPS targets + SALE INVOICE).
+//   • weekly target = monthly target × days in the week ÷ days in the month
+//   • achieved      = taxable value invoiced in that week (by invoice date)
+//   • met → +P points, missed → −P points; no monthly target → no points (null)
+// If the invoice tab has no date column, it falls back to month-to-date: invoiced
+// so far vs the target pro-rated to the week's last day.
+function weeklyTargetResult(d, pl, w, dim, P){
+  const tr = targetRowFor(d&&d.people, pl);
+  if (!(tr && tr.target>0)) return null;
+  P = Math.abs(Number(P)||0);
+  if (d.invoiceDated) {
+    const target = Math.round(tr.target*w.days/dim);
+    const achieved = Number((tr.weekly||{})[w.idx])||0;
+    return { target, achieved, pts: achieved>=target ? P : -P };
+  }
+  const endDay = Number(String(w.endISO).slice(8,10));
+  const target = Math.round(tr.target*endDay/dim);
+  const achieved = Number(tr.invoiced)||0;
+  return { target, achieved, pts: achieved>=target ? P : -P };
+}
 // Effective point weights = the defaults with the admin's saved overrides applied.
 function leaguePts(league){
   const o=(league&&league.points)||{}; const out={...LEAGUE_PTS};
@@ -4729,6 +4765,7 @@ const LEAGUE_PTS_EDITABLE = [
   { key:'followupMissed', label:'Missed follow-up',          hint:'manual · penalty' },
   { key:'timingPenalty',  label:'Timing',                    hint:'manual · penalty' },
   { key:'dressCode',      label:'Dress code',                hint:'manual · penalty' },
+  { key:'targetWeek',     label:'Weekly sales target (±)',   hint:'auto · + if the weekly target is met, − if missed' },
 ];
 // "+6 points" / "−1 point" — a signed, pluralised points label for the rulebook.
 function _ptsTxt(n){ n=Number(n)||0; return (n>0?'+':'')+n+' point'+(Math.abs(n)===1?'':'s'); }
@@ -4880,6 +4917,11 @@ function computeWeek(orders, league, teams, win, leadMap){
   const monthlyTarget = Number(league&&league.monthlyTarget)||0;
   const weeklyTarget  = Number(league&&league.weeklyTarget)||0;   // whole-showroom weekly target (admin-set)
   const scores = (league&&league.scores)||[];
+  // Settled weekly sales-target points (stored once per finished week) whose week
+  // starts inside this window.
+  const tWeeks = (league&&league.targetWeeks)||{};
+  const targetWeekPts = name => Object.keys(tWeeks).reduce((acc,k)=>
+    (k>=win.startISO && k<=win.endISO) ? acc+(Number((((tWeeks[k]||{}).players||{})[name]||{}).pts)||0) : acc, 0);
   // Each team's target for this window. An admin-set weekly target (which
   // fluctuates with the previous week's performance) wins; otherwise fall back
   // to the monthly target ÷ 2, pro-rated to the number of days in the window.
@@ -4899,8 +4941,9 @@ function computeWeek(orders, league, teams, win, leadMap){
         + man.followupMissed*PTS.followupMissed
         + man.timingPenalty*PTS.timingPenalty
         + man.dressCode*PTS.dressCode
-        + man.targetAdj;                            // admin's target bonus / penalty (signed, 1 pt each)
-      return { ...pl, auto, man, pts };
+        + man.targetAdj                             // admin's target bonus / penalty (signed, 1 pt each)
+        + targetWeekPts(pl.name);                   // automatic weekly sales-target ± points (settled)
+      return { ...pl, auto, man, pts, targetWeekPts: targetWeekPts(pl.name) };
     });
     const teamBasic  = players.reduce((s,p)=>s+p.auto.basic,0);
     const teamOrders = players.reduce((s,p)=>s+p.auto.orderCount,0);
@@ -5212,7 +5255,53 @@ function LeagueScreen({ctx}) {
 
   // ── Salesman of the Month (points-based; the calculation is admin only) ──
   const isAdmin = normRole(user&&user.role)==='admin';
-  useEffect(()=>{ if(isAdmin&&loadMonthlyTargets) loadMonthlyTargets(mo.monthKey,{silent:true}); },[mo.monthKey,isAdmin]);
+  useEffect(()=>{ if(loadMonthlyTargets) loadMonthlyTargets(mo.monthKey,{silent:true}).then(()=>setFreshTargets(f=>({...f,[mo.monthKey]:1}))); },[mo.monthKey]);
+  // ── Weekly sales-target points — settled automatically, once, after a week ends ──
+  // When a manager/admin opens the league, every finished week (from Nov 2026)
+  // that has no stored result is worked out from FRESH target/invoice data and
+  // saved. The server keeps the first result and never changes it afterwards.
+  const [freshTargets,setFreshTargets] = useState({});        // months re-fetched in this session
+  const settleTried = React.useRef({});
+  useEffect(()=>{
+    if(!canEdit || !league || !ctx.doSettleTargetWeeks) return;
+    const tw=(league.targetWeeks)||{}, todayISO=_todayISO();
+    const pending={};
+    for(let off=0; off>-36; off--){
+      const m=leagueMonth(off);
+      if(m.endISO<TARGET_WEEKS_FROM) break;
+      m.weeks.forEach(w=>{ if(w.startISO>=TARGET_WEEKS_FROM && w.endISO<todayISO && !tw[w.startISO]) (pending[m.monthKey]=pending[m.monthKey]||{m,weeks:[]}).weeks.push(w); });
+    }
+    const out={};
+    Object.keys(pending).forEach(mk=>{
+      if(!freshTargets[mk]){
+        if(!settleTried.current['load'+mk]){ settleTried.current['load'+mk]=1; loadMonthlyTargets(mk,{silent:true}).then(r=>{ if(r) setFreshTargets(f=>({...f,[mk]:1})); }); }
+        return;
+      }
+      const d=((monthTargets||{})[mk]||{}).data;
+      if(!d || d.targetError || d.invoiceError) return;             // never settle on missing sheet data
+      const teamsM=leagueTeamsFor(league, mk);
+      pending[mk].weeks.forEach(w=>{
+        if(settleTried.current[w.startISO]) return;
+        const players={};
+        teamsM.forEach(t=>t.players.forEach(pl=>{ const r=weeklyTargetResult(d, pl, w, pending[mk].m.dim, PTS.targetWeek); if(r) players[pl.name]=r; }));
+        out[w.startISO]={ src: d.invoiceDated?'invoice-week':'invoice-mtd', players };
+      });
+    });
+    const keys=Object.keys(out); if(!keys.length) return;
+    keys.forEach(k=>settleTried.current[k]=1);
+    ctx.doSettleTargetWeeks(out);
+  },[canEdit, league&&league.targetWeeks, monthTargets, freshTargets]);
+  // The selected week's target result: the stored one once settled, otherwise live.
+  const selSettled = ((league&&league.targetWeeks)||{})[selWeek.startISO] || null;
+  const selTargetRows = (()=>{
+    if(selWeek.startISO<TARGET_WEEKS_FROM) return null;
+    const d=(((monthTargets||{})[mo.monthKey]||{}).data);
+    return teams.reduce((acc,t)=>acc.concat(t.players.map(pl=>{
+      const st = selSettled ? ((selSettled.players||{})[pl.name]||null) : null;
+      const live = d ? weeklyTargetResult(d, pl, selWeek, mo.dim, PTS.targetWeek) : null;
+      return { name:pl.name, team:t, settled:st, live };
+    })),[]);
+  })();
   const tgtPeople = ((((monthTargets||{})[mo.monthKey]||{}).data)||{}).people || [];
   const somW    = somWeightsOf(league);
   const somRows = isAdmin ? computeSOM(mstd.monthStd.teams.reduce((acc,t)=>acc.concat(t.players.map(p=>({...p,team:t}))),[]), tgtPeople, somW) : [];
@@ -5480,6 +5569,32 @@ function LeagueScreen({ctx}) {
           <LeagueTeamCard team={b} isLeader={wstd.leader===b} decided={decided} pts={PTS}/>
         </div>
 
+        {/* Weekly sales target — auto ± points, settled once the week ends */}
+        {selTargetRows&&(
+          <div style={{padding:'4px 16px 8px'}}>
+            <div style={{fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:1.2,margin:'6px 2px'}}>WEEKLY SALES TARGET · WEEK {selWeek.idx}</div>
+            <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:10,overflow:'hidden'}}>
+              <div style={{fontSize:10,color:T.ink4,padding:'8px 12px',borderBottom:`1px solid ${T.line}`,lineHeight:1.5}}>
+                {selSettled?('✅ Settled '+String(selSettled.at||'').slice(0,10)+' — final.'):(decided?'⏳ Week over — points are applied when a manager/admin opens the league.':'Live — points are applied once, after '+selWeek.range.split(' – ')[1]+'.')} Met → <b style={{color:T.ok}}>+{Math.abs(PTS.targetWeek)}</b> · missed → <b style={{color:T.bad}}>−{Math.abs(PTS.targetWeek)}</b>
+              </div>
+              {selTargetRows.map(r=>{
+                const v=r.settled||r.live;
+                const pct=v&&v.target>0?Math.round(v.achieved/v.target*100):null;
+                return (
+                  <div key={r.name} style={{display:'flex',alignItems:'center',gap:8,padding:'7px 12px',borderBottom:`1px solid ${T.line}`}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:12,fontWeight:800,color:r.team.accent}}>{r.name}</div>
+                      <div style={{fontSize:9.5,color:T.ink4,fontFamily:T.mono}}>{v?(_fmtAmt(v.achieved)+' of '+_fmtAmt(v.target)+(pct!=null?' · '+pct+'%':'')):'no monthly target · no points'}</div>
+                    </div>
+                    {r.settled ? <span style={{fontSize:12,fontWeight:900,fontFamily:T.mono,color:r.settled.pts>=0?T.ok:T.bad}}>{r.settled.pts>0?'+':''}{r.settled.pts}</span>
+                      : (v ? <span style={{fontSize:10,fontWeight:700,color:v.achieved>=v.target?T.ok:T.ink4}}>{v.achieved>=v.target?'on track':'below'}</span> : null)}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Awards — Orange & Purple caps are decided over the whole monthly run */}
         <div style={{padding:'4px 16px 8px'}}>
           <div style={{fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:1.2,margin:'6px 2px'}}>MONTHLY HONOURS · {mo.label.toUpperCase()}</div>
@@ -5593,8 +5708,9 @@ function LeagueScreen({ctx}) {
                 ['Negative points',_ptsTxt(PTS.followupMissed)+' missed follow-ups, '+_ptsTxt(PTS.timingPenalty)+' timings, '+_ptsTxt(PTS.dressCode)+' dress code / presentation'],
                 ['Happy calling',_ptsTxt(PTS.happyCalling)+' per order with a Happy Code (auto)'],
                 ['Lead converted',_ptsTxt(PTS.leadConv)+' when a lead you added books an order (auto, matched by phone)'],
-                ['Sales target','the admin can add or deduct points each week against your weekly share of the monthly target'],
-                ['Salesman of the Month','decided on points: orders, sales value, reviews, fewest negative marks and monthly target achieved (invoiced)'],
+                ['Weekly sales target (auto)','your monthly target is split by days into each league week (e.g. 7 days of a 30-day month = 7/30 of it). When the week ends: invoiced in that week ≥ your weekly share → '+_ptsTxt(Math.abs(PTS.targetWeek))+', below it → '+_ptsTxt(-Math.abs(PTS.targetWeek))+'. Settled once, after the week ends, from November 2026. No monthly target set → no points'],
+                ['Target ± points (manual)','the admin can also add or deduct extra points'],
+                ['Salesman of the Month','decided on points — see "How the Salesman of the Month is decided" below'],
                 ['Orange & Purple cap','decided over the whole month — top sales value & most orders'],
               ].map((r,i,arr)=>(
                 <div key={i} style={{display:'flex',gap:8,padding:'6px 0',borderBottom:i<arr.length-1?`1px solid ${T.line}`:'none'}}>
@@ -5603,6 +5719,28 @@ function LeagueScreen({ctx}) {
                 </div>
               ))}
               <div style={{marginTop:8,fontSize:11,color:T.ink4,fontStyle:'italic'}}>Each weekly battle is won by the team with the most points that week. The team that wins the maximum weeks is crowned champion of the month.</div>
+              {/* Salesman of the Month — the rules */}
+              {(()=>{ const W=somWeightsOf(league); const tot=SOM_CRITERIA.reduce((a2,c)=>a2+(W[c.key]||0),0); return (
+              <div style={{marginTop:12,background:'#fff8e1',border:'1px solid #f0d58a',borderRadius:8,padding:'10px 12px'}}>
+                <div style={{fontSize:12,fontWeight:900,color:'#7a5a00',marginBottom:6}}>🏅 How the Salesman of the Month is decided</div>
+                <div style={{fontSize:11.5,color:T.ink2,lineHeight:1.6}}>
+                  <div><b>1. Who competes:</b> every player on that month's teams. Everything is measured over the whole month (1st → last day).</div>
+                  <div style={{marginTop:4}}><b>2. Five criteria</b> (total {tot} points):</div>
+                  <div style={{paddingLeft:10}}>
+                    <div>• <b>Orders</b> — up to {W.orders} pts · orders booked (B2B excluded)</div>
+                    <div>• <b>Sales value</b> — up to {W.sales} pts · net basic value booked (B2B &amp; 4S channel excluded)</div>
+                    <div>• <b>Reviews</b> — up to {W.reviews} pts · reviews recorded in the league</div>
+                    <div>• <b>Negative markings</b> — up to {W.negatives} pts · missed follow-ups + timing + dress-code marks; <i>fewer is better</i></div>
+                    <div>• <b>Target achieved</b> — up to {W.target} pts · taxable value invoiced (OPS "SALE INVOICE - &lt;Month&gt;") ÷ your monthly target (OPS "Incentive_Quaterly_Targets"); counted up to 150%</div>
+                  </div>
+                  <div style={{marginTop:4}}><b>3. Scored against the best:</b> on each criterion the best player gets the full points and everyone else gets a share in proportion — <i>points = max × (your figure ÷ best figure)</i>. Example: best has 10 orders, you have 5 → you get half the Orders points.</div>
+                  <div style={{marginTop:4}}><b>4. Negative markings:</b> the player with the fewest marks gets the full points, the one with the most gets 0, others in between. If everyone has the same number, everyone gets the full points.</div>
+                  <div style={{marginTop:4}}><b>5. No target set:</b> 0 points for Target achieved.</div>
+                  <div style={{marginTop:4}}><b>6. Winner:</b> highest total. A tie goes to the higher target %, then the higher sales value.</div>
+                  <div style={{marginTop:4}}><b>7. Announcement:</b> the admin reviews the points and publishes the winner; until then it shows TBD. League points (team battles) don't count here — only these five criteria.</div>
+                </div>
+              </div>
+              ); })()}
             </div>
           )}
         </div>
