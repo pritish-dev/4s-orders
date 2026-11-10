@@ -4789,6 +4789,12 @@ function leagueTeamsFor(league, monthKey){
       return { ...base, players: names.map(nm=>({ name:nm.toUpperCase(), match:nm.toLowerCase(), captain: nm.toUpperCase()===capt })) };
     });
   }
+  // No custom roster for this month — use the defaults, minus any player an
+  // admin removed from the league in this month or earlier (history stays intact).
+  const removed = (league && league.removedPlayers) || {};
+  if (Object.keys(removed).length) {
+    return LEAGUE_TEAMS.map(base=>({ ...base, players: base.players.filter(p=>{ const m=removed[p.name]; return !(m && String(m)<=String(monthKey||'')); }) }));
+  }
   return LEAGUE_TEAMS;
 }
 // Live orders → per-player order count and net-basic value. B2B orders are
@@ -5069,6 +5075,8 @@ function LeagueScreen({ctx}) {
   const isLeagueAdmin = normRole(user&&user.role)==='admin';         // only an admin can add new players
   const [extraPlayers,setExtraPlayers] = useState([]);                // players added in this editing session
   const [newPlayer,setNewPlayer] = useState('');
+  const [removedNow,setRemovedNow] = useState([]);                    // players removed in this editing session (admin)
+  const removedMap = (league&&league.removedPlayers)||{};             // NAME → 'yyyy-mm' removed from the league
   // Pool of assignable players = union of this month's roster, every player
   // seen in any saved month's roster (so an added player stays available), the
   // defaults, and any player the admin just added.
@@ -5080,14 +5088,26 @@ function LeagueScreen({ctx}) {
     const rs=(league&&league.rosters)||{};
     Object.keys(rs).sort().forEach(mk=>{ const r=rs[mk]||{}; (r.strikers||[]).concat(r.titans||[]).forEach(add); });
     extraPlayers.forEach(add);
-    return out;
+    // Drop players an admin removed from the league (saved, or in this session).
+    // A removed player still in this month's saved roster stays visible until saved.
+    const keep = {}; teams.forEach(t=>t.players.forEach(p=>keep[p.name]=1));
+    return out.filter(n=>removedNow.indexOf(n)<0 && (!removedMap[n] || keep[n] || extraPlayers.indexOf(n)>=0));
   })();
+  function removeRosterPlayer(nm){
+    if(!isLeagueAdmin) return;
+    if(!window.confirm('Remove '+nm+' from the 4S Premier League?\n\nThey will be taken off the teams from '+mo.label+' onward. Past months and saved scores are kept.')) return;
+    setRemovedNow(x=>x.concat([nm]));
+    setExtraPlayers(x=>x.filter(n=>n!==nm));
+    setAssign(a2=>{ const n2={...a2}; delete n2[nm]; return n2; });
+    setCaps(c=>({ strikers:c.strikers===nm?'':c.strikers, titans:c.titans===nm?'':c.titans }));
+  }
   function addRosterPlayer(){
     if(!isLeagueAdmin) return;
     const nm=String(newPlayer||'').trim().toUpperCase();
     if(!nm){ ctx.showToast&&ctx.showToast('Enter the player name','warn'); return; }
     if(rosterPool.indexOf(nm)>=0){ ctx.showToast&&ctx.showToast(nm+' is already in the list','warn'); return; }
     setExtraPlayers(x=>x.concat([nm]));
+    setRemovedNow(x=>x.filter(n=>n!==nm));                            // re-adding undoes a removal
     setAssign(a2=>({...a2,[nm]:'strikers'}));
     setNewPlayer('');
   }
@@ -5095,7 +5115,7 @@ function LeagueScreen({ctx}) {
     const as={}, cp={strikers:'',titans:''};
     teams.forEach(t=>t.players.forEach(p=>{ as[p.name]=t.id; if(p.captain) cp[t.id]=p.name; }));
     rosterPool.forEach(n=>{ if(!as[n]) as[n]='strikers'; });
-    setAssign(as); setCaps(cp); setExtraPlayers([]); setNewPlayer(''); setRosterEdit(true);
+    setAssign(as); setCaps(cp); setExtraPlayers([]); setRemovedNow([]); setNewPlayer(''); setRosterEdit(true);
   }
   async function saveRoster(){
     const strikers=rosterPool.filter(n=>assign[n]==='strikers');
@@ -5105,7 +5125,16 @@ function LeagueScreen({ctx}) {
     const roster={ strikers, titans, captains:{
       strikers: strikers.indexOf(caps.strikers)>=0?caps.strikers:strikers[0],
       titans:   titans.indexOf(caps.titans)>=0?caps.titans:titans[0] } };
-    const ok=await doSaveLeagueConfig({ rosterMonth:mo.monthKey, roster });
+    const cfg={ rosterMonth:mo.monthKey, roster };
+    if(isLeagueAdmin){
+      // Full removed-players map: keep earlier removals, add this session's,
+      // and clear anyone who is on this month's teams again (re-added).
+      const rm={...removedMap};
+      removedNow.forEach(n=>{ rm[n]=mo.monthKey; });
+      strikers.concat(titans).forEach(n=>{ delete rm[n]; });
+      cfg.removedPlayers=rm;
+    }
+    const ok=await doSaveLeagueConfig(cfg);
     setSavingRoster(false);
     if(ok!==false) setRosterEdit(false);
   }
@@ -5304,7 +5333,8 @@ function LeagueScreen({ctx}) {
                   )}
                   {rosterEdit&&(
                     <div style={{marginTop:10}}>
-                      <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>Assign each player to a team, then pick a captain. Applies to <b>{mo.label}</b> only.</div>
+                      <div style={{fontSize:10,color:T.ink4,marginBottom:8}}>Assign each player to a team, then pick a captain. Applies to <b>{mo.label}</b> only.{isLeagueAdmin?' Tap ✕ to remove a player from the league (admin only).':''}</div>
+                      {removedNow.length>0&&<div style={{fontSize:10,color:'#c0392b',marginBottom:6}}>Removing: <b>{removedNow.join(', ')}</b> — tap Save to apply.</div>}
                       {rosterPool.map(nm=>(
                         <div key={nm} style={{display:'flex',alignItems:'center',gap:8,padding:'6px 0',borderBottom:`1px solid ${T.line}`}}>
                           <div style={{flex:1,fontSize:12,fontWeight:700,color:T.ink}}>{nm}</div>
@@ -5314,6 +5344,7 @@ function LeagueScreen({ctx}) {
                           <label title="Captain" style={{display:'flex',alignItems:'center',gap:3,fontSize:10,fontWeight:800,color:caps[assign[nm]]===nm?'#b8860b':T.ink4,cursor:'pointer'}}>
                             <input type="radio" name={'cap-'+assign[nm]} checked={caps[assign[nm]]===nm} onChange={()=>setCaps(c=>({...c,[assign[nm]]:nm}))}/>C
                           </label>
+                          {isLeagueAdmin&&<button onClick={()=>removeRosterPlayer(nm)} title={'Remove '+nm+' from the league'} style={{height:28,width:28,borderRadius:6,border:`1px solid ${T.line}`,background:'#fff',color:'#c0392b',fontSize:13,fontWeight:900,cursor:'pointer',flexShrink:0}}>✕</button>}
                         </div>
                       ))}
                       {isLeagueAdmin&&(

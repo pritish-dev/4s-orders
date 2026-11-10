@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v75';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v76';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -4940,7 +4940,10 @@ function handleLeagueGet(p) {
     // overridden are stored; the client merges these over its built-in defaults.
     var points = {};
     try { points = JSON.parse(props.getProperty('LEAGUE_POINTS') || '{}') || {}; } catch (e) { points = {}; }
-    return { ok: true, scores: rows, monthlyTarget: target, weeklyTarget: wTarget, salesmanOfMonth: som, rosters: rosters, points: points, scriptVersion: SCRIPT_VERSION };
+    // Players an admin removed from the league: { NAME: 'yyyy-mm' (month removed) }.
+    var removedPlayers = {};
+    try { removedPlayers = JSON.parse(props.getProperty('LEAGUE_REMOVED_PLAYERS') || '{}') || {}; } catch (e) { removedPlayers = {}; }
+    return { ok: true, scores: rows, monthlyTarget: target, weeklyTarget: wTarget, salesmanOfMonth: som, rosters: rosters, points: points, removedPlayers: removedPlayers, scriptVersion: SCRIPT_VERSION };
   } catch (e) { return { ok: false, error: e.message }; }
 }
 
@@ -5001,6 +5004,20 @@ function handleLeagueSaveConfig(body) {
     }
     if (body && body.salesmanOfMonth !== undefined) {
       props.setProperty('LEAGUE_SALESMAN_OF_MONTH', String(body.salesmanOfMonth || ''));
+    }
+    // Removing a player from the league is ADMIN ONLY. The client sends the full
+    // { NAME: 'yyyy-mm' } map; it replaces the stored one.
+    if (body && body.removedPlayers !== undefined && body.removedPlayers !== null) {
+      if (role !== 'admin') return { ok: false, error: 'Only an admin can remove a player from the league.' };
+      if (typeof body.removedPlayers !== 'object') return { ok: false, error: 'Invalid removedPlayers.' };
+      var rmOut = {};
+      Object.keys(body.removedPlayers).forEach(function (n) {
+        var nm = String(n || '').trim().toUpperCase();
+        var mk = String(body.removedPlayers[n] || '').slice(0, 7);
+        if (nm && /^\d{4}-\d{2}$/.test(mk)) rmOut[nm] = mk;
+      });
+      props.setProperty('LEAGUE_REMOVED_PLAYERS', JSON.stringify(rmOut));
+      _appendLog(by, '', 'LEAGUE_REMOVED_PLAYERS', Object.keys(rmOut).join('/') || '(none)');
     }
     // Monthly team roster — merge one month's roster into the stored map. The
     // teams can be re-picked once a month; this replaces that month's entry.
