@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v80';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v81';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -309,6 +309,7 @@ function doPost(e) {
       case 'saveLeagueScore': result = handleLeagueSaveScore(body);   break;
       case 'saveLeagueConfig':result = handleLeagueSaveConfig(body);  break;
       case 'settleLeagueTargetWeeks': result = handleLeagueSettleTargetWeeks(body); break;
+      case 'settleLeagueDisciplineWeeks': result = handleLeagueSettleDisciplineWeeks(body); break;
       case 'saveOfferConfig': result = handleSaveOfferConfig(body);   break;
       case 'fetchSweetenerEmail': result = handleFetchSweetenerEmail(body); break;
       case 'addLead':         result = handleAddLead(body);           break;
@@ -5188,7 +5189,11 @@ function handleLeagueGet(p) {
     // { 'yyyy-mm-dd' (week start): { month, src, at, by, players: { NAME: { target, achieved, pts } } } }
     var targetWeeks = {};
     try { targetWeeks = JSON.parse(props.getProperty('LEAGUE_TARGET_WEEKS') || '{}') || {}; } catch (e) { targetWeeks = {}; }
-    return { ok: true, scores: rows, monthlyTarget: target, weeklyTarget: wTarget, salesmanOfMonth: som, rosters: rosters, points: points, removedPlayers: removedPlayers, somPublished: somPublished, somWeights: somWeights, targetWeeks: targetWeeks, scriptVersion: SCRIPT_VERSION };
+    // Weekly order-discipline deductions, one property per month (LEAGUE_DISC_yyyy-mm)
+    // so no single value outgrows the 9 KB property limit:
+    // { 'yyyy-mm-dd' (week start): { end, at, by, players: { NAME: { overdue, pendingWon, misOpen, pts } } } }
+    var disciplineWeeks = _leagueDisciplineAll(props);
+    return { ok: true, scores: rows, monthlyTarget: target, weeklyTarget: wTarget, salesmanOfMonth: som, rosters: rosters, points: points, removedPlayers: removedPlayers, somPublished: somPublished, somWeights: somWeights, targetWeeks: targetWeeks, disciplineWeeks: disciplineWeeks, scriptVersion: SCRIPT_VERSION };
   } catch (e) { return { ok: false, error: e.message }; }
 }
 
@@ -5295,6 +5300,73 @@ function handleLeagueSettleTargetWeeks(body) {
   }
 }
 
+// ─── Weekly order-discipline deductions ─────────────────────────────────────
+// Per order, charged to its salesperson on the last day of every league week:
+// overdue delivery, Pending WON > 24 h, and MIS-committed orders not delivered /
+// not fully paid. The app works the counts out from fresh orders + MIS when a
+// manager/admin opens the league; this stores each week ONCE (never overwritten).
+// They recur because every week is settled afresh from the orders still open.
+var LEAGUE_DISCIPLINE_FROM = '2026-11-08';
+function _leagueDisciplineAll(props) {
+  var all = {}, map = props.getProperties();
+  Object.keys(map).forEach(function (k) {
+    if (k.indexOf('LEAGUE_DISC_') !== 0) return;
+    var m = {};
+    try { m = JSON.parse(map[k] || '{}') || {}; } catch (e) { m = {}; }
+    Object.keys(m).forEach(function (ws) { all[ws] = m[ws]; });
+  });
+  return all;
+}
+function handleLeagueSettleDisciplineWeeks(body) {
+  var by = String((body && body.by) || '').trim();
+  var role = _lookupRole(by);
+  if (role !== 'admin' && role !== 'manager') return { ok: false, error: 'Only a manager or admin can settle weekly order deductions.' };
+  var weeks = body && body.weeks;
+  if (!weeks || typeof weeks !== 'object') return { ok: false, error: 'weeks is required.' };
+  var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+  var today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  var lock = LockService.getScriptLock();
+  var haveLock = false;
+  try {
+    haveLock = lock.tryLock(10000);
+    if (!haveLock) return { ok: false, error: 'Busy — try again.' };
+    var props = PropertiesService.getScriptProperties();
+    var byMonth = {}, added = [];
+    Object.keys(weeks).forEach(function (ws) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ws) || ws < LEAGUE_DISCIPLINE_FROM) return;
+      var y = Number(ws.slice(0, 4)), m = Number(ws.slice(5, 7)) - 1, d = Number(ws.slice(8, 10));
+      if ((d - 1) % 7 !== 0) return;                                   // league week start (1, 8, 15, 22, 29)
+      var dim = new Date(y, m + 1, 0).getDate();
+      var we = ws.slice(0, 8) + ('0' + Math.min(d + 6, dim)).slice(-2);
+      if (we > today) return;                                          // the week's last day hasn't come yet
+      var key = 'LEAGUE_DISC_' + ws.slice(0, 7);
+      if (!byMonth[key]) {
+        try { byMonth[key] = JSON.parse(props.getProperty(key) || '{}') || {}; } catch (e) { byMonth[key] = {}; }
+      }
+      if (byMonth[key][ws]) return;                                    // already settled — never overwrite
+      var w = weeks[ws] || {}, players = {};
+      var clampN = function (v) { return Math.max(0, Math.min(999, Math.round(Number(v) || 0))); };
+      Object.keys(w.players || {}).forEach(function (n) {
+        var pl = w.players[n] || {};
+        var nm = String(n || '').trim().toUpperCase();
+        if (!nm) return;
+        players[nm] = { overdue: clampN(pl.overdue), pendingWon: clampN(pl.pendingWon), misOpen: clampN(pl.misOpen),
+                        pts: Math.max(-999, Math.min(0, Math.round(Number(pl.pts) || 0))) };
+      });
+      byMonth[key][ws] = { end: we, players: players, by: by,
+                           at: Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss') };
+      added.push(ws);
+    });
+    Object.keys(byMonth).forEach(function (k) { props.setProperty(k, JSON.stringify(byMonth[k])); });
+    if (added.length) _appendLog(by, '', 'LEAGUE_DISCIPLINE_WEEKS', 'Settled ' + added.join(', '));
+    return { ok: true, added: added, scriptVersion: SCRIPT_VERSION };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
+  }
+}
+
 // Set league-wide config (monthly target, salesman of the month). Admin/manager only.
 function handleLeagueSaveConfig(body) {
   var by = String((body && body.by) || '').trim();
@@ -5392,7 +5464,7 @@ function handleLeagueSaveConfig(body) {
     // Admin-adjustable point weights. Merge any provided keys over the stored map
     // (validated against the known criteria; values rounded to whole points).
     if (body && body.points && typeof body.points === 'object') {
-      var POINT_KEYS = ['salesConv','review','happyCalling','leadConv','teleConv','teleConvReview','followupMissed','timingPenalty','dressCode','targetWeek'];
+      var POINT_KEYS = ['salesConv','review','happyCalling','leadConv','teleConv','teleConvReview','followupMissed','timingPenalty','dressCode','targetWeek','overdueDelivery','pendingWon','misOpen'];
       var pts = {};
       try { pts = JSON.parse(props.getProperty('LEAGUE_POINTS') || '{}') || {}; } catch (e) { pts = {}; }
       POINT_KEYS.forEach(function (k) {
