@@ -803,6 +803,7 @@ function addPriceItemToOrder(item, order, setOrder, showToast, extra) {
   } else {
     newItems = [...items, {
       code: effCode, priceCode: item.code, name: item.name, cat: item.cat, item: item.item || '',
+      ...(item.pbId != null ? { pbId: item.pbId } : {}),
       qty: 1, mrp: item.mrp || item.cpl || 0, cpl: item.cpl || item.mrp || 0,
       unitPrice: basePrice, total: basePrice, disc: '',
       ageing: false, sweetner: false,
@@ -6958,6 +6959,157 @@ function wedAdvice(o, today) {
            disc, pkgSlab, reward, standalone: !has.bed };
 }
 
+// ─── Order-form auto-fill from the ongoing schemes ──────────────────────────
+// The discount each line gets under the schemes running today (Q326 HF / HS /
+// Kreation X3 / mattress / accessory slabs, the Grand Wedding Offer HF slab, or
+// Dhanteras while live). It is only a GUIDE for the sales person: the order form
+// fills it into DISC % and keeps it in step as items are added, but the moment
+// the sales person edits a line's discount (or selling price) that line is left
+// alone. Bestfest / sweetener / ageing / manual lines are never touched.
+function schemeLineSuggestions(o) {
+  const a = schemeAdvice(o);
+  if (a.b2b || !a.inPeriod) return (o.items || []).map(() => null);
+  const S = SCHEME_Q326;
+  return (o.items || []).map(it => {
+    if (!it || it.manual || it.ageing || it.sweetner || it.offerSec || it._group) return null;
+    const kind = schemeLineKind(it);
+    if (kind === 'HF' && a.hf) return { pct: a.hf.pct, code: a.hfCode, why: (a.hf.wed ? '💍 Wedding' : a.hfCode) + ' HF slab ' + a.hf.no };
+    if (kind === 'HS' && a.hs) return { pct: a.hs.pct, code: S.code, why: S.code + ' HS slab ' + (a.hs.idx + 1) };
+    if (kind === 'HSDIST' && a.hsDist) return { pct: a.hsDist.pct, code: S.code, why: S.code + ' HS slab 1' };
+    if (kind === 'KX3' && a.kx3) return { pct: a.kx3.pct, code: S.code, why: S.code + ' Kreation X3 slab ' + (a.kx3.idx + 1) };
+    if (kind === 'MAT') {
+      const m = mattressSchemeOf([it.name, it.item].filter(Boolean).join(' '));
+      return m ? { pct: m.pct, code: S.code, why: S.code + ' mattress ' + m.slab + ' — or free gift instead' } : null;
+    }
+    if (kind === 'MATACC') {
+      const hay = schemeNorm(it.name);
+      const hit = S.accessories.find(([k]) => hay.indexOf(schemeNorm(k)) >= 0);
+      return hit ? { pct: hit[1], code: S.code, why: S.code + ' mattress accessory' } : null;
+    }
+    return null;
+  });
+}
+// Put the suggested discounts on every line that is still on auto. Returns the
+// same order object when nothing changes (so a React effect never loops).
+function applySchemeAutoDiscounts(o) {
+  const sug = schemeLineSuggestions(o);
+  let changed = false;
+  const items = (o.items || []).map((it, i) => {
+    if (!it || it.discEdited) return it;
+    const curAuto = it.discAuto != null ? String(it.discAuto) : '';
+    const blank = it.disc === '' || it.disc == null || Number(it.disc) === 0;
+    if (!blank && !(curAuto && String(it.disc) === curAuto)) return it;   // typed by hand earlier
+    const s = sug[i];
+    const want = s && s.pct > 0 ? String(s.pct) : '';
+    const why = want ? s.why : '';
+    if (want === curAuto && (it.discWhy || '') === why && (want === '' ? blank : String(it.disc) === want)) return it;
+    changed = true;
+    const base = Number(it.mrp) || Number(it.cpl) || 0;
+    const up = base * (1 - (Number(want) || 0) / 100);
+    const next = { ...it, disc: want, discAuto: want, discWhy: why, unitPrice: up, total: up * (Number(it.qty) || 0) };
+    // Tag the line with the scheme code ("Scheme applied") unless the sales
+    // person set the scheme flags by hand.
+    if (!it.schemeEdited) {
+      if (want) Object.assign(next, { other: true, schemeCode: s.code, schemeAuto: s.code });
+      else if (it.schemeAuto) Object.assign(next, { other: false, schemeCode: '', schemeAuto: '' });
+    }
+    return next;
+  });
+  return changed ? { ...o, items } : o;
+}
+// Ongoing schemes offered as one-tap "Scheme applied" chips on each order line.
+function liveSchemeChips(today) {
+  const d = today || istTodayISO(), out = [];
+  if (wedLive(d)) out.push({ code: SCHEME_WED26.code, label: '💍 ' + SCHEME_WED26.code });
+  if (ddoLive(d)) out.push({ code: SCHEME_DDO26.code, label: '🪔 ' + SCHEME_DDO26.code });
+  if (d >= SCHEME_Q326.from && d <= SCHEME_Q326.to) out.push({ code: SCHEME_Q326.code, label: SCHEME_Q326.code });
+  return out;
+}
+
+// ─── Measurement auto-fill from the catalogue (always cm) ───────────────────
+// Kreation X3 module names carry their size in mm: "KreX3MnBd1200W560D1900H…".
+function mmDimsOfName(name) {
+  const m = String(name || '').match(/(\d{3,4})\s*W\s*(\d{3,4})\s*D\s*(\d{3,4})\s*H/i);
+  return m ? { w: +m[1] / 10, d: +m[2] / 10, h: +m[3] / 10 } : null;
+}
+// W / D / H (cm) of an order line from the Interio catalogue, picking the size
+// variant that best matches the line (3 seater, 2 door …). null when unknown.
+function catalogDimsOf(it, fc, prefer) {
+  const x = finderEntryOf({ pbId: it.pbId, code: it.priceCode || it.code, altCode: it.code }, fc);
+  if (!x || !Array.isArray(x.sz) || !x.sz.length) return null;
+  const nm = String(it.name || '').toLowerCase();
+  const seat = nm.match(/(\d)\s*-?\s*(?:seater|str\b|s\b)/), door = nm.match(/(\d)\s*-?\s*d(?:oo)?rs?\b/);
+  const score = g => {
+    const n = String(g.n || '').toLowerCase(); let s = 0;
+    if (prefer && prefer.test(n)) s += 2;
+    if (seat && n.indexOf(seat[1] + ' seater') >= 0) s += 3;
+    if (door && new RegExp(door[1] + '\\s*-?\\s*door').test(n)) s += 3;
+    if (g.w || g.h) s += 0.5;
+    return s;
+  };
+  const g = x.sz.slice().sort((a, b) => score(b) - score(a))[0];
+  const top = a => Array.isArray(a) && a.length ? Number(Array.isArray(a[0]) ? a[0][a[0].length - 1] : a[a.length - 1]) || 0 : 0;
+  if (!g.r) return { w: top(g.w), d: top(g.d), h: top(g.h) };
+  const o = (g.r.o || []).map(top).filter(Boolean).sort((a, b) => b - a);
+  const h = (g.r.h || []).map(top).filter(Boolean);
+  return { w: o[0] || 0, d: o.length > 1 ? o[o.length - 1] : 0, h: h.length ? Math.max.apply(null, h) : 0 };
+}
+// Length / width (depth) / height of one modular wardrobe family in the order.
+function modularDimsOf(items, familyLabel, fc) {
+  const lines = (items || []).filter(it => isWardrobeItem(it) && (!familyLabel || modularFamilyOf(it).label === familyLabel));
+  let L = 0, D = 0, H = 0;
+  lines.forEach(it => {
+    if (!/MnBd|AdBd|main\s*body|add-?on\s*body/i.test(String(it.name || '') + ' ' + String(it.item || ''))) return;
+    const m = mmDimsOfName(it.name); if (!m) return;
+    L += m.w * (Number(it.qty) || 1); D = Math.max(D, m.d); H = Math.max(H, m.h);
+  });
+  if (L) return { length: L, width: D, height: H };
+  for (const it of lines) {
+    const c = catalogDimsOf(it, fc, /wardrobe/);
+    if (c && (c.w || c.h)) return { length: c.w, width: c.d, height: c.h };
+  }
+  return null;
+}
+const _cmStr = v => (Number(v) > 0 ? String(Math.round(Number(v))) : '');
+// Fill the required measurement fields (sofa W / H / D, each modular wardrobe's
+// L / W / H) from the catalogue, in cm. A field is only written while it is blank
+// or still holds the value auto-filled before (tracked in `auto`), so anything
+// the sales person types is never overwritten.
+function applyMeasureAutofill(o, fc, auto) {
+  if (!fc) return o;
+  const items = o.items || [];
+  const patch = {};
+  const put = (key, val, cur, setter) => {
+    const v = _cmStr(val); if (!v) return;
+    const c = String(cur == null ? '' : cur).trim();
+    if (c && c !== auto[key]) return;
+    if (c === v) { auto[key] = v; return; }
+    auto[key] = v; setter(v);
+  };
+  const sofa = items.find(isSofaItem);
+  if (sofa) {
+    const d = catalogDimsOf(sofa, fc, /seater|sofa/);
+    if (d) {
+      put('sofaWidth', d.w, o.sofaWidth, v => { patch.sofaWidth = v; });
+      put('sofaHeight', d.h, o.sofaHeight, v => { patch.sofaHeight = v; });
+      put('sofaDepth', d.d, o.sofaDepth, v => { patch.sofaDepth = v; });
+    }
+  }
+  if (Array.isArray(o.wardrobes) && o.wardrobes.length && items.some(isWardrobeItem)) {
+    const fams = [...new Set(items.filter(isWardrobeItem).map(it => modularFamilyOf(it).label))];
+    let arr = null;
+    o.wardrobes.forEach((w, wi) => {
+      const fam = fams.find(f => String(w.name || '').toLowerCase().indexOf(f.toLowerCase()) >= 0) || (!String(w.name || '').trim() ? fams[wi] : null);
+      if (!fam) return;
+      const d = modularDimsOf(items, fam, fc); if (!d) return;
+      [['length', d.length], ['width', d.width], ['height', d.height]].forEach(([f, val]) =>
+        put('w' + wi + f, val, w[f], v => { arr = arr || o.wardrobes.map(x => ({ ...x })); arr[wi][f] = v; }));
+    });
+    if (arr) patch.wardrobes = arr;
+  }
+  return Object.keys(patch).length ? { ...o, ...patch } : o;
+}
+
 // Bank tie-up instant discounts (Pinelabs POS, automated). Min txn ₹15,000.
 const BANK_Q3 = {
   emiTill: '2026-10-31', swipeTill: '2026-10-18',
@@ -7647,6 +7799,7 @@ function OfferZoneScreen({ctx}) {
     } else {
       newItems = [...(order.items||[]),{
         code:effCode, priceCode:item.code, name:item.name, cat:item.cat, item:item.item||'',
+        ...(item.pbId!=null?{pbId:item.pbId}:{}),
         qty:1, mrp:item.mrp||item.cpl||0, cpl:item.cpl||item.mrp||0,
         unitPrice, total:unitPrice, disc,
         ageing:false, sweetner:false,
@@ -9294,6 +9447,27 @@ function OrderFormScreen({ctx, viewOnly}) {
     if(hasWardrobe && Array.isArray(o.rooms) && o.rooms.length===0) setRoomCount(1);
   },[hasWardrobe,wardrobeItemCount]);
 
+  // Scheme discounts + catalogue measurements are auto-filled on a new / draft
+  // order (never on a submitted one, so reopening an order changes nothing).
+  const autoFillOn = !viewOnly && !isOrderSubmitted(o);
+  const schemeSug = React.useMemo(() => schemeLineSuggestions(o), [o.items, o.orderType]);
+  React.useEffect(() => {
+    if (!autoFillOn) return;
+    setOrder(prev => applySchemeAutoDiscounts(prev));
+  }, [autoFillOn, o.items, o.orderType]);
+  const {cat:finderCat} = useFinderCatalog();
+  const autoMeas = React.useRef({});
+  const [measAutoNote, setMeasAutoNote] = React.useState(false);
+  React.useEffect(() => {
+    if (!autoFillOn || !finderCat || !(hasSofa || hasWardrobe)) return;
+    const next = applyMeasureAutofill(o, finderCat, autoMeas.current);
+    if (next === o) return;
+    const patch = {};
+    ['sofaWidth','sofaHeight','sofaDepth','wardrobes'].forEach(k => { if (next[k] !== o[k]) patch[k] = next[k]; });
+    setOrder(prev => ({ ...prev, ...patch }));
+    setMeasUnit('cm'); setMeasAutoNote(true);
+  }, [autoFillOn, finderCat, o.items, (o.wardrobes || []).length, hasSofa, hasWardrobe]);
+
   function removeItem(idx) { setOrder(prev=>({...prev,items:prev.items.filter((_,i)=>i!==idx)})); }
   // Split one line across warehouses: parts = [{wh, sub, qty}] (qty > 0, summing
   // to the line's qty). The line is replaced by one line per warehouse, each with
@@ -9309,7 +9483,7 @@ function OrderFormScreen({ctx, viewOnly}) {
       return {...prev, items:[...items.slice(0,idx), ...lines, ...items.slice(idx+1)]};
     });
   }
-  function toggleScheme(idx,key) { setOrder(prev=>({...prev,items:prev.items.map((it,i)=>i===idx?{...it,[key]:!it[key]}:it)})); }
+  function toggleScheme(idx,key) { setOrder(prev=>({...prev,items:prev.items.map((it,i)=>i===idx?{...it,[key]:!it[key],schemeEdited:true}:it)})); }
   function togglePattern(p) { setOrder(prev=>{ const cur=prev.purchasePattern||[]; return {...prev,purchasePattern: cur.includes(p)?cur.filter(x=>x!==p):[...cur,p]}; }); }
   function updateItemQty(idx,delta) {
     // Home Lockers: never let the order hold more than is in stock.
@@ -9702,7 +9876,7 @@ function OrderFormScreen({ctx, viewOnly}) {
                         // Discount drives the selling price (CPL held fixed).
                         const pct=parseFloat(t)||0;
                         const newUp=mrpVal*(1-pct/100);
-                        setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,disc:t,unitPrice:newUp,total:newUp*x.qty}:x)}));
+                        setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,disc:t,discEdited:true,unitPrice:newUp,total:newUp*x.qty}:x)}));
                       }}
                       style={{width:52,border:`1px solid ${T.line}`,borderRadius:4,padding:'2px 6px',fontFamily:T.mono,fontSize:12,textAlign:'center'}}
                     />
@@ -9719,11 +9893,19 @@ function OrderFormScreen({ctx, viewOnly}) {
                         // 4 decimals: a 2-decimal % re-derived on reopen could shift a
                         // ₹50,000 price by ₹2–3; 4 decimals keeps it within paise.
                         const discStr=discP>0.0001 ? String(Math.round(discP*10000)/10000) : '';
-                        setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,unitPrice:up,disc:discStr,total:up*x.qty}:x)}));
+                        setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,unitPrice:up,disc:discStr,discEdited:true,total:up*x.qty}:x)}));
                       }}
                       style={{width:78,border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 6px',fontFamily:T.mono,fontSize:13,fontWeight:700,textAlign:'right',color:T.green}}
                     />
                   </div>
+                  {!viewOnly && (()=>{
+                    const s = schemeSug[i];
+                    if (it.discAuto && String(it.disc) === String(it.discAuto))
+                      return <div style={{fontSize:10.5,color:T.purple,marginTop:4,fontWeight:700}}>⚡ Auto {it.disc}% · {it.discWhy} · editable — a guide only</div>;
+                    if (s && s.pct > 0 && String(it.disc||'') !== String(s.pct))
+                      return <div style={{fontSize:10.5,color:T.ink3,marginTop:4}}>Scheme suggests <b>{s.pct}%</b> ({s.why}) · <span role="button" onClick={()=>{const base=Number(it.mrp)||Number(it.cpl)||0;const up=base*(1-s.pct/100);setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,disc:String(s.pct),discAuto:String(s.pct),discWhy:s.why,discEdited:false,unitPrice:up,total:up*x.qty}:x)}));}} style={{color:T.purple,fontWeight:800,cursor:'pointer',textDecoration:'underline'}}>apply</span></div>;
+                    return null;
+                  })()}
                   {/* Scheme flags — saved to CRM "Disc Allowed"; NOT printed on the PDF */}
                   <div style={{display:'flex',gap:8,marginTop:8,alignItems:'center',flexWrap:'wrap'}}>
                     <span style={{fontSize:10,color:T.ink4,fontWeight:700}}>SCHEME</span>
@@ -9733,10 +9915,15 @@ function OrderFormScreen({ctx, viewOnly}) {
                         <span style={{fontSize:11,fontWeight:600,color:it[k]?T.green:T.ink3}}>{lbl}</span>
                       </label>
                     ))}
+                    {liveSchemeChips().map(ch=>{const on=!!it.other&&it.schemeCode===ch.code;return(
+                      <span key={ch.code} role="button" title={'Scheme applied: '+ch.code}
+                        onClick={()=>setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?(on?{...x,other:false,schemeCode:'',schemeEdited:true}:{...x,other:true,schemeCode:ch.code,schemeEdited:true}):x)}))}
+                        style={{display:'inline-flex',alignItems:'center',padding:'3px 9px',borderRadius:99,cursor:'pointer',fontSize:11,fontWeight:700,border:`1px solid ${on?T.purple:T.purpleLine}`,background:on?T.purple:T.purpleSoft,color:on?'#fff':T.purple}}>{on?'✓ ':''}{ch.label}</span>
+                    );})}
                     {it.other&&(
                       <input
                         value={it.schemeCode||''}
-                        onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,schemeCode:v}:x)}));}}
+                        onChange={e=>{const v=e.target.value;setOrder(prev=>({...prev,items:prev.items.map((x,j)=>j===i?{...x,schemeCode:v,schemeEdited:true}:x)}));}}
                         placeholder="Scheme code"
                         style={{width:120,border:`1.5px solid ${T.green}`,borderRadius:4,padding:'3px 8px',fontFamily:T.mono,fontSize:12,color:T.ink}}
                       />
@@ -9894,6 +10081,7 @@ function OrderFormScreen({ctx, viewOnly}) {
         {hasSofa && (
           <>
             <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Sofa in order — width, height & depth are mandatory (printed on the PDF)</div>
+            {measAutoNote && <div style={{padding:'6px 14px',background:T.purpleSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.purple,fontWeight:700}}>⚡ Sizes auto-filled from the catalogue in cm — check on site and edit if different</div>}
             <MeasureField label="Sofa Width" value={o.sofaWidth} onChange={v=>setF('sofaWidth',v)} unit={measUnit} required/>
             <MeasureField label="Sofa Height" value={o.sofaHeight} onChange={v=>setF('sofaHeight',v)} unit={measUnit} required/>
             <MeasureField label="Sofa Depth" value={o.sofaDepth} onChange={v=>setF('sofaDepth',v)} unit={measUnit} required/>
@@ -9905,6 +10093,7 @@ function OrderFormScreen({ctx, viewOnly}) {
         {hasWardrobe && (
           <>
             <div style={{padding:'8px 14px',background:T.warnSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.warn,fontWeight:700}}>Modular wardrobe in order — each furniture's length/width/height is mandatory (printed on the PDF)</div>
+            {measAutoNote && <div style={{padding:'6px 14px',background:T.purpleSoft,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.purple,fontWeight:700}}>⚡ Sizes auto-filled from the catalogue in cm — check on site and edit if different</div>}
             <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
               <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>How many modular furnitures? <span style={{color:T.bad,marginLeft:3}}>*</span></div>
               <select value={wardrobes.length||1} onChange={e=>setWardrobeCount(Number(e.target.value))} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
