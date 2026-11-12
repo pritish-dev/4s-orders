@@ -2800,7 +2800,13 @@ const normalizeSalesNames = list => (Array.isArray(list) ? list : []).map(o =>
 // Delivery-status options. The order is only "Completed" once installation is done.
 // "Partial Delivery" means some items are delivered and the rest are still Pending
 // for delivery (the delivered items are tracked per-order).
-const DELIVERY_STATUSES = ['Pending', 'Scheduled for Delivery', 'Rescheduled for Delivery', 'Partial Delivery', 'Delivered', 'Installation Done'];
+// "Cancelled" marks an order the customer cancelled: it drops out of every
+// delivery / pending figure and is not scored in the 4S Premier League.
+const DELIVERY_STATUSES = ['Pending', 'Scheduled for Delivery', 'Rescheduled for Delivery', 'Partial Delivery', 'Delivered', 'Installation Done', 'Cancelled'];
+// Whether an order has been cancelled (delivery status "Cancelled").
+function isCancelled(o) {
+  return !!o && /^cancel/i.test(String(o.deliveryStatus || '').trim());
+}
 // Finance-scheme (EMI) payment modes. When one is chosen at booking, Money Receipt 1
 // becomes the financier (Bajaj Finance / Pine Labs) — its amount + date are entered by
 // us — and a "Reimbursement from Godrej" amount is added; together the two make up the
@@ -3310,7 +3316,7 @@ function customerOfferMessage(occasion, customerName, senderName, sameDay){
 // An order counts as "done" (no more delivery chasing) once fully delivered or installed.
 function isDeliveryDone(o) {
   const s = (o.deliveryStatus || '').toLowerCase();
-  return o.status === 'completed' || /installation done|^delivered/.test(s);
+  return isCancelled(o) || o.status === 'completed' || /installation done|^delivered/.test(s);
 }
 
 // ─── DELIVERY WATCH (approaching / overdue deliveries) ──────
@@ -3327,7 +3333,7 @@ function orderDeliveryISO(o, mis) {
 // "Scheduled for Delivery".
 function deliveryActionSettled(o) {
   const s = (o.deliveryStatus || '').toLowerCase();
-  return o.status === 'completed' || /^scheduled for delivery/.test(s) || /^delivered/.test(s) || /installation done/.test(s);
+  return isCancelled(o) || o.status === 'completed' || /^scheduled for delivery/.test(s) || /^delivered/.test(s) || /installation done/.test(s);
 }
 // Whether an order belongs on the Delivery Watch, and in which bucket. Returns
 // null when it doesn't. An order is watched when it still needs action (not
@@ -3366,7 +3372,7 @@ function isFourSOrder(o) {
 // one and must never be treated as Pending Won or prompted for a SO No. Drafts
 // are excluded too: they aren't booked yet.
 function isPendingWon(o) {
-  return !!o && !o.won && o.status !== 'draft' && !isFourSOrder(o);
+  return !!o && !o.won && o.status !== 'draft' && !isCancelled(o) && !isFourSOrder(o);
 }
 // Whether the order still has at least one franchise (non-4S) line that has NOT
 // yet been attached to a Godrej SO / WON. One SO is stamped per item, but a
@@ -3377,7 +3383,7 @@ function isPendingWon(o) {
 // are ignored. Legacy orders whose item lines weren't reconstructed keep the
 // old order-level rule so their behaviour is unchanged.
 function hasUnattachedSO(o) {
-  if (!o || o.status === 'draft') return false;        // drafts aren't booked yet
+  if (!o || o.status === 'draft' || isCancelled(o)) return false; // drafts aren't booked yet; cancelled orders need no SO
   const its = o.items || [];
   if (!its.length) return !!o.won || isPendingWon(o);
   const franchise = its.filter(it => !_isFourS(it && it.whTag));
@@ -3398,6 +3404,8 @@ function hasUnattachedSO(o) {
 // for rescheduling.
 function deliveryUrgency(o, mis) {
   const s = (o.deliveryStatus || '').toLowerCase();
+  // Cancelled — greyed out, no further chasing.
+  if (isCancelled(o)) return { key:'cancelled', color:T.ink4, soft:T.paper2, line:T.line, label:'Cancelled' };
   // Settled trio (+ Completed) — calm blue, no further chasing.
   if (o.status === 'completed' || /installation done/.test(s) || /^delivered/.test(s) || /^scheduled for delivery/.test(s)) {
     const label = (o.status === 'completed' || /installation done/.test(s)) ? 'Completed'
@@ -4833,7 +4841,7 @@ function leagueDisciplineOrders(orders, mis, matchKey, asOfISO){
   const out = { overdue:[], pendingWon:[], misOpen:[] };
   const wonCut = _isoAddDays(asOfISO, -1);
   (orders||[]).forEach(o=>{
-    if(!o || o.status==='draft') return;
+    if(!o || o.status==='draft' || isCancelled(o)) return;   // cancelled orders are never charged
     if(!String(o.salesExec||'').toLowerCase().includes(matchKey)) return;
     const booked=_toISO(o.date);
     if(!booked || booked>asOfISO) return;                 // not booked yet at the check date
@@ -4965,7 +4973,7 @@ function leagueTeamsFor(league, monthKey){
 function leagueAuto(orders, matchKey, startISO, endISO, leadPhones){
   let orderCount=0, basic=0, happyCalls=0, leadConv=0;
   (orders||[]).forEach(o=>{
-    if(!o || o.status==='draft') return;
+    if(!o || o.status==='draft' || isCancelled(o)) return;   // a cancelled sale scores nothing
     if(!String(o.salesExec||'').toLowerCase().includes(matchKey)) return;
     // Happy calling: every order that has a Happy Code earns its salesperson +1,
     // credited to the week the code was recorded (falls back to the booking date
@@ -6649,7 +6657,7 @@ function ReportsScreen({ctx}) {
   // Today's Sale — always computed over ALL orders (independent of the date-range
   // filter above) so the highlighted box reflects the current day only.
   const _todayISO = _iso(new Date());
-  const todays    = (orders||[]).filter(o => o && o.status !== 'draft' && _toISO(o.date) === _todayISO).sort(_reportOrderSort);
+  const todays    = (orders||[]).filter(o => o && o.status !== 'draft' && !isCancelled(o) && _toISO(o.date) === _todayISO).sort(_reportOrderSort);
   const todayCount = todays.length;
   const todayAmt   = todays.reduce((s,o)=>s+_exGst(o.amt),0);
   // Today's Sale, split the same way as the range totals: Franchise (KB / 34S /
@@ -6664,7 +6672,7 @@ function ReportsScreen({ctx}) {
     else if (id==='year') { setFrom(_iso(new Date(y,0,1)));  setTo(_iso(now)); }
   }
 
-  const booked = (orders||[]).filter(o => o && o.status !== 'draft').filter(o => {
+  const booked = (orders||[]).filter(o => o && o.status !== 'draft' && !isCancelled(o)).filter(o => {
     const iso = _toISO(o.date);
     if (!iso) return !from && !to;                 // undated: only when no range set
     if (from && iso < from) return false;
@@ -6837,7 +6845,7 @@ function CollectiblesScreen({ctx}) {
   useEffect(()=>{ loadOrders(); },[]);
 
   const due = (orders||[])
-    .filter(o=>o && o.status!=='draft')
+    .filter(o=>o && o.status!=='draft' && !isCancelled(o))   // a cancelled order has nothing to collect
     .map(o=>({o, ...orderReceived(o)}))
     .filter(x=>x.balance>2);
   const salespeople = [...new Set(due.map(x=>(x.o.salesExec||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
@@ -8163,7 +8171,7 @@ function HomeScreen({ctx}) {
   const custScope  = hasManagerAccess(user) ? {all:true} : {salesExec:user?.name||''};
   const custEvs    = buildCustomerEvents(orders, custScope);
   const custToday  = custEvs.filter(e=>e.days===0).length;
-  const dueTotal   = (orders||[]).filter(o=>o&&o.status!=='draft').reduce((s,o)=>s+orderReceived(o).balance,0);
+  const dueTotal   = (orders||[]).filter(o=>o&&o.status!=='draft'&&!isCancelled(o)).reduce((s,o)=>s+orderReceived(o).balance,0);
   const openSvc    = orders.filter(o=>o.serviceFlag&&!/resolved/i.test(o.serviceStatus||'')).length;
 
   const tiles = [
@@ -9309,7 +9317,7 @@ function OrderFormScreen({ctx, viewOnly}) {
     // A B2B order's payment + challan details are optional at booking but
     // mandatory before it can move into delivery — enforce them the moment the
     // order is scheduled (any status other than Pending).
-    if(!/^pending$/i.test(val)){
+    if(!/^pending$/i.test(val) && !/^cancel/i.test(val)){
       const miss=b2bDeliveryMissing(o);
       if(miss.length){ ctx.showToast('Fill the B2B challan details first — '+miss.join(', ')+' required before scheduling for delivery','bad'); return; }
     }
@@ -11392,6 +11400,7 @@ function HistoryScreen({ctx}) {
     {id:'delivered',  label:'Delivered',    tone:T.ok,    filter:o=>/^delivered/.test(st(o))},
     {id:'partial',    label:'Partial',      tone:T.warn,  filter:o=>/partial/.test(st(o))},
     {id:'completed',  label:'Completed',    tone:T.ok,    filter:o=>isCompleted(o)},
+    {id:'cancelled',  label:'Cancelled',    tone:T.bad,   filter:o=>isCancelled(o)},
   ];
   const tabs = [...CATS.map(({id,label,filter})=>({id,label,filter})), {id:'all',label:'All',filter:()=>true}];
   const active = tabs.find(t=>t.id===tab)||tabs[0];
@@ -11512,7 +11521,7 @@ function HistoryScreen({ctx}) {
     // A B2B order's payment + challan details are optional at booking but
     // mandatory before it can move into delivery — enforce them the moment the
     // order is scheduled (any status other than Pending).
-    if(!/^pending$/i.test(val)){
+    if(!/^pending$/i.test(val) && !/^cancel/i.test(val)){
       const miss=b2bDeliveryMissing(o);
       if(miss.length){ ctx.showToast('Fill the B2B challan details first — '+miss.join(', ')+' required before scheduling for delivery','bad'); return; }
     }
