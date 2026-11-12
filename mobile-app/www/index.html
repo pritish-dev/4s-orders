@@ -6876,6 +6876,71 @@ function ddoLive(today) { const d = today || istTodayISO(); return d >= SCHEME_D
 function hfScheme(today) { return ddoLive(today) ? SCHEME_DDO26 : SCHEME_Q326; }
 function hfSlabNo(sl) { return sl.slab || sl.idx + 1; }
 
+// Grand Wedding Offer (WED2026) — Pan India except Tamil Nadu, 11.11.2026 –
+// 12.12.2026 (or till stocks last). An ADD-ON to the Q326 consumer scheme: it
+// does not replace any Q326 slab. A wedding package (bed + wardrobe + …) that
+// meets BOTH the package criterion and the CPL + GST value criterion gets the
+// slab's assured discount + digital scratch card + an assured gift.
+// Channel: all COCOs & franchisees (except FSO) + selected dealers.
+const SCHEME_WED26 = {
+  code: 'WED2026', name: 'Grand Wedding Offer',
+  from: '2026-11-11', to: '2026-12-12', cashbackTill: '2026-11-30',
+  // need = items the package must contain (the slab's "Criteria 1").
+  // Values exactly as the circular: slab 1 is ">= 80,000 < 1,49,999".
+  slabs: [
+    { slab:1, min:80000,  max:149998,   pct:7,  pkg:'Bed + Wardrobe (HF/HS) / Mattress',                       need:['bed','wardrobeOrMattress'],                  gift:'Duffle Bag',                         giftValue:3950,   label:'₹80,000 – 1,49,998' },
+    { slab:2, min:149999, max:249999,   pct:9,  pkg:'Bed + Wardrobe (HF/HS) + Mattress',                       need:['bed','wardrobe','mattress'],                 gift:'VIP Luggage',                        giftValue:8950,   label:'₹1,49,999 – 2,49,999' },
+    { slab:3, min:250000, max:349999,   pct:11, pkg:'Bed + Wardrobe (HF/HS) + Mattress + Side table / Dresser', need:['bed','wardrobe','mattress','sideOrDresser'], gift:'Set of 3 VIP Luggage',               giftValue:30000,  label:'₹2,50,000 – 3,49,999' },
+    { slab:4, min:350000, max:499999,   pct:13, pkg:'Bed + Wardrobe (HF/HS) + Mattress + Dresser + Side table', need:['bed','wardrobe','mattress','dresser','side'], gift:'Travel Voucher (Benepik)',           giftValue:45000,  label:'₹3,50,000 – 4,99,999' },
+    { slab:5, min:500000, max:849999,   pct:15, pkg:'Bed + Wardrobe (HF/HS) + Mattress + Dresser + Side table', need:['bed','wardrobe','mattress','dresser','side'], gift:'Gold Jewellery Voucher (Benepik)',   giftValue:75000,  label:'₹5,00,000 – 8,49,999' },
+    { slab:6, min:850000, max:Infinity, pct:20, pkg:'Bed + Wardrobe (HF/HS) + Mattress + Dresser + Side table + any other HF / Kreation', need:['bed','wardrobe','mattress','dresser','side','other'], gift:'Gold Jewellery + Travel vouchers (Benepik)', giftValue:100000, label:'₹8,50,000 & above' },
+  ],
+  // Channel-partner contribution per gift (incl. GST) — manager / admin only.
+  cpGifts: [['VIP Strolley (Set of 3)','Strolley VIP Set of 3 Ha BLUE','53121600SD01183','₹7,255'],
+            ['VIP Strolley','Strolley VIP Harrier Bl 55','53121600SD01180','₹1,730'],
+            ['Skybags Duffle Trolley Bag','DFL BG Skybags St 53 Fbrc','53121600SD01181','₹1,185'],
+            ['Gold Jewellery + Travel Voucher','Benepik (multiple brands)','NA','Nil'],
+            ['Gold Jewellery Voucher','Benepik (multiple brands)','NA','Nil'],
+            ['Travel Voucher','Benepik (multiple brands)','NA','Nil']],
+  jewellery: 'Bluestone (Diamond / Gold), Giva (incl. Gold), Kalyan (Diamond / Gold), MIA, PC Jeweller, Reliance Jewel, Tanishq (incl. Diamond / Gold), Malabar (Diamond / Gold), Joyalukkas (Diamonds / Gold), Indriya (all / Gold / Diamond)',
+  travel: 'Cleartrip, EaseMyTrip, ITC Hotels, MakeMyTrip, Marriott Hotels India, Taj Hotels, Thomas Cook, Uber, Yatra, Ixigo, Air India, Cordelia',
+};
+function wedLive(today) { const d = today || istTodayISO(); return d >= SCHEME_WED26.from && d <= SCHEME_WED26.to; }
+// Which wedding-package pieces an order line is (a line can be more than one).
+function wedPieces(it, kind) {
+  const t = ' ' + [it.cat, it.item, it.name].filter(Boolean).join(' ').toLowerCase() + ' ';
+  const p = {};
+  if (kind === 'MAT') p.mattress = true;
+  if (kind === 'MAT' || kind === 'MATACC') return p;
+  if (/dresser|dressing/.test(t)) p.dresser = true;
+  if (/side\s*table|bed\s*side|bedside|night\s*stand/.test(t)) p.side = true;
+  if (!p.side && /\b(beds?|cot)\b/.test(t)) p.bed = true;
+  if (!p.dresser && (/wardrobe|almirah|storwel|slimline|auraline|kreation\s*x[23]/.test(t) || kind === 'HS' || kind === 'HSDIST' || kind === 'KX3')) p.wardrobe = true;
+  if (!p.bed && !p.wardrobe && !p.dresser && !p.side && (kind === 'HF' || kind === 'KX3' || kind === 'BEST')) p.other = true;
+  return p;
+}
+function wedNeedMet(need, has) {
+  return need.every(n => n === 'wardrobeOrMattress' ? (has.wardrobe || has.mattress)
+                       : n === 'sideOrDresser' ? (has.side || has.dresser) : !!has[n]);
+}
+// Grand Wedding Offer check for one order. Value = CPL + GST of HF + HS +
+// Mattress lines (Bestfest counts; sweetener, ageing / EOL lines do not).
+function wedAdvice(o, today) {
+  const W = SCHEME_WED26;
+  const has = {}; let value = 0;
+  (o.items || []).forEach(it => {
+    const kind = schemeLineKind(it);
+    if (kind === 'SWEET' || kind === 'OTHER' || kind === 'FRESHCA' || it.ageing) return;
+    Object.assign(has, wedPieces(it, kind));
+    if (kind !== 'MATACC') value += schemeListValue(it);
+  });
+  value = Math.round(value);
+  const byValue = W.slabs.filter(s => value >= s.min).pop() || null;
+  // Both criteria: the highest slab whose value AND package are met.
+  const slab = W.slabs.filter(s => value >= s.min && wedNeedMet(s.need, has)).pop() || null;
+  return { live: wedLive(today), value, has, byValue, slab, standalone: !has.bed };
+}
+
 // Bank tie-up instant discounts (Pinelabs POS, automated). Min txn ₹15,000.
 const BANK_Q3 = {
   emiTill: '2026-10-31', swipeTill: '2026-10-18',
@@ -7011,6 +7076,7 @@ function schemeAdvice(o) {
     assuredAmt: Math.round(assured / 100),
     scratch: !!(hf || hs || hsDist || kx3),
     txn, bank: bankOffersFor(txn, today), emi: emiOptionsFor(txn, today),
+    wed: wedAdvice(o, today),
   };
 }
 function bankOffersFor(v, today) {
@@ -7066,14 +7132,14 @@ function SchemeAdvisorPanel({ order }) {
   if (!items.length) return null;
   const S = SCHEME_Q326;
   const pct = n => n + '%';
-  const nOffers = [a.hf, a.hs, a.hsDist, a.kx3].filter(Boolean).length + a.mattress.length + (a.bank.length ? 1 : 0) + ((a.emi.card.length || a.emi.bajaj.length) ? 1 : 0);
+  const nOffers = [a.hf, a.hs, a.hsDist, a.kx3].filter(Boolean).length + a.mattress.length + (a.bank.length ? 1 : 0) + ((a.emi.card.length || a.emi.bajaj.length) ? 1 : 0) + (a.wed.slab ? 1 : 0);
   return (
     <div style={{ margin: '14px 14px 0', border: `1.5px dashed ${T.purple}`, borderRadius: 10, background: '#fff', overflow: 'hidden' }}>
       <div role="button" onClick={() => setOpen(v => !v)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', cursor: 'pointer', background: T.purpleSoft }}>
         <div style={{ fontSize: 18 }}>🔒</div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 800, color: T.purple }}>Applicable schemes · staff only</div>
-          <div style={{ fontSize: 10.5, color: T.ink3 }}>{S.code} {S.name} · not shown on the order form PDF{open ? '' : ` · ${nOffers} match${nOffers === 1 ? '' : 'es'} · tap to view`}</div>
+          <div style={{ fontSize: 10.5, color: T.ink3 }}>{S.code} {S.name}{a.wed.live ? ` + ${SCHEME_WED26.code} ${SCHEME_WED26.name}` : ''} · not shown on the order form PDF{open ? '' : ` · ${nOffers} match${nOffers === 1 ? '' : 'es'} · tap to view`}</div>
         </div>
         <div style={{ fontSize: 14, color: T.purple, fontWeight: 800 }}>{open ? '▲' : '▼'}</div>
       </div>
@@ -7103,6 +7169,22 @@ function SchemeAdvisorPanel({ order }) {
                 : <>No coin at this slab — coins start at ₹80,000 slab value (3 gm silver).</>}
               <div style={{ fontSize: 10.5, color: T.ink4, marginTop: 4 }}>
                 Coin is lost if the scratch card wins 50% / 100% off · delivered after invoicing by Benepik (ASM shares customer data with HO Operations for audit) · no cash in lieu · not on WIX / bulk / liquidation orders · use discount code <b>{SCHEME_DDO26.code}</b>.
+              </div>
+            </SchemeBox>
+          )}
+          {a.wed.live && a.wed.value > 0 && (a.hf || a.hs || a.hsDist || a.kx3 || a.mattress.length > 0) && (
+            <SchemeBox tone="ok" title={`💍 ${SCHEME_WED26.name} · ${SCHEME_WED26.code} · add-on · till ${_fmtD(SCHEME_WED26.to)}`}>
+              <div style={{ fontSize: 11, marginBottom: 3 }}>
+                Package on order: {[['bed','Bed'],['wardrobe','Wardrobe'],['mattress','Mattress'],['side','Side table'],['dresser','Dresser'],['other','Other HF']].map(([k, l]) => (a.wed.has[k] ? '✓ ' : '✗ ') + l).join(' · ')}
+              </div>
+              {a.wed.slab
+                ? <>Slab {a.wed.slab.slab}: <b>{a.wed.slab.pct}% + scratch card</b> + assured <b>🎁 {a.wed.slab.gift}</b> (worth {_inr(a.wed.slab.giftValue)}) on package value {_inr(a.wed.value)}.</>
+                : a.wed.standalone ? <>Not eligible — a bed is mandatory. Standalone HS, mattress or HS + mattress gets no wedding gift.</>
+                : !a.wed.byValue ? <>No wedding gift yet — package value {_inr(a.wed.value)}; gifts start at ₹80,000 (Bed + Wardrobe / Mattress → Duffle Bag).</>
+                : <>Value {_inr(a.wed.value)} reaches slab {a.wed.byValue.slab}, but the package criterion is not met — needs {a.wed.byValue.pkg}.</>}
+              {a.wed.slab && a.wed.byValue && a.wed.byValue.slab > a.wed.slab.slab && <div style={{ fontSize: 11, color: T.warn, marginTop: 3 }}>Value reaches slab {a.wed.byValue.slab} ({a.wed.byValue.gift}) — add the missing pieces: {a.wed.byValue.pkg}.</div>}
+              <div style={{ fontSize: 10.5, color: T.ink4, marginTop: 4 }}>
+                Package detected from item names — confirm at the counter. Both criteria must be met · Bestfest counts, sweetener / EOL / ageing do not · higher of slab vs scratch-card discount applies · scratch card 50% → gift still given, 100% → no gift · no exchange · not on WIX / bulk orders · discount code <b>{SCHEME_WED26.code}</b>.
               </div>
             </SchemeBox>
           )}
@@ -7161,12 +7243,13 @@ function SchemeAdvisorPanel({ order }) {
 // matching slab and EMI tenures. Channel-partner terms are manager/admin only.
 function SchemeLibrary({ user }) {
   const isManager = hasManagerAccess(user);
-  const [tab, setTab] = React.useState('hfhs');
+  const [tab, setTab] = React.useState(() => wedLive() ? 'wedding' : 'hfhs');
   const [val, setVal] = React.useState('');
   const v = Number(String(val).replace(/[^\d.]/g, '')) || 0;
   const today = istTodayISO();
   const S = SCHEME_Q326;
-  const tabs = [['hfhs', 'HF / HS'], ['mattress', 'Mattress'], ['scratch', 'Scratch card'], ['bank', 'Bank offers'], ['emi', 'EMI'], isManager && ['cp', 'Channel partner']].filter(Boolean);
+  const wed = wedLive(today), wedHi = v ? SCHEME_WED26.slabs.findIndex(s => v >= s.min && v <= s.max) : -1;
+  const tabs = [today <= SCHEME_WED26.to && ['wedding', '💍 Wedding'], ['hfhs', 'HF / HS'], ['mattress', 'Mattress'], ['scratch', 'Scratch card'], ['bank', 'Bank offers'], ['emi', 'EMI'], isManager && ['cp', 'Channel partner']].filter(Boolean);
   const live = today >= S.from && today <= S.to;
   const ended = d => today > d ? <Pill tone="bad" size="sm">ENDED</Pill> : <Pill tone="ok" size="sm">TILL {_fmtD(d).toUpperCase()}</Pill>;
   const H = hfScheme(today), ddo = H === SCHEME_DDO26;
@@ -7181,6 +7264,7 @@ function SchemeLibrary({ user }) {
         </div>
         <div style={{ fontSize: 15, fontWeight: 900, color: T.ink, marginTop: 2 }}>{S.code} · {S.name}</div>
         {ddo && <div style={{ fontSize: 12, fontWeight: 800, color: '#a16207', marginTop: 3 }}>🪔 + {SCHEME_DDO26.code} {SCHEME_DDO26.name} · {_fmtD(SCHEME_DDO26.from)} – {_fmtD(SCHEME_DDO26.to)} · gold &amp; silver coins</div>}
+        {wed && <div style={{ fontSize: 12, fontWeight: 800, color: '#be185d', marginTop: 3 }}>💍 + {SCHEME_WED26.code} {SCHEME_WED26.name} · {_fmtD(SCHEME_WED26.from)} – {_fmtD(SCHEME_WED26.to)} · add-on · assured gifts</div>}
         <div style={{ fontSize: 11, color: T.ink3 }}>{_fmtD(S.from)} – {_fmtD(S.to)} · COCO / Franchisee / Dealer · do not share with customers</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 9, padding: '7px 10px', background: '#fff', border: `1px solid ${T.line}`, borderRadius: 8 }}>
           <span style={{ fontSize: 12, color: T.ink3, fontWeight: 700 }}>₹</span>
@@ -7196,6 +7280,44 @@ function SchemeLibrary({ user }) {
         ))}
       </div>
       <div style={{ padding: '11px 12px 4px' }}>
+        {tab === 'wedding' && (<>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5, flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: T.ink }}>💍 {SCHEME_WED26.code} · {SCHEME_WED26.name} — package + value → discount + scratch card + gift</div>
+            {wed ? <Pill tone="ok" size="sm">LIVE</Pill> : <Pill tone="bad" size="sm">{today < SCHEME_WED26.from ? 'NOT STARTED' : 'ENDED'}</Pill>}
+          </div>
+          <div style={{ fontSize: 11, color: T.ink3, marginBottom: 6 }}>{_fmtD(SCHEME_WED26.from)} – {_fmtD(SCHEME_WED26.to)} (or till stocks last) · Pan India except Tamil Nadu · add-on to the Q326 consumer scheme</div>
+          <SchemeTable head={['Slab', 'Package (criteria 1)', 'CPL + GST (criteria 2)', 'Assured discount', 'Assured gift', 'Gift value']}
+            rows={SCHEME_WED26.slabs.map(s => [s.slab, s.pkg, s.label, s.pct + '% + scratch card', '🎁 ' + s.gift, _inr(s.giftValue)])} hi={wedHi} />
+          <SchemeBox tone="ok" title="Eligibility">
+            • The customer must meet <b>both</b> criteria — the package items and the value slab.<br />
+            • Standalone HS, standalone mattress, or HS + mattress is <b>not</b> eligible — refer to the Q326 scheme.<br />
+            • HS, HF &amp; mattress scheme discounts are considered for the Grand Wedding Offer.<br />
+            • Value-criteria products can be from Bestfest, but <b>not</b> Sweetener, EOL or ageing-liquidation pre-approved discounts.<br />
+            • Slab value is on MRP as in the total bill (CPL + GST) · eligible products: Home Storage, Home Furniture, Mattress.<br />
+            • No exchange · not on WIX orders or bulk purchases · no cancel-and-rebook of orders raised before 11 Nov 2026 · not valid in Tamil Nadu.
+          </SchemeBox>
+          <SchemeBox title="Digital scratch card (part of this offer)">
+            • Assured 5%; can also win 50% / 100% off, or 5% + Amazon voucher ₹2,500 / VIP Luggage / ₹5,000 off next purchase (no extra 5% with 50% / 100%).<br />
+            • If the scratch card beats the slab discount, the <b>higher</b> discount applies.<br />
+            • Win 50% / 100% → the slab discounts above are void. With <b>50%</b> the customer still gets the assured gift (if both criteria are met); with <b>100%</b> no gift.
+          </SchemeBox>
+          <SchemeBox title="Finance & bank offers">
+            • Consumer finance and instant cashback apply on this offer as rolled earlier · instant cashback (HDFC / IDFC FIRST / SBI cards only) till <b>{_fmtD(SCHEME_WED26.cashbackTill)}</b>.<br />
+            • Card NCEMI up to 3 months on ₹15,000+ for HF, HS &amp; mattress · card EMI (NCEMI &amp; LCEMI) through 13 banks.<br />
+            • Bajaj paper finance applicable · no consumer finance / cashback on B2B, SSD, modular kitchens &amp; home furnishings.
+          </SchemeBox>
+          <SchemeBox title="Gifts & vouchers">
+            • Duffle bag &amp; VIP strolleys: at HO &amp; branch warehouses — COCO books them in LN as an additional gift line at 99.99% discount.<br />
+            • Jewellery &amp; travel vouchers: by Benepik through a microsite — link sent to the customer's email / mobile after invoicing and HO validation, in batches.<br />
+            • Gifts / vouchers cannot be exchanged for cash or discounts.<br />
+            • <b>Jewellery:</b> {SCHEME_WED26.jewellery}.<br />
+            • <b>Travel / hotel:</b> {SCHEME_WED26.travel}.
+          </SchemeBox>
+          {isManager && (<>
+            <SchemeBox tone="warn" title="Manager / admin only">Dealer / franchisee gift contribution — never share with customers or sales floor staff.</SchemeBox>
+            <SchemeTable head={['Gift', 'Item description', 'Item code', 'CP contribution (incl. GST)']} rows={SCHEME_WED26.cpGifts} />
+          </>)}
+        </>)}
         {tab === 'hfhs' && (<>
           {ddo ? (<>
             <div style={{ fontSize: 12, fontWeight: 800, color: T.ink, marginBottom: 5 }}>🪔 Home Furniture (HF) — {SCHEME_DDO26.code} Dhanteras &amp; Diwali · discount + scratch card + coin</div>
@@ -7732,7 +7854,7 @@ function HomeScreen({ctx}) {
 
   const tiles = [
     { key:'book',    label:'Book an Order',        sub:'New customer order',        emoji:'🛒', bg:'linear-gradient(135deg,#0b6b3a 0%,#0e5c4f 100%)', onClick:()=>{ctx.setOrder({...BLANK_ORDER(),salesExec:user?.name||''});nav('order');} },
-    { key:'offerzone',label:'Offer Zone',           sub:(ddoLive()?'🪔 Dhanteras coins · ':'')+(offersLive()?'Q326 schemes · Bestfest & Sweetener':'Q326 schemes'), emoji:'🔥', bg:'linear-gradient(135deg,#6d28d9 0%,#4c1d95 100%)', onClick:()=>nav('offerzone') },
+    { key:'offerzone',label:'Offer Zone',           sub:(wedLive()?'💍 Wedding offer · ':'')+(ddoLive()?'🪔 Dhanteras coins · ':'')+(offersLive()?'Q326 schemes · Bestfest & Sweetener':'Q326 schemes'), emoji:'🔥', bg:'linear-gradient(135deg,#6d28d9 0%,#4c1d95 100%)', onClick:()=>nav('offerzone') },
     { key:'catalogue',label:'Interio Catalogue',    sub:'Designs · key points · sizes', emoji:'🖼️', bg:'linear-gradient(135deg,#b07f00 0%,#1a1b1f 100%)', onClick:()=>nav('catalogue') },
     canManual && { key:'manual', label:'Manual Order', sub:'Admin & owner only',    emoji:'📝', bg:'linear-gradient(135deg,#334155 0%,#1e293b 100%)', onClick:()=>{ctx.setOrder({...BLANK_ORDER(),manualOrder:true,salesExec:user?.name||''});nav('order');} },
     { key:'reports', label:'Sales Summary',        sub:'Month-to-date report',      emoji:'📊', bg:'linear-gradient(135deg,#0e7490 0%,#155e75 100%)', onClick:()=>nav('reports') },
