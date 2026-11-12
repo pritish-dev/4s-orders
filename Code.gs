@@ -286,6 +286,12 @@ function doPost(e) {
     var auth = _verifyToken(body.token);
     if (!auth) return _jsonPost(_authFail());
     body.by = auth.u;   // bind the actor to the verified token (no role spoofing via by:)
+    // READ-ONLY (DUMMY) accounts may view but never write. Every POST other than
+    // login is a write, so refuse it. Checks the signed token's role AND the
+    // live sheet role, so a user switched to DUMMY is blocked even on an old token.
+    if (String(auth.r || '').toLowerCase() === 'dummy' || _lookupRole(auth.u) === 'dummy') {
+      return _jsonPost({ ok: false, error: 'View-only account — you cannot make changes.', readOnly: true });
+    }
   }
 
   var result;
@@ -542,13 +548,16 @@ function _loginWithStaff(sh, username, password) {
   return null;
 }
 
-// Normalise a raw role cell to one of: 'sales' | 'manager' | 'admin'.
+// Normalise a raw role cell to one of: 'sales' | 'manager' | 'admin' | 'dummy'.
+// 'dummy' is a READ-ONLY login: it can view everything but every write action
+// is refused in doPost.
 // Anything unrecognised (or blank) falls back to 'sales' — the least-privileged
 // role — so a typo in the sheet can never accidentally grant elevated access.
 function _normRole(raw) {
   var r = String(raw || '').toLowerCase().trim();
   if (r === 'admin' || r === 'administrator' || r === 'owner') return 'admin';
   if (r === 'manager' || r === 'mgr' || r === 'store manager') return 'manager';
+  if (r === 'dummy' || r === 'read only' || r === 'read-only' || r === 'readonly' || r === 'view only') return 'dummy';
   return 'sales';
 }
 
