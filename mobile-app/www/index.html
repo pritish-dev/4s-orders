@@ -331,7 +331,18 @@ async function apiGet(action, params = {}, timeoutMs = 30000, retries = 2) {
   throw lastErr || new Error('Network error');
 }
 
+// READ-ONLY (DUMMY) accounts: the signed-in user may view everything but must
+// never change anything. Every write goes through apiPost, so refuse it here
+// (the backend enforces the same rule). Returned as a normal { ok:false } reply
+// — not thrown — so callers show the message instead of queueing it offline.
+const READ_ONLY_MSG = 'View-only account — you cannot make changes.';
+function _currentUserIsReadOnly() {
+  try { const u = JSON.parse(localStorage.getItem('4s_user') || 'null'); return isReadOnlyUser(u); } catch (e) { return false; }
+}
 async function apiPost(body, tries = 3) {
+  if (body && body.action !== 'login' && _currentUserIsReadOnly()) {
+    return { ok: false, error: READ_ONLY_MSG, readOnly: true };
+  }
   const url = getApiUrl();
   if (!url) throw new Error('API URL not configured.');
   let lastErr;
@@ -1324,7 +1335,14 @@ function normRole(role) {
   return PRIVILEGED_ROLES.indexOf(r) >= 0 ? r : (r === 'sales' ? 'sales' : r || 'sales');
 }
 function hasManagerAccess(user) {
-  return PRIVILEGED_ROLES.indexOf(normRole(user && user.role)) >= 0;
+  // DUMMY (read-only) users can VIEW everything a manager sees; every write is
+  // blocked separately (apiPost + backend), so this grants no edit rights.
+  const r = normRole(user && user.role);
+  return PRIVILEGED_ROLES.indexOf(r) >= 0 || r === 'dummy';
+}
+// DUMMY = read-only login: can open every screen, cannot save/change anything.
+function isReadOnlyUser(user) {
+  return normRole(user && user.role) === 'dummy';
 }
 // Whether an order has been finalised — i.e. submitted and its PDF generated.
 // A draft saves directly for everyone. A submitted order is still editable by
@@ -7742,7 +7760,7 @@ function HomeScreen({ctx}) {
           <div>
             <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,letterSpacing:1}}>{istToday({weekday:'short',day:'2-digit',month:'short'}).toUpperCase()}</div>
             <div style={{fontSize:22,fontWeight:700,letterSpacing:-0.5,marginTop:2,display:'flex',alignItems:'center',gap:8}}>Hi, {user?.name||'there'}
-              {hasManagerAccess(user)&&<span style={{fontSize:9,fontWeight:800,letterSpacing:.6,color:'#fff',background:T.ink,padding:'2px 7px',borderRadius:99,textTransform:'uppercase'}}>{role}</span>}
+              {hasManagerAccess(user)&&<span style={{fontSize:9,fontWeight:800,letterSpacing:.6,color:'#fff',background:isReadOnlyUser(user)?T.warn:T.ink,padding:'2px 7px',borderRadius:99,textTransform:'uppercase'}}>{isReadOnlyUser(user)?'View only':role}</span>}
             </div>
           </div>
           <div style={{display:'flex',alignItems:'center',gap:10}}>
