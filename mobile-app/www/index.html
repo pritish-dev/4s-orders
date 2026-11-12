@@ -4869,7 +4869,7 @@ const LEAGUE_PTS_EDITABLE = [
 //   • MIS committed, not closed — fully committed in the Godrej MIS (on/after
 //     its commit date) but not yet delivered, or not yet fully paid.
 // One order can breach more than one rule; each is charged separately.
-const DISCIPLINE_FROM = '2026-11-08';          // first league week that is charged
+const DISCIPLINE_FROM = '2026-11-01';          // first league week that is charged
 const DISCIPLINE_RULES = [
   { key:'overdue',    ptsKey:'overdueDelivery', label:'Overdue delivery',  short:'Overdue' },
   { key:'pendingWon', ptsKey:'pendingWon',      label:'Pending WON > 24 h', short:'Pend. WON' },
@@ -5951,7 +5951,7 @@ function LeagueScreen({ctx}) {
                 ['Overdue delivery (auto)',_ptsTxt(-Math.abs(PTS.overdueDelivery))+' per order whose delivery date has passed and is not yet Scheduled / Delivered / Installation Done'],
                 ['Pending WON (auto)',_ptsTxt(-Math.abs(PTS.pendingWon))+' per order still without its WON / SO No more than 24 hours after booking'],
                 ['MIS committed, not closed (auto)',_ptsTxt(-Math.abs(PTS.misOpen))+' per order committed in MIS (from its commit date) that is not delivered or not fully paid'],
-                ['Order deductions repeat weekly','checked on the last day of every week (7th, 14th, 21st, 28th & month end) from 8 Nov 2026 and charged to the order\'s salesperson — again every week until the order\'s status is updated'],
+                ['Order deductions repeat weekly','checked on the last day of every week (7th, 14th, 21st, 28th & month end) from 1 Nov 2026 and charged to the order\'s salesperson — again every week until the order\'s status is updated'],
                 ['Salesman of the Month','decided on points — see "How the Salesman of the Month is decided" below'],
                 ['Orange & Purple cap','decided over the whole month — top sales value & most orders'],
               ].map((r,i,arr)=>(

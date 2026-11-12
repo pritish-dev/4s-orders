@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v81';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v82';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -5306,7 +5306,7 @@ function handleLeagueSettleTargetWeeks(body) {
 // not fully paid. The app works the counts out from fresh orders + MIS when a
 // manager/admin opens the league; this stores each week ONCE (never overwritten).
 // They recur because every week is settled afresh from the orders still open.
-var LEAGUE_DISCIPLINE_FROM = '2026-11-08';
+var LEAGUE_DISCIPLINE_FROM = '2026-11-01';
 function _leagueDisciplineAll(props) {
   var all = {}, map = props.getProperties();
   Object.keys(map).forEach(function (k) {
