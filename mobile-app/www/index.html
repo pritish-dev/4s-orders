@@ -3973,6 +3973,7 @@ function App() {
         const norm = normalizeSalesNames(res.orders);
         setOrders(norm);
         localStorage.setItem('4s_orders', JSON.stringify(norm));
+        return true;
       } else if (!silent && !haveCache) {
         showToast((res && res.error) || 'Failed to load orders','bad');
       }
@@ -3980,6 +3981,7 @@ function App() {
       if (!haveCache) showToast('Could not reach the server — pull to refresh','warn');
       // else: keep showing the cached orders, silently
     } finally { if (!haveCache) setLoading(false); }
+    return false;
   }
 
   // Pull the MIS_Daily committed-stock feed (read from the OPS sheet by the backend).
@@ -4016,7 +4018,7 @@ function App() {
     try {
       const res = await apiGet('leagueScores', {}, 30000, 2);
       if (res && res.ok) {
-        const data = { scores: res.scores || [], monthlyTarget: Number(res.monthlyTarget)||0, weeklyTarget: Number(res.weeklyTarget)||0, salesmanOfMonth: res.salesmanOfMonth || '', rosters: (res.rosters && typeof res.rosters==='object') ? res.rosters : {}, points: (res.points && typeof res.points==='object') ? res.points : {}, removedPlayers: (res.removedPlayers && typeof res.removedPlayers==='object') ? res.removedPlayers : {}, somPublished: (res.somPublished && typeof res.somPublished==='object') ? res.somPublished : {}, somWeights: (res.somWeights && typeof res.somWeights==='object') ? res.somWeights : {}, targetWeeks: (res.targetWeeks && typeof res.targetWeeks==='object') ? res.targetWeeks : {} };
+        const data = { scores: res.scores || [], monthlyTarget: Number(res.monthlyTarget)||0, weeklyTarget: Number(res.weeklyTarget)||0, salesmanOfMonth: res.salesmanOfMonth || '', rosters: (res.rosters && typeof res.rosters==='object') ? res.rosters : {}, points: (res.points && typeof res.points==='object') ? res.points : {}, removedPlayers: (res.removedPlayers && typeof res.removedPlayers==='object') ? res.removedPlayers : {}, somPublished: (res.somPublished && typeof res.somPublished==='object') ? res.somPublished : {}, somWeights: (res.somWeights && typeof res.somWeights==='object') ? res.somWeights : {}, targetWeeks: (res.targetWeeks && typeof res.targetWeeks==='object') ? res.targetWeeks : {}, disciplineWeeks: (res.disciplineWeeks && typeof res.disciplineWeeks==='object') ? res.disciplineWeeks : {} };
         setLeague(data);
         localStorage.setItem('4s_league', JSON.stringify(data));
         return data;
@@ -4069,6 +4071,20 @@ function App() {
       const res = await apiPost({ action:'settleLeagueTargetWeeks', by:user?.username||user?.name||'', weeks });
       if (res && res.ok) {
         if (res.added && res.added.length) { await loadLeague({silent:true}); showToast('Weekly target points settled ✓'); }
+        return true;
+      }
+    } catch(e) {}
+    return false;
+  }
+
+  // Store the weekly order-discipline deductions (overdue delivery, Pending WON
+  // > 24 h, MIS-committed but not delivered / not fully paid) for finished weeks
+  // (manager/admin). The server keeps the first result for a week.
+  async function doSettleDisciplineWeeks(weeks) {
+    try {
+      const res = await apiPost({ action:'settleLeagueDisciplineWeeks', by:user?.username||user?.name||'', weeks });
+      if (res && res.ok) {
+        if (res.added && res.added.length) { await loadLeague({silent:true}); showToast('Weekly order deductions applied ✓'); }
         return true;
       }
     } catch(e) {}
@@ -4602,7 +4618,7 @@ function App() {
     svcRequests, loadServiceRequests, doCreateServiceRequest, doUpdateServiceRequest,
     mis, misSyncedAt, misUpdateUrl, misLoading, misDiag, loadMis, notifications, unreadCount, markNotifsSeen,
     league, leagueLoading, loadLeague, doSaveLeagueScore, doSaveLeagueConfig,
-    monthTargets, loadMonthlyTargets, doSettleTargetWeeks,
+    monthTargets, loadMonthlyTargets, doSettleTargetWeeks, doSettleDisciplineWeeks,
     leads, leadsLoading, loadLeads, doAddLead, doEditLead, doDeleteLead,
     gmbPhones, ldmPhones, contactTagsLoading, loadContactTags,
     offersSent, loadOffersSent, doMarkOfferSent, doResetOffersSent,
@@ -4793,7 +4809,8 @@ const LEAGUE_TEAMS = [
 // Default point weights straight off the league rulebook. An admin can override
 // any of these from the app (the "Points system" editor); the overrides are kept
 // in the backend and merged over these defaults by leaguePts().
-const LEAGUE_PTS = { salesConv:1, review:1, happyCalling:1, teleConv:4, teleConvReview:6, leadConv:6, followupMissed:-1, timingPenalty:-1, dressCode:-1, targetWeek:5 };
+const LEAGUE_PTS = { salesConv:1, review:1, happyCalling:1, teleConv:4, teleConvReview:6, leadConv:6, followupMissed:-1, timingPenalty:-1, dressCode:-1, targetWeek:5,
+  overdueDelivery:-1, pendingWon:-1, misOpen:-1 };
 // Weekly sales-target points are settled automatically from this week onward.
 const TARGET_WEEKS_FROM = '2026-11-01';
 // One player's weekly target result for league week `w` of a month with `dim`
@@ -4834,7 +4851,64 @@ const LEAGUE_PTS_EDITABLE = [
   { key:'timingPenalty',  label:'Timing',                    hint:'manual · penalty' },
   { key:'dressCode',      label:'Dress code',                hint:'manual · penalty' },
   { key:'targetWeek',     label:'Weekly sales target (±)',   hint:'auto · + if the weekly target is met, − if missed' },
+  { key:'overdueDelivery',label:'Overdue delivery',          hint:'auto · per order, every week · penalty' },
+  { key:'pendingWon',     label:'Pending WON > 24 h',        hint:'auto · per order, every week · penalty' },
+  { key:'misOpen',        label:'MIS committed, not closed', hint:'auto · per order not delivered / not fully paid, every week · penalty' },
 ];
+// ── Weekly order-discipline deductions ─────────────────────────────────────
+// Settled automatically on the last day of every league week (like the weekly
+// sales target) and charged to the order's salesperson (matched on salesExec).
+// They RECUR: an order that is still in breach on the next week's last day is
+// charged again, every week, until its status is updated. Per order:
+//   • Overdue delivery — the delivery date (planned, else MIS) has passed and the
+//     order is not yet Scheduled / Delivered / Installation Done / Completed
+//     (the same "overdue" the app flags in red).
+//   • Pending WON > 24 h — still awaiting its Godrej SO No / WON and booked
+//     more than a day before (booking date at least 2 days before the check,
+//     so a full 24 h has always passed).
+//   • MIS committed, not closed — fully committed in the Godrej MIS (on/after
+//     its commit date) but not yet delivered, or not yet fully paid.
+// One order can breach more than one rule; each is charged separately.
+const DISCIPLINE_FROM = '2026-11-08';          // first league week that is charged
+const DISCIPLINE_RULES = [
+  { key:'overdue',    ptsKey:'overdueDelivery', label:'Overdue delivery',  short:'Overdue' },
+  { key:'pendingWon', ptsKey:'pendingWon',      label:'Pending WON > 24 h', short:'Pend. WON' },
+  { key:'misOpen',    ptsKey:'misOpen',         label:'MIS committed — not delivered / not fully paid', short:'MIS open' },
+];
+function _isoAddDays(iso, n){ const d=new Date(String(iso)+'T00:00:00'); if(isNaN(d.getTime())) return ''; d.setDate(d.getDate()+n); return _isoOf(d); }
+// The orders of one player that breach each rule, judged as of `asOfISO` (the
+// week's last day, or today for a week still in progress). Returns order numbers.
+function leagueDisciplineOrders(orders, mis, matchKey, asOfISO){
+  const out = { overdue:[], pendingWon:[], misOpen:[] };
+  const wonCut = _isoAddDays(asOfISO, -1);
+  (orders||[]).forEach(o=>{
+    if(!o || o.status==='draft') return;
+    if(!String(o.salesExec||'').toLowerCase().includes(matchKey)) return;
+    const booked=_toISO(o.date);
+    if(!booked || booked>asOfISO) return;                 // not booked yet at the check date
+    const id=String(o.no||o.won||booked);
+    // 1) Overdue delivery
+    if(!deliveryActionSettled(o)){
+      const del=orderDeliveryISO(o, mis);
+      if(/^\d{4}-\d{2}-\d{2}/.test(del) && del.slice(0,10)<asOfISO) out.overdue.push(id);
+    }
+    // 2) Pending WON for more than 24 hours
+    if(isPendingWon(o) && booked<wonCut) out.pendingWon.push(id);
+    // 3) Committed in MIS but not delivered or not fully paid
+    if(isMisCommitted(o, mis)){
+      const m=misForOrder(mis, o)||{};
+      const cd=String(m.commitDate||'').slice(0,10);
+      if(!(/^\d{4}-\d{2}-\d{2}$/.test(cd) && cd>asOfISO)){
+        if(!isDeliveryDone(o) || orderReceived(o).balance>0) out.misOpen.push(id);
+      }
+    }
+  });
+  return out;
+}
+// Points for a set of breach counts / lists.
+function disciplinePts(counts, PTS){
+  return DISCIPLINE_RULES.reduce((s,r)=>{ const v=counts&&counts[r.key]; const n=Array.isArray(v)?v.length:(Number(v)||0); return s+n*(-Math.abs(Number(PTS[r.ptsKey])||0)); },0);
+}
 // "+6 points" / "−1 point" — a signed, pluralised points label for the rulebook.
 function _ptsTxt(n){ n=Number(n)||0; return (n>0?'+':'')+n+' point'+(Math.abs(n)===1?'':'s'); }
 // Normalise a phone number to its last 10 digits for lead↔order matching.
@@ -4990,6 +5064,13 @@ function computeWeek(orders, league, teams, win, leadMap){
   const tWeeks = (league&&league.targetWeeks)||{};
   const targetWeekPts = name => Object.keys(tWeeks).reduce((acc,k)=>
     (k>=win.startISO && k<=win.endISO) ? acc+(Number((((tWeeks[k]||{}).players||{})[name]||{}).pts)||0) : acc, 0);
+  // Settled weekly order-discipline deductions (overdue / Pending WON / MIS open).
+  const dWeeks = (league&&league.disciplineWeeks)||{};
+  const discOf = name => Object.keys(dWeeks).reduce((acc,k)=>{
+    if(!(k>=win.startISO && k<=win.endISO)) return acc;
+    const r=((dWeeks[k]||{}).players||{})[name]; if(!r) return acc;
+    DISCIPLINE_RULES.forEach(x=>acc[x.key]+=Number(r[x.key])||0); acc.pts+=Number(r.pts)||0; return acc;
+  }, { overdue:0, pendingWon:0, misOpen:0, pts:0 });
   // Each team's target for this window. An admin-set weekly target (which
   // fluctuates with the previous week's performance) wins; otherwise fall back
   // to the monthly target ÷ 2, pro-rated to the number of days in the window.
@@ -5002,6 +5083,7 @@ function computeWeek(orders, league, teams, win, leadMap){
     const players = team.players.map(pl=>{
       const auto = leagueAuto(orders, pl.match, win.startISO, win.endISO, leadMap[pl.match]);
       const man  = leagueManualSum(scores, pl.name, win.startISO, win.endISO);
+      const disc = discOf(pl.name);
       const pts = auto.orderCount*PTS.salesConv
         + man.reviews*PTS.review
         + auto.happyCalls*PTS.happyCalling          // happy calling is automatic (orders with a Happy Code)
@@ -5010,8 +5092,9 @@ function computeWeek(orders, league, teams, win, leadMap){
         + man.timingPenalty*PTS.timingPenalty
         + man.dressCode*PTS.dressCode
         + man.targetAdj                             // admin's target bonus / penalty (signed, 1 pt each)
-        + targetWeekPts(pl.name);                   // automatic weekly sales-target ± points (settled)
-      return { ...pl, auto, man, pts, targetWeekPts: targetWeekPts(pl.name) };
+        + targetWeekPts(pl.name)                    // automatic weekly sales-target ± points (settled)
+        + disc.pts;                                 // automatic weekly order-discipline deductions (settled)
+      return { ...pl, auto, man, pts, targetWeekPts: targetWeekPts(pl.name), disc };
     });
     const teamBasic  = players.reduce((s,p)=>s+p.auto.basic,0);
     const teamOrders = players.reduce((s,p)=>s+p.auto.orderCount,0);
@@ -5269,7 +5352,7 @@ function LeagueTeamCard({team, isLeader, decided, pts}) {
               <LeagueAvatar name={p.name} team={team} size={30} captain={p.captain}/>
               <div style={{minWidth:0}}>
                 <div style={{fontSize:12,fontWeight:800,color:T.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{p.name}</div>
-                <div style={{fontSize:9.5,color:T.ink4,fontFamily:T.mono}}>{_fmtAmt(p.auto.basic)}{p.captain?' · capt':''}</div>
+                <div style={{fontSize:9.5,color:T.ink4,fontFamily:T.mono}}>{_fmtAmt(p.auto.basic)}{p.captain?' · capt':''}{p.disc&&p.disc.pts<0?<span style={{color:T.bad,fontWeight:800}} title="Order deductions (overdue / Pending WON / MIS open)"> · {p.disc.pts} ord</span>:null}</div>
               </div>
             </div>
             <span style={{textAlign:'center',fontFamily:T.mono,fontSize:12,fontWeight:700,color:T.ink2}}>{p.auto.orderCount}</span>
@@ -5290,7 +5373,7 @@ function LeagueTeamCard({team, isLeader, decided, pts}) {
 }
 
 function LeagueScreen({ctx}) {
-  const {user,orders,league,leads,nav,loadLeague,leagueLoading,doSaveLeagueScore,doSaveLeagueConfig,monthTargets,loadMonthlyTargets} = ctx;
+  const {user,orders,league,leads,nav,loadLeague,leagueLoading,doSaveLeagueScore,doSaveLeagueConfig,monthTargets,loadMonthlyTargets,mis} = ctx;
   const canEdit = hasManagerAccess(user);         // manager or admin
   const PTS = React.useMemo(()=>leaguePts(league),[league&&league.points]);   // effective (admin-adjustable) point weights
   const leadMap = React.useMemo(()=>leadContactMap(leads),[leads]);  // player → lead phones (for conversions)
@@ -5298,8 +5381,16 @@ function LeagueScreen({ctx}) {
   const [weekSel,setWeekSel]   = useState(null);  // selected weekly battle (idx); null → auto
   const [showRules,setShowRules] = useState(false);
   const [showAdmin,setShowAdmin] = useState(false);
-  useEffect(()=>{ loadLeague(); loadOrdersSafe(); try{ctx.loadLeads&&ctx.loadLeads({silent:true});}catch(e){} },[]);
-  function loadOrdersSafe(){ try{ ctx.loadOrders&&ctx.loadOrders({silent:true}); }catch(e){} }
+  // freshOps: orders + MIS re-fetched in this session — the weekly order
+  // deductions are only ever settled on fresh data, never on a stale cache.
+  const [freshOps,setFreshOps] = useState(false);
+  useEffect(()=>{
+    loadLeague(); try{ctx.loadLeads&&ctx.loadLeads({silent:true});}catch(e){}
+    Promise.all([
+      Promise.resolve(ctx.loadOrders?ctx.loadOrders({silent:true}):false).catch(()=>false),
+      Promise.resolve(ctx.loadMis?ctx.loadMis({silent:true}):null).catch(()=>null),
+    ]).then(([okO,okM])=>{ if(okO && okM) setFreshOps(true); });
+  },[]);
 
   const mo    = leagueMonth(monthOff);            // the monthly season (1st → last day)
   const mstd  = computeMonth(orders, league, mo, leadMap); // weekly battles + weeks-won + season caps
@@ -5372,6 +5463,46 @@ function LeagueScreen({ctx}) {
       return { name:pl.name, team:t, settled:st, live };
     })),[]);
   })();
+  // ── Weekly order-discipline deductions — settled once, on the week's last day ──
+  // Every finished week (from DISCIPLINE_FROM) with no stored result is worked
+  // out from fresh orders + MIS when a manager/admin opens the league, judged as
+  // of that week's last day, and saved. Orders still in breach are charged again
+  // the following week, until their status is updated.
+  const discTried = React.useRef({});
+  useEffect(()=>{
+    if(!canEdit || !league || !freshOps || !ctx.doSettleDisciplineWeeks) return;
+    const dw=(league.disciplineWeeks)||{}, todayISO=_todayISO(), out={};
+    for(let off=0; off>-36; off--){
+      const m=leagueMonth(off);
+      if(m.endISO<DISCIPLINE_FROM) break;
+      const teamsM=leagueTeamsFor(league, m.monthKey);
+      m.weeks.forEach(w=>{
+        if(w.startISO<DISCIPLINE_FROM || w.endISO>todayISO || dw[w.startISO] || discTried.current[w.startISO]) return;
+        const players={};
+        teamsM.forEach(t=>t.players.forEach(pl=>{
+          const d=leagueDisciplineOrders(orders, mis, pl.match, w.endISO);
+          players[pl.name]={ overdue:d.overdue.length, pendingWon:d.pendingWon.length, misOpen:d.misOpen.length, pts:disciplinePts(d, PTS) };
+        }));
+        out[w.startISO]={ players };
+      });
+    }
+    const keys=Object.keys(out); if(!keys.length) return;
+    keys.forEach(k=>discTried.current[k]=1);
+    ctx.doSettleDisciplineWeeks(out);
+  },[canEdit, league&&league.disciplineWeeks, freshOps, orders, mis]);
+  // The selected week's deductions: the stored ones once settled, otherwise a
+  // live preview (as of today, or the week's last day if that has passed).
+  const discSettled = ((league&&league.disciplineWeeks)||{})[selWeek.startISO] || null;
+  const discRows = (()=>{
+    if(selWeek.endISO<DISCIPLINE_FROM || selWeek.startISO>today) return null;
+    const asOf = selWeek.endISO<today ? selWeek.endISO : today;
+    return teams.reduce((acc,t)=>acc.concat(t.players.map(pl=>{
+      const live = leagueDisciplineOrders(orders, mis, pl.match, asOf);
+      const st = discSettled ? ((discSettled.players||{})[pl.name]||null) : null;
+      return { name:pl.name, team:t, live, livePts:disciplinePts(live, PTS), settled:st };
+    })),[]);
+  })();
+  const [discOpen,setDiscOpen] = useState('');
   const tgtPeople = ((((monthTargets||{})[mo.monthKey]||{}).data)||{}).people || [];
   const somW    = somWeightsOf(league);
   const somRows = isAdmin ? computeSOM(mstd.monthStd.teams.reduce((acc,t)=>acc.concat(t.players.map(p=>({...p,team:t}))),[]), tgtPeople, somW) : [];
@@ -5665,6 +5796,43 @@ function LeagueScreen({ctx}) {
           </div>
         )}
 
+        {/* Weekly order-discipline deductions — auto, settled on the week's last day */}
+        {discRows&&(
+          <div style={{padding:'4px 16px 8px'}}>
+            <div style={{fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:1.2,margin:'6px 2px'}}>ORDER DEDUCTIONS · WEEK {selWeek.idx}</div>
+            <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:10,overflow:'hidden'}}>
+              <div style={{fontSize:10,color:T.ink4,padding:'8px 12px',borderBottom:`1px solid ${T.line}`,lineHeight:1.5}}>
+                {discSettled?('✅ Applied '+String(discSettled.at||'').slice(0,10)+' — final for this week.'):(selWeek.endISO<=today?'⏳ Last day of the week — deductions are applied when a manager/admin opens the league.':'Live preview — deductions are applied on '+selWeek.range.split(' – ')[1]+' (last day of the week) for every order still open then.')} Each order: overdue delivery <b style={{color:T.bad}}>{-Math.abs(PTS.overdueDelivery)}</b> · Pending WON &gt; 24 h <b style={{color:T.bad}}>{-Math.abs(PTS.pendingWon)}</b> · MIS committed but not delivered / not fully paid <b style={{color:T.bad}}>{-Math.abs(PTS.misOpen)}</b>. Repeats every week until the order is updated.
+              </div>
+              {discRows.map(r=>{
+                const v = r.settled || { overdue:r.live.overdue.length, pendingWon:r.live.pendingWon.length, misOpen:r.live.misOpen.length, pts:r.livePts };
+                const open = discOpen===r.name;
+                const anyLive = DISCIPLINE_RULES.some(x=>r.live[x.key].length);
+                return (
+                  <div key={r.name} style={{borderBottom:`1px solid ${T.line}`}}>
+                    <div onClick={()=>anyLive&&setDiscOpen(open?'':r.name)} style={{display:'flex',alignItems:'center',gap:8,padding:'7px 12px',cursor:anyLive?'pointer':'default'}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:12,fontWeight:800,color:r.team.accent}}>{r.name}{anyLive&&<span style={{fontSize:9,color:T.ink4,fontWeight:700}}> {open?'▲':'▼'}</span>}</div>
+                        <div style={{fontSize:9.5,color:T.ink4,fontFamily:T.mono}}>{DISCIPLINE_RULES.map(x=>x.short+' '+(Number(v[x.key])||0)).join(' · ')}</div>
+                      </div>
+                      {r.settled ? <span style={{fontSize:12,fontWeight:900,fontFamily:T.mono,color:v.pts<0?T.bad:T.ok}}>{v.pts}</span>
+                        : <span style={{fontSize:10,fontWeight:700,color:v.pts<0?T.bad:T.ok}}>{v.pts<0?(v.pts+' if not fixed'):'all clear'}</span>}
+                    </div>
+                    {open&&(
+                      <div style={{padding:'0 12px 8px',fontSize:10,color:T.ink3,lineHeight:1.6}}>
+                        {r.settled&&<div style={{fontStyle:'italic',color:T.ink4}}>Orders still open right now:</div>}
+                        {DISCIPLINE_RULES.filter(x=>r.live[x.key].length).map(x=>(
+                          <div key={x.key}><b>{x.label}:</b> <span style={{fontFamily:T.mono}}>{r.live[x.key].join(', ')}</span></div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Awards — Orange & Purple caps are decided over the whole monthly run */}
         <div style={{padding:'4px 16px 8px'}}>
           <div style={{fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:1.2,margin:'6px 2px'}}>MONTHLY HONOURS · {mo.label.toUpperCase()}</div>
@@ -5780,6 +5948,10 @@ function LeagueScreen({ctx}) {
                 ['Lead converted',_ptsTxt(PTS.leadConv)+' when a lead you added books an order (auto, matched by phone)'],
                 ['Weekly sales target (auto)','your monthly target is split by days into each league week (e.g. 7 days of a 30-day month = 7/30 of it). On the last day of each week (7th, 14th, 21st, 28th & month end): invoiced in that week ≥ your weekly share → '+_ptsTxt(Math.abs(PTS.targetWeek))+', below it → '+_ptsTxt(-Math.abs(PTS.targetWeek))+'. Applied once, on that last day, from November 2026. No monthly target set → no points'],
                 ['Target ± points (manual)','the admin can also add or deduct extra points'],
+                ['Overdue delivery (auto)',_ptsTxt(-Math.abs(PTS.overdueDelivery))+' per order whose delivery date has passed and is not yet Scheduled / Delivered / Installation Done'],
+                ['Pending WON (auto)',_ptsTxt(-Math.abs(PTS.pendingWon))+' per order still without its WON / SO No more than 24 hours after booking'],
+                ['MIS committed, not closed (auto)',_ptsTxt(-Math.abs(PTS.misOpen))+' per order committed in MIS (from its commit date) that is not delivered or not fully paid'],
+                ['Order deductions repeat weekly','checked on the last day of every week (7th, 14th, 21st, 28th & month end) from 8 Nov 2026 and charged to the order\'s salesperson — again every week until the order\'s status is updated'],
                 ['Salesman of the Month','decided on points — see "How the Salesman of the Month is decided" below'],
                 ['Orange & Purple cap','decided over the whole month — top sales value & most orders'],
               ].map((r,i,arr)=>(
