@@ -6844,7 +6844,7 @@ const SCHEME_WED26 = {
     { slab:3, min:250000, max:349999,   pct:11, pkg:'Bed + Wardrobe (HF/HS) + Mattress + Side table / Dresser', need:['bed','wardrobe','mattress','sideOrDresser'], gift:'Set of 3 VIP Luggage',               giftValue:30000,  label:'₹2,50,000 – 3,49,999' },
     { slab:4, min:350000, max:499999,   pct:13, pkg:'Bed + Wardrobe (HF/HS) + Mattress + Dresser + Side table', need:['bed','wardrobe','mattress','dresser','side'], gift:'Travel Voucher (Benepik)',           giftValue:45000,  label:'₹3,50,000 – 4,99,999' },
     { slab:5, min:500000, max:849999,   pct:15, pkg:'Bed + Wardrobe (HF/HS) + Mattress + Dresser + Side table', need:['bed','wardrobe','mattress','dresser','side'], gift:'Gold Jewellery Voucher (Benepik)',   giftValue:75000,  label:'₹5,00,000 – 8,49,999' },
-    { slab:6, min:850000, max:Infinity, pct:20, pkg:'Bed + Wardrobe (HF/HS) + Mattress + Dresser + Side table + any other HF / Kreation', need:['bed','wardrobe','mattress','dresser','side','other'], gift:'Gold Jewellery + Travel vouchers (Benepik)', giftValue:100000, label:'₹8,50,000 & above' },
+    { slab:6, min:850000, max:Infinity, pct:20, pkg:'Bed + Wardrobe (HF/HS) + Mattress + Dresser + Side table + any other HF / Kreation', need:['bed','wardrobe','mattress','dresser','side','other'], gift:'₹1 lakh Gold Jewellery and / or Travel vouchers (Benepik)', giftValue:100000, label:'₹8,50,000 & above' },
   ],
   // Channel-partner contribution per gift (incl. GST) — manager / admin only.
   cpGifts: [['VIP Strolley (Set of 3)','Strolley VIP Set of 3 Ha BLUE','53121600SD01183','₹7,255'],
@@ -6874,22 +6874,39 @@ function wedNeedMet(need, has) {
   return need.every(n => n === 'wardrobeOrMattress' ? (has.wardrobe || has.mattress)
                        : n === 'sideOrDresser' ? (has.side || has.dresser) : !!has[n]);
 }
-// Grand Wedding Offer check for one order. Value = CPL + GST of HF + HS +
-// Mattress lines (Bestfest counts; sweetener, ageing / EOL lines do not).
+// Grand Wedding Offer check for one order (circular + HO clarification):
+//  • DISCOUNT — the wedding slab % applies to HF lines ONLY (HS & mattress keep
+//    their Q3 slab discounts). The slab is read on the total CPL + GST of the
+//    order's HF + HS + Mattress (Bestfest counts; sweetener / EOL / ageing do
+//    not), once the order is a wedding package (bed + wardrobe / mattress).
+//    e.g. ₹5 L of bed + wardrobe + mattress + dresser + sofa + dining → 15% on HF.
+//  • REWARD (gift) — both criteria must be met. The value counted is only the
+//    package pieces (bed, wardrobe, mattress, dresser, side table; slab 6 also
+//    counts the "any other HF / Kreation"). Package met for a higher slab but
+//    value short → the gift of the slab the value reaches.
+//    e.g. ₹2 L of bed + wardrobe + mattress + bedside table → slab 2, VIP Luggage.
 function wedAdvice(o, today) {
   const W = SCHEME_WED26;
-  const has = {}; let value = 0;
+  const has = {}; let total = 0, pkgValue = 0, otherValue = 0, hfValue = 0;
   (o.items || []).forEach(it => {
     const kind = schemeLineKind(it);
-    if (kind === 'SWEET' || kind === 'OTHER' || kind === 'FRESHCA' || it.ageing) return;
-    Object.assign(has, wedPieces(it, kind));
-    if (kind !== 'MATACC') value += schemeListValue(it);
+    if (kind === 'SWEET' || kind === 'OTHER' || kind === 'FRESHCA' || kind === 'MATACC' || it.ageing) return;
+    const p = wedPieces(it, kind), v = schemeListValue(it);
+    Object.assign(has, p);
+    total += v;
+    if (kind === 'HF') hfValue += v;
+    if (p.bed || p.wardrobe || p.mattress || p.dresser || p.side) pkgValue += v; else otherValue += v;
   });
-  value = Math.round(value);
-  const byValue = W.slabs.filter(s => value >= s.min).pop() || null;
-  // Both criteria: the highest slab whose value AND package are met.
-  const slab = W.slabs.filter(s => value >= s.min && wedNeedMet(s.need, has)).pop() || null;
-  return { live: wedLive(today), value, has, byValue, slab, standalone: !has.bed };
+  total = Math.round(total); pkgValue = Math.round(pkgValue);
+  const fullValue = Math.round(pkgValue + otherValue);
+  const valueSlab = v => W.slabs.filter(s => v >= s.min).pop() || null;
+  const pkgOk = wedNeedMet(W.slabs[0].need, has);
+  const disc = pkgOk ? valueSlab(total) : null;
+  const pkgSlab = W.slabs.filter(s => wedNeedMet(s.need, has)).pop() || null;
+  const rewardValue = s => s.slab === 6 ? fullValue : pkgValue;
+  const reward = W.slabs.filter(s => wedNeedMet(s.need, has) && rewardValue(s) >= s.min).pop() || null;
+  return { live: wedLive(today), total, pkgValue, fullValue, hfValue: Math.round(hfValue), has,
+           disc, pkgSlab, reward, standalone: !has.bed };
 }
 
 // Bank tie-up instant discounts (Pinelabs POS, automated). Min txn ₹15,000.
@@ -6998,6 +7015,9 @@ function schemeAdvice(o) {
   const H = hfScheme(today), ddo = H === SCHEME_DDO26;
   const hf  = hfValue > 0 ? { value: hfValue, basis: hfBasis, ...schemeSlab(H.hf, hfBasis) } : null;
   if (hf) { hf.no = hfSlabNo(hf); hf.noExch = hfBasis > HF_EXCHANGE_MAX; }
+  // Grand Wedding Offer: its slab % replaces the HF slab % on HF lines only.
+  const wed = wedAdvice(o, today);
+  if (hf && !ddo && wed.live && wed.disc) Object.assign(hf, { wed: true, pct: wed.disc.pct, no: wed.disc.slab, basis: wed.total, label: wed.disc.label });
   const hs  = hsValue > 0 ? { value: hsValue, ...schemeSlab(S.hs, hsValue) } : null;
   const hsDist = hsDistValue > 0 ? { value: hsDistValue, ...S.hs[0], idx: 0 } : null;
   const kx3 = kx3Value > 0 ? { value: kx3Value, ...schemeSlab(S.kx3, kx3Value) } : null;
@@ -7018,7 +7038,7 @@ function schemeAdvice(o) {
   const assured = (hf ? hf.value * hf.pct : 0) + (hs ? hs.value * hs.pct : 0) + (hsDist ? hsDist.value * hsDist.pct : 0) + (kx3 ? kx3.value * kx3.pct : 0);
   return {
     today, inPeriod: today >= S.from && today <= S.to, b2b: isB2B(o),
-    ddo, hfCode: H.code, coin: hf && ddo ? (hf.coin || '') : '',
+    ddo, hfCode: hf && hf.wed ? SCHEME_WED26.code : H.code, coin: hf && ddo ? (hf.coin || '') : '',
     hf, hs, hsDist, kx3, mattress, accessories,
     freshca: lines.filter(l => l.kind === 'FRESHCA').map(l => l.it.name),
     sweet: sweetLines.map(l => l.it.name),
@@ -7027,7 +7047,7 @@ function schemeAdvice(o) {
     assuredAmt: Math.round(assured / 100),
     scratch: !!(hf || hs || hsDist || kx3),
     txn, bank: bankOffersFor(txn, today), emi: emiOptionsFor(txn, today),
-    wed: wedAdvice(o, today),
+    wed,
   };
 }
 function bankOffersFor(v, today) {
@@ -7083,7 +7103,7 @@ function SchemeAdvisorPanel({ order }) {
   if (!items.length) return null;
   const S = SCHEME_Q326;
   const pct = n => n + '%';
-  const nOffers = [a.hf, a.hs, a.hsDist, a.kx3].filter(Boolean).length + a.mattress.length + (a.bank.length ? 1 : 0) + ((a.emi.card.length || a.emi.bajaj.length) ? 1 : 0) + (a.wed.slab ? 1 : 0);
+  const nOffers = [a.hf, a.hs, a.hsDist, a.kx3].filter(Boolean).length + a.mattress.length + (a.bank.length ? 1 : 0) + ((a.emi.card.length || a.emi.bajaj.length) ? 1 : 0) + (a.wed.reward ? 1 : 0);
   return (
     <div style={{ margin: '14px 14px 0', border: `1.5px dashed ${T.purple}`, borderRadius: 10, background: '#fff', overflow: 'hidden' }}>
       <div role="button" onClick={() => setOpen(v => !v)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', cursor: 'pointer', background: T.purpleSoft }}>
@@ -7101,13 +7121,13 @@ function SchemeAdvisorPanel({ order }) {
 
           {(a.hf || a.hs || a.hsDist || a.kx3) && (
             <SchemeBox tone="purple" title={`Furniture & storage · code ${a.hf ? a.hfCode : S.code}`}>
-              {a.hf && <div><b>Home Furniture</b> {_inr(a.hf.value)} → <b>Slab {a.hf.no}: {pct(a.hf.pct)}</b> + scratch card{a.coin ? <> + <b>🪙 {a.coin}</b></> : ''}<div style={{ fontSize: 10.5, color: T.ink4 }}>Slab value (HF + HS + Mattress, CPL + GST) {_inr(a.hf.basis)} · {a.hf.label}</div></div>}
+              {a.hf && <div><b>Home Furniture</b> {_inr(a.hf.value)} → <b>{a.hf.wed ? '💍 Wedding ' : ''}Slab {a.hf.no}: {pct(a.hf.pct)}</b> + scratch card{a.coin ? <> + <b>🪙 {a.coin}</b></> : ''}<div style={{ fontSize: 10.5, color: T.ink4 }}>Slab value (HF + HS + Mattress, CPL + GST) {_inr(a.hf.basis)} · {a.hf.label}</div></div>}
               {a.hs && <div style={{ marginTop: 4 }}><b>Home Storage</b> {_inr(a.hs.value)} → <b>Slab {a.hs.idx + 1}: {pct(a.hs.pct)}</b> + scratch card</div>}
               {a.hsDist && <div style={{ marginTop: 4 }}><b>Storwel Aura / Neo / Neolite / Storease</b> {_inr(a.hsDist.value)} → <b>1%</b> + scratch card (always HS slab 1)</div>}
               {a.kx3 && <div style={{ marginTop: 4 }}><b>Kreation X3</b> {_inr(a.kx3.value)} → <b>{pct(a.kx3.pct)}</b> + scratch card</div>}
               <div style={{ marginTop: 6, fontWeight: 800, color: T.purple }}>Assured discount ≈ {_inr(a.assuredAmt)} (on CPL + GST)</div>
               <div style={{ fontSize: 10.5, color: T.ink4, marginTop: 4 }}>
-                Exchange: +2% on HF {a.hf && a.hf.noExch ? <b>(not available — slab value above ₹1,49,999; free pick-up only)</b> : '(up to ₹1,49,999 slab value)'} · +1% on HS (all slabs).
+                {a.hf && a.hf.wed ? <><b>No exchange</b> under the Grand Wedding Offer. </> : <>Exchange: +2% on HF {a.hf && a.hf.noExch ? <b>(not available — slab value above ₹1,49,999; free pick-up only)</b> : '(up to ₹1,49,999 slab value)'} · +1% on HS (all slabs). </>}
                 Not valid on B2B, modular kitchen, SSD &amp; accessories. Cannot be clubbed with other offers except exchange.
               </div>
             </SchemeBox>
@@ -7123,19 +7143,29 @@ function SchemeAdvisorPanel({ order }) {
               </div>
             </SchemeBox>
           )}
-          {a.wed.live && a.wed.value > 0 && (a.hf || a.hs || a.hsDist || a.kx3 || a.mattress.length > 0) && (
-            <SchemeBox tone="ok" title={`💍 ${SCHEME_WED26.name} · ${SCHEME_WED26.code} · add-on · till ${_fmtD(SCHEME_WED26.to)}`}>
-              <div style={{ fontSize: 11, marginBottom: 3 }}>
+          {a.wed.live && a.wed.total > 0 && (a.hf || a.hs || a.hsDist || a.kx3 || a.mattress.length > 0) && (
+            <SchemeBox tone="ok" title={`💍 ${SCHEME_WED26.name} · ${SCHEME_WED26.code} · till ${_fmtD(SCHEME_WED26.to)}`}>
+              <div style={{ fontSize: 11, marginBottom: 4 }}>
                 Package on order: {[['bed','Bed'],['wardrobe','Wardrobe'],['mattress','Mattress'],['side','Side table'],['dresser','Dresser'],['other','Other HF']].map(([k, l]) => (a.wed.has[k] ? '✓ ' : '✗ ') + l).join(' · ')}
               </div>
-              {a.wed.slab
-                ? <>Slab {a.wed.slab.slab}: <b>{a.wed.slab.pct}% + scratch card</b> + assured <b>🎁 {a.wed.slab.gift}</b> (worth {_inr(a.wed.slab.giftValue)}) on package value {_inr(a.wed.value)}.</>
-                : a.wed.standalone ? <>Not eligible — a bed is mandatory. Standalone HS, mattress or HS + mattress gets no wedding gift.</>
-                : !a.wed.byValue ? <>No wedding gift yet — package value {_inr(a.wed.value)}; gifts start at ₹80,000 (Bed + Wardrobe / Mattress → Duffle Bag).</>
-                : <>Value {_inr(a.wed.value)} reaches slab {a.wed.byValue.slab}, but the package criterion is not met — needs {a.wed.byValue.pkg}.</>}
-              {a.wed.slab && a.wed.byValue && a.wed.byValue.slab > a.wed.slab.slab && <div style={{ fontSize: 11, color: T.warn, marginTop: 3 }}>Value reaches slab {a.wed.byValue.slab} ({a.wed.byValue.gift}) — add the missing pieces: {a.wed.byValue.pkg}.</div>}
+              {a.wed.standalone ? <>Not eligible — a bed is mandatory. Standalone HS, mattress or HS + mattress → Q326 scheme only.</>
+               : !a.wed.disc ? <>Not in the wedding offer yet — needs Bed + Wardrobe / Mattress worth ₹80,000+ (now {_inr(a.wed.total)}). Q326 applies.</>
+               : (<>
+                <div><b>1 · Discount (HF only):</b> slab {a.wed.disc.slab} on total {_inr(a.wed.total)} → <b>{a.wed.disc.pct}% + scratch card</b> on HF {_inr(a.wed.hfValue)}. HS &amp; mattress → Q3 slab discounts.</div>
+                <div style={{ marginTop: 4 }}><b>2 · Reward:</b> {a.wed.reward
+                  ? <>slab {a.wed.reward.slab} → <b>🎁 {a.wed.reward.gift}</b> (worth {_inr(a.wed.reward.giftValue)})</>
+                  : <>none — package items worth {_inr(a.wed.pkgValue)}; gifts start at ₹80,000.</>}</div>
+                <div style={{ fontSize: 10.5, color: T.ink4, marginTop: 2 }}>
+                  Reward value = package items only (bed, wardrobe, mattress, dresser, side table){a.wed.reward && a.wed.reward.slab === 6 ? ' + other HF / Kreation' : ''}: {_inr(a.wed.reward && a.wed.reward.slab === 6 ? a.wed.fullValue : a.wed.pkgValue)}
+                  {a.wed.pkgSlab ? ` · package qualifies up to slab ${a.wed.pkgSlab.slab}` : ''}.
+                </div>
+                {a.wed.reward && a.wed.pkgSlab && a.wed.pkgSlab.slab > a.wed.reward.slab && <div style={{ fontSize: 11, color: T.warn, marginTop: 3 }}>Package meets slab {a.wed.pkgSlab.slab}, but the package value is short of {_inr(a.wed.pkgSlab.min)} — gift is as per value (slab {a.wed.reward.slab}).</div>}
+                {a.wed.reward && a.wed.reward.slab < 6 && (() => { const nx = SCHEME_WED26.slabs[a.wed.reward.slab]; return a.wed.pkgValue >= nx.min ? <div style={{ fontSize: 11, color: T.warn, marginTop: 3 }}>Value reaches slab {nx.slab} ({nx.gift}) — add the missing pieces: {nx.pkg}.</div> : null; })()}
+                {a.wed.reward && a.wed.reward.slab === 6 && <div style={{ fontSize: 11, marginTop: 3 }}>Slab 6: customer chooses ₹1 lakh of jewellery voucher, travel voucher, or a combination.</div>}
+                {a.wed.reward && a.wed.reward.slab >= 4 && <div style={{ fontSize: 11, color: T.warn, marginTop: 3 }}>Benepik reward: HO checks eligibility after billing, on customer data in the prescribed format (format to be shared).</div>}
+              </>)}
               <div style={{ fontSize: 10.5, color: T.ink4, marginTop: 4 }}>
-                Package detected from item names — confirm at the counter. Both criteria must be met · Bestfest counts, sweetener / EOL / ageing do not · higher of slab vs scratch-card discount applies · scratch card 50% → gift still given, 100% → no gift · no exchange · not on WIX / bulk orders · discount code <b>{SCHEME_WED26.code}</b>.
+                Package detected from item names — confirm at the counter · higher of slab vs scratch-card discount applies · scratch card 50% → gift still given, 100% → no gift · no exchange · not on WIX / bulk orders · discount code <b>{SCHEME_WED26.code}</b>.
               </div>
             </SchemeBox>
           )}
@@ -7237,10 +7267,18 @@ function SchemeLibrary({ user }) {
             {wed ? <Pill tone="ok" size="sm">LIVE</Pill> : <Pill tone="bad" size="sm">{today < SCHEME_WED26.from ? 'NOT STARTED' : 'ENDED'}</Pill>}
           </div>
           <div style={{ fontSize: 11, color: T.ink3, marginBottom: 6 }}>{_fmtD(SCHEME_WED26.from)} – {_fmtD(SCHEME_WED26.to)} (or till stocks last) · Pan India except Tamil Nadu · add-on to the Q326 consumer scheme</div>
-          <SchemeTable head={['Slab', 'Package (criteria 1)', 'CPL + GST (criteria 2)', 'Assured discount', 'Assured gift', 'Gift value']}
+          <SchemeTable head={['Slab', 'Package (criteria 1)', 'CPL + GST (criteria 2)', 'Discount (HF only)', 'Assured gift (reward)', 'Gift value']}
             rows={SCHEME_WED26.slabs.map(s => [s.slab, s.pkg, s.label, s.pct + '% + scratch card', '🎁 ' + s.gift, _inr(s.giftValue)])} hi={wedHi} />
+          <SchemeBox tone="purple" title="How to apply — read before quoting">
+            <b>1.</b> The wedding slab discount is on <b>HF products only</b>. HS &amp; mattress get their Q3 slab discounts.<br />
+            <b>2.</b> Criteria 1 (package) <b>and</b> Criteria 2 (value) must both be met for the reward.<br />
+            <b>3.</b> Package met but value short of that slab → the reward is as per the <b>value</b> (MRP) slab.<br />
+            <span style={{ color: T.ink3 }}>Example 1: ₹2 L of Bed + Wardrobe + Mattress + Bedside table meets the slab 3 package but not its ₹2.5 L value → slab 2 reward, VIP Luggage.</span><br />
+            <span style={{ color: T.ink3 }}>Example 2: ₹5 L of Bed + Wardrobe + Mattress + Dresser + Sofa + Dining → 15% + scratch card (min 5%) on HF. For the reward count only Bed + Wardrobe + Mattress + Dresser value.</span><br />
+            <b>4.</b> Slab 6: the customer chooses ₹1 lakh of jewellery voucher, travel voucher, or a combination.<br />
+            <b>5.</b> Slabs 4–6 (Benepik rewards): HO checks eligibility after billing, on customer data in the prescribed format (format to be shared).
+          </SchemeBox>
           <SchemeBox tone="ok" title="Eligibility">
-            • The customer must meet <b>both</b> criteria — the package items and the value slab.<br />
             • Standalone HS, standalone mattress, or HS + mattress is <b>not</b> eligible — refer to the Q326 scheme.<br />
             • HS, HF &amp; mattress scheme discounts are considered for the Grand Wedding Offer.<br />
             • Value-criteria products can be from Bestfest, but <b>not</b> Sweetener, EOL or ageing-liquidation pre-approved discounts.<br />
