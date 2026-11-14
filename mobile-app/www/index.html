@@ -1994,6 +1994,27 @@ function warehouseTagOf(stock) {
   return labels.join(', ');
 }
 
+// 4S warehouse availability for an item, looked up by code in the OPS "4S STOCK"
+// ledger (ctx.fourSByCode). Checks the order code (altCode) and the original code.
+//   avail — the item is listed in 4S STOCK with available qty (or with no
+//           location tagged, which the order form also treats as "in 4S stock")
+//   qty   — total available across GD1 / GD2 / SHOWROOM
+//   label — chip count text: the qty, or "✓" when no location qty is tagged
+function fourSAvailOf(fourSByCode, it) {
+  const none = { avail:false, qty:0, label:'' };
+  if (!fourSByCode || !it) return none;
+  const keys = [it.altCode, it.code].map(c=>String(c||'').toUpperCase().trim()).filter(Boolean);
+  for (const k of keys) {
+    const r = fourSByCode[k];
+    if (!r) continue;
+    const st = Array.isArray(r.stock) ? r.stock : [];
+    if (!st.length) return { avail:true, qty:0, label:'✓' };
+    const qty = st.reduce((s,x)=>s+Math.max(0,Number(x.q)||0),0);
+    return qty>0 ? { avail:true, qty, label:qty } : none;
+  }
+  return none;
+}
+
 // Delivery-warehouse choices offered on the order form. ALL warehouses are
 // ALWAYS selectable (34S = ZBF34S, KB = ZBF11T, 4S) so the salesperson can
 // decide where to deliver from regardless of where the item is currently
@@ -8155,10 +8176,11 @@ function OfferZoneScreen({ctx}) {
             );
           }) : shown.map((it,fi)=>{
             const availStock = (it.stock||[]).filter(s=>s.q>0);
+          const fourS      = fourSAvailOf(ctx.fourSByCode, it);   // 4S STOCK sheet availability
             const stockTotal = availStock.reduce((s,x)=>s+x.q,0);
             const hasStock   = (it.stock||[]).length > 0;
             const mto        = isMTOItem(it);
-            const oos        = hasStock && stockTotal===0 && !mto;
+            const oos        = hasStock && stockTotal===0 && !mto && !fourS.avail;
             const base       = Number(it.cpl)||Number(it.mrp)||0;
             const mrpIncl    = base>0 ? roundRs(base*(1+GST_RATE)) : 0;
             const pctNum     = offerPctParts(it.sweetenerDiscount).total;
@@ -8179,8 +8201,8 @@ function OfferZoneScreen({ctx}) {
                     </div>
                     {it.extra && <div style={{fontSize:10,color:T.ink4,marginBottom:4}}>{it.extra}</div>}
                     <div style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap'}}>
-                      {availStock.length>0
-                        ? availStock.map(s=><StockChip key={s.b} branch={s.b} count={s.q} low={s.q<3}/>)
+                      {(availStock.length>0||fourS.avail)
+                        ? <>{availStock.map(s=><StockChip key={s.b} branch={s.b} count={s.q} low={s.q<3}/>)}{fourS.avail && <StockChip key="4S" branch="4S" count={fourS.label} low={fourS.qty>0&&fourS.qty<3}/>}</>
                         : <span style={{fontSize:10,color:T.ink4}}>{mto?'Made to order':(hasStock?'No stock available':'Sync stock to see availability')}</span>}
                     </div>
                   </div>
@@ -9243,10 +9265,11 @@ function SearchScreen({ctx}) {
         {shownItems.map((it,fi)=>{
           // Only warehouses that actually have availability are shown.
           const availStock = (it.stock||[]).filter(s=>s.q>0);
+          const fourS      = fourSAvailOf(ctx.fourSByCode, it);   // 4S STOCK sheet availability
           const stockTotal = availStock.reduce((s,x)=>s+x.q,0);
           const hasStock   = (it.stock||[]).length > 0;
           const mto        = isMTOItem(it);
-          const oos        = hasStock && stockTotal === 0 && !mto;
+          const oos        = hasStock && stockTotal === 0 && !mto && !fourS.avail;
           const cplBase = Number(it.cpl) || Number(it.mrp) || 0;
           // CPL shown to the user = list price (CPL) with 18% GST already added in.
           const cpl = cplBase > 0 ? roundRs(cplBase * (1 + GST_RATE)) : 0;
@@ -9275,8 +9298,8 @@ function SearchScreen({ctx}) {
                   {it.extra && <div style={{fontSize:10,color:T.ink4,marginBottom:4}}>{it.extra}</div>}
                   {/* Stock chips — only warehouses that have stock available */}
                   <div style={{display:'flex',alignItems:'center',gap:5,flexWrap:'wrap'}}>
-                    {availStock.length>0
-                      ? availStock.map(s=><StockChip key={s.b} branch={s.b} count={s.q} low={s.q<3}/>)
+                    {(availStock.length>0||fourS.avail)
+                      ? <>{availStock.map(s=><StockChip key={s.b} branch={s.b} count={s.q} low={s.q<3}/>)}{fourS.avail && <StockChip key="4S" branch="4S" count={fourS.label} low={fourS.qty>0&&fourS.qty<3}/>}</>
                       : <span style={{fontSize:10,color:T.ink4}}>{mto?'Made to order':(hasStock?'No stock available':'Sync stock to see availability')}</span>}
                   </div>
                 </div>
@@ -10001,7 +10024,8 @@ function OrderFormScreen({ctx, viewOnly}) {
                           style={{fontFamily:T.mono,fontSize:11,fontWeight:700,width:150,padding:'3px 6px',borderRadius:4,border:`1.5px solid ${it.code?T.line:T.bad}`,color:T.ink,background:'#fff'}}/>
                       : <span style={{fontFamily:T.mono,fontSize:10,color:T.ink4,fontWeight:600}}>{it.code}</span>}
                     {it.inStock>0 && <StockChip branch={it.branch||'STOCK'} count={it.inStock} low={it.inStock<3}/>}
-                    {(!it.inStock)&&<Pill tone="warn" size="sm">OOS</Pill>}
+                    {(()=>{const f4=fourSAvailOf(ctx.fourSByCode,it);return f4.avail?<StockChip branch="4S" count={f4.label} low={f4.qty>0&&f4.qty<3}/>:null;})()}
+                    {(!it.inStock)&&!fourSAvailOf(ctx.fourSByCode,it).avail&&<Pill tone="warn" size="sm">OOS</Pill>}
                     {it.discontinued&&<Pill tone="bad" size="sm">DISCONTINUED{it.discSince?' since '+it.discSince:''}</Pill>}
                   </div>
                   <div style={{fontSize:13,fontWeight:600,lineHeight:1.3}}>{it.name}</div>
