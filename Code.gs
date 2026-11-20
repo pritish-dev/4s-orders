@@ -287,6 +287,7 @@ function doPost(e) {
     var auth = _verifyToken(body.token);
     if (!auth) return _jsonPost(_authFail());
     body.by = auth.u;   // bind the actor to the verified token (no role spoofing via by:)
+    body.authName = auth.n || auth.u || '';   // signed-in user's display name (never trusted from the client)
     // READ-ONLY (DUMMY) accounts may view but never write. Every POST other than
     // login is a write, so refuse it. Checks the signed token's role AND the
     // live sheet role, so a user switched to DUMMY is blocked even on an old token.
@@ -4438,15 +4439,18 @@ function handleReviewOrderChange(body) {
 }
 
 // ─── GOLDEN CUSTOMERS ─────────────────────────────────────────────────────────
-// A salesperson can tap "Mark as Golden Customer" on any saved order. The
-// customer's name + contact number are appended to that order's salesperson's
-// own tab in the OPS spreadsheet, named "Golden customer list <SALES PERSON>"
-// (e.g. "Golden customer list SWATI"). The tab is created automatically, with a
-// header row, the first time a golden customer is added for that salesperson.
-// A phone is listed only once per salesperson (marking again is a no-op).
-//   SL NO | DATE | CUSTOMER NAME | CONTACT NO | ORDER NO | MARKED BY
+// From "Orders by Sales team" a salesperson can tap "⭐ Golden" on one of THEIR OWN
+// orders. The customer's name, contact number, birthday and marriage anniversary
+// (when we have them) are appended to that salesperson's own tab in the OPS
+// spreadsheet, named "Golden customer list <SALES PERSON>" (e.g. "Golden customer
+// list SWATI"). The tab is created automatically, with a header row, the first time
+// a golden customer is added for that salesperson. A phone is listed only once per
+// salesperson (marking again is a no-op).
+//
+// Ownership is enforced HERE, not just in the app: the order's SALES PERSON is read
+// from the CRM sheet and must match the signed-in user's name from their token.
 var GOLDEN_TAB_PREFIX = 'Golden customer list ';
-var GOLDEN_HEADERS    = ['SL NO', 'DATE', 'CUSTOMER NAME', 'CONTACT NO', 'ORDER NO', 'MARKED BY'];
+var GOLDEN_HEADERS    = ['SL NO', 'DATE', 'CUSTOMER NAME', 'CONTACT NO', 'BIRTHDAY', 'ANNIVERSARY', 'ORDER NO', 'MARKED BY'];
 
 function _goldenSheetName(person) {
   // Sheet names can't contain : \ / ? * [ ] and are capped at 100 chars.
@@ -4454,8 +4458,60 @@ function _goldenSheetName(person) {
   return (GOLDEN_TAB_PREFIX + p).slice(0, 100);
 }
 
+// Loose salesperson-name match: same name ignoring case/spacing, or one name is
+// contained in the other ("SWATI" vs "Swati Das"), or the first names agree.
+function _sameSalesName(a, b) {
+  a = String(a || '').trim().toUpperCase().replace(/\s+/g, ' ');
+  b = String(b || '').trim().toUpperCase().replace(/\s+/g, ' ');
+  if (!a || !b) return false;
+  if (a === b || a.indexOf(b) >= 0 || b.indexOf(a) >= 0) return true;
+  return a.split(' ')[0] === b.split(' ')[0];
+}
+
+// A DOB / anniversary cell as a short "DD/MM" string (the year is never stored).
+function _goldenDayMonth(v) {
+  if (v instanceof Date && !isNaN(v.getTime())) {
+    return Utilities.formatDate(v, Session.getScriptTimeZone() || 'Asia/Kolkata', 'dd/MM');
+  }
+  return String(v == null ? '' : v).trim();
+}
+
+// Read an order (by ORDER NO) from the CRM sheet: its salesperson, customer and
+// phone, plus the first birthday / anniversary recorded on ANY order for that phone.
+function _goldenOrderInfo(orderNo) {
+  var sh = _openCRMSheet();
+  var C = _crmCols(sh);
+  var cNo = C.colOf(CRM_H.ORDER_NO), cSales = C.colOf(CRM_H.SALES),
+      cCust = C.colOf(CRM_H.CUSTOMER), cPhone = C.colOf(CRM_H.PHONE),
+      cDob = C.colOf(['DATE OF BIRTH', 'DOB']),
+      cAnn = C.colOf(['MARRIAGE ANNIVERSARY', 'MARRIAGE ANNIVERSARY DATE', 'ANNIVERSARY']);
+  if (cNo < 0 || sh.getLastRow() < 2) return null;
+  var vals = sh.getRange(2, 1, sh.getLastRow() - 1, C.header.length).getValues();
+  var info = null, key = String(orderNo).trim().toUpperCase();
+  for (var i = 0; i < vals.length && !info; i++) {
+    if (String(vals[i][cNo] || '').trim().toUpperCase() === key) {
+      info = {
+        salesExec: cSales >= 0 ? String(vals[i][cSales] || '').trim() : '',
+        customer:  cCust  >= 0 ? String(vals[i][cCust]  || '').trim() : '',
+        phone:     cPhone >= 0 ? _offerPhoneKey(vals[i][cPhone]) : '',
+        dob: '', anniversary: ''
+      };
+    }
+  }
+  if (!info) return null;
+  if (info.phone && cPhone >= 0) {
+    for (var j = 0; j < vals.length; j++) {
+      if (_offerPhoneKey(vals[j][cPhone]) !== info.phone) continue;
+      if (!info.dob && cDob >= 0) info.dob = _goldenDayMonth(vals[j][cDob]);
+      if (!info.anniversary && cAnn >= 0) info.anniversary = _goldenDayMonth(vals[j][cAnn]);
+      if (info.dob && info.anniversary) break;
+    }
+  }
+  return info;
+}
+
 // GET: every golden customer across all salespersons' tabs.
-// Shape: { ok:true, golden:[{ phone, customer, salesExec, orderNo, date, by }] }
+// Shape: { ok:true, golden:[{ phone, customer, salesExec, dob, anniversary, orderNo, date, by }] }
 function handleGoldenCustomers() {
   try {
     var ss = _openOPS();
@@ -4468,19 +4524,28 @@ function handleGoldenCustomers() {
       if (name.toLowerCase().indexOf(prefLc) !== 0) return;
       var person = name.slice(GOLDEN_TAB_PREFIX.length).trim();
       if (sh.getLastRow() < 2) return;
-      var vals = sh.getRange(2, 1, sh.getLastRow() - 1, GOLDEN_HEADERS.length).getValues();
+      // Map columns by header so a hand-edited tab still reads correctly.
+      var ncol = Math.max(sh.getLastColumn(), GOLDEN_HEADERS.length);
+      var hdr = sh.getRange(1, 1, 1, ncol).getValues()[0].map(function (h) { return String(h || '').trim().toUpperCase(); });
+      function col(names, fb) { for (var k = 0; k < names.length; k++) { var ix = hdr.indexOf(names[k]); if (ix >= 0) return ix; } return fb; }
+      var cD = col(['DATE'], 1), cC = col(['CUSTOMER NAME'], 2), cP = col(['CONTACT NO', 'CONTACT NUMBER'], 3),
+          cB = col(['BIRTHDAY', 'DATE OF BIRTH', 'DOB'], 4), cA = col(['ANNIVERSARY', 'MARRIAGE ANNIVERSARY'], 5),
+          cO = col(['ORDER NO'], 6), cM = col(['MARKED BY'], 7);
+      var vals = sh.getRange(2, 1, sh.getLastRow() - 1, ncol).getValues();
       for (var i = 0; i < vals.length; i++) {
         var r = vals[i];
-        var phone = _offerPhoneKey(r[3]);
+        var phone = _offerPhoneKey(r[cP]);
         if (!phone) continue;
-        var dv = r[1];
+        var dv = r[cD];
         golden.push({
           phone: phone,
-          customer: String(r[2] == null ? '' : r[2]).trim(),
+          customer: String(r[cC] == null ? '' : r[cC]).trim(),
           salesExec: person,
-          orderNo: String(r[4] == null ? '' : r[4]).trim(),
+          dob: _goldenDayMonth(r[cB]),
+          anniversary: _goldenDayMonth(r[cA]),
+          orderNo: String(r[cO] == null ? '' : r[cO]).trim(),
           date: (dv instanceof Date && !isNaN(dv.getTime())) ? Utilities.formatDate(dv, tz, 'yyyy-MM-dd') : String(dv == null ? '' : dv).trim(),
-          by: String(r[5] == null ? '' : r[5]).trim()
+          by: String(r[cM] == null ? '' : r[cM]).trim()
         });
       }
     });
@@ -4492,16 +4557,30 @@ function handleGoldenCustomers() {
 
 // POST: add an order's customer to its salesperson's golden list, creating the
 // "Golden customer list <SALES PERSON>" tab on first use. Idempotent per phone.
-// body: { customer, phone, salesExec, orderNo?, byName? }
+// Only the salesperson the order belongs to may do this.
+// body: { orderNo, customer?, phone?, salesExec?, dob?, anniversary? }
+//       + authName (signed-in user's name, bound from the token in doPost)
 function handleMarkGoldenCustomer(body) {
-  var phone    = _offerPhoneKey(body && body.phone);
-  var customer = String((body && body.customer) || '').trim();
-  var person   = String((body && body.salesExec) || '').trim();
-  var orderNo  = String((body && body.orderNo) || '').trim();
-  var by       = String((body && (body.byName || body.by)) || '').trim();
+  var orderNo = String((body && body.orderNo) || '').trim();
+  var me      = String((body && body.authName) || '').trim();
+  if (!orderNo) return { ok: false, error: 'Save the order first.' };
+  if (!me) return { ok: false, error: 'Please sign in again.' };
+
+  var info = null;
+  try { info = _goldenOrderInfo(orderNo); } catch (e) { info = null; }
+  // Fall back to what the app sent if the CRM row can't be read right now.
+  var person   = (info && info.salesExec) || String(body.salesExec || '').trim();
+  var customer = (info && info.customer)  || String(body.customer  || '').trim();
+  var phone    = (info && info.phone)     || _offerPhoneKey(body.phone);
+  var dob      = String(body.dob || '').trim()         || (info && info.dob) || '';
+  var anniv    = String(body.anniversary || '').trim() || (info && info.anniversary) || '';
+
+  if (!person) return { ok: false, error: 'This order has no sales person.' };
+  if (!_sameSalesName(person, me)) {
+    return { ok: false, error: 'Only ' + person + ' can mark this customer as Golden — it is their order.' };
+  }
   if (phone.length !== 10) return { ok: false, error: 'This order has no valid 10-digit contact number.' };
   if (!customer) return { ok: false, error: 'This order has no customer name.' };
-  if (!person) return { ok: false, error: 'This order has no sales person.' };
 
   var lock = LockService.getScriptLock();
   var haveLock = false;
@@ -4529,10 +4608,12 @@ function handleMarkGoldenCustomer(body) {
     }
     var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
     var dateStr = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
-    sh.appendRow([Math.max(1, last), dateStr, customer, phone, orderNo, by]);
-    // Keep the number as text so a leading digit pattern never turns into a float.
-    try { sh.getRange(sh.getLastRow(), 4).setNumberFormat('@').setValue(phone); } catch (e) {}
-    return { ok: true, already: false, created: created, sheet: name, salesExec: person, phone: phone };
+    var row = last + 1;
+    // Phone / birthday / anniversary as plain text so Sheets never reinterprets them.
+    sh.getRange(row, 1, 1, GOLDEN_HEADERS.length).setNumberFormat('@')
+      .setValues([[String(Math.max(1, last)), dateStr, customer, phone, dob, anniv, orderNo, me]]);
+    return { ok: true, already: false, created: created, sheet: name, salesExec: person, phone: phone,
+             customer: customer, dob: dob, anniversary: anniv };
   } catch (e) {
     return { ok: false, error: e.message };
   } finally {

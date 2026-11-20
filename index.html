@@ -3661,7 +3661,13 @@ function App() {
   // Golden customers — normalised phone → { salesExec, customer }. Read from every
   // "Golden customer list <SALES PERSON>" tab in the OPS sheet; a customer is
   // added to their order's salesperson's tab via the ⭐ button on the order.
-  const [goldenCustomers, setGoldenCustomers] = useState(() => { try { return JSON.parse(localStorage.getItem('4s_golden')||'{}')||{}; } catch { return {}; } });
+  const [goldenList, setGoldenList] = useState(() => { try { const v = JSON.parse(localStorage.getItem('4s_golden_list')||'[]'); return Array.isArray(v) ? v : []; } catch { return []; } });
+  const [goldenLoading, setGoldenLoading] = useState(false);
+  const goldenCustomers = React.useMemo(() => {
+    const m = {};
+    (goldenList||[]).forEach(g => { const ph = _normPhone(g && g.phone); if (ph) m[ph] = g; });
+    return m;
+  }, [goldenList]);
 
   const showToast = (msg,type='ok') => setToast({msg,type});
   // "New order placed" celebration overlay — set by doSaveOrder on a first-time
@@ -3764,7 +3770,7 @@ function App() {
     loadLeads({ silent: true });
     loadContactTags({ silent: true });
     loadOffersSent();
-    loadGoldenCustomers();
+    loadGoldenCustomers({ silent: true });
     loadChangeRequests();
   }, [user]);
 
@@ -3787,7 +3793,7 @@ function App() {
       loadMis({ silent: true });
       loadOrders();
       loadOffersSent();
-      loadGoldenCustomers();
+      loadGoldenCustomers({ silent: true });
       loadChangeRequests();
       loadPriceListItems(false, true)   // skip local cache, use shared server cache
         .then(pi => {
@@ -4232,48 +4238,55 @@ function App() {
   }
 
   // ── Golden customers ───────────────────────────────────────────────────────
-  // Pull every salesperson's golden list and merge into local state (never drops
-  // a locally-known mark, so an optimistic mark survives a slow sync).
-  async function loadGoldenCustomers() {
+  // Every salesperson's "Golden customer list <SALES PERSON>" tab, as one list.
+  // Merged with the local list so an optimistic mark survives a slow sync.
+  async function loadGoldenCustomers(opts) {
+    if (!(opts && opts.silent)) setGoldenLoading(true);
     try {
       const res = await apiGet('goldenCustomers', {}, 30000, 2);
       if (res && res.ok && Array.isArray(res.golden)) {
-        setGoldenCustomers(prev => {
-          const merged = { ...(prev||{}) };
-          res.golden.forEach(g => {
-            const ph = _normPhone(g && g.phone); if (!ph) return;
-            merged[ph] = { salesExec: (g && g.salesExec) || '', customer: (g && g.customer) || '' };
-          });
-          try { localStorage.setItem('4s_golden', JSON.stringify(merged)); } catch(e) {}
+        setGoldenList(prev => {
+          const key = g => _normPhone(g && g.phone) + '|' + String((g && g.salesExec) || '').toUpperCase();
+          const seen = new Set(res.golden.map(key));
+          const merged = res.golden.concat((prev||[]).filter(g => g && g._local && !seen.has(key(g))));
+          try { localStorage.setItem('4s_golden_list', JSON.stringify(merged)); } catch(e) {}
           return merged;
         });
         return true;
       }
     } catch(e) { /* offline / backend not deployed yet — keep the local cache */ }
+    finally { if (!(opts && opts.silent)) setGoldenLoading(false); }
     return false;
   }
-  // Mark an order's customer as a Golden Customer: the backend appends their name
-  // + contact number to "Golden customer list <SALES PERSON>" for the order's
-  // salesperson, creating that tab the first time.
+  // Mark an order's customer as a Golden Customer. Only the salesperson the order
+  // belongs to may do it (re-checked on the backend against the signed-in user).
+  // Their birthday / anniversary is taken from this order, else from any other
+  // order we hold for the same phone number.
   async function doMarkGoldenCustomer(o) {
     const phone = _normPhone(o && o.phone);
-    const salesExec = String((o && o.salesExec) || user?.name || '').trim();
+    const salesExec = String((o && o.salesExec) || '').trim();
     if (!o || !o.no) { showToast('Save the order first','warn'); return false; }
+    if (!isMyOrder(o, user)) { showToast('Only ' + (salesExec || 'the order’s sales person') + ' can mark this customer as Golden','bad'); return false; }
     if (phone.length !== 10) { showToast('This order has no valid 10-digit contact number','bad'); return false; }
     if (!String(o.customer||'').trim()) { showToast('This order has no customer name','bad'); return false; }
-    if (!salesExec) { showToast('This order has no sales person','bad'); return false; }
+    const same = [o].concat((orders||[]).filter(x => x && x !== o && _normPhone(x.phone) === phone));
+    const dob = (same.find(x => String(x.dob||'').trim()) || {}).dob || '';
+    const anniversary = (same.find(x => String(x.anniversary||'').trim()) || {}).anniversary || '';
     setLoading(true);
     try {
-      const res = await apiPost({ action:'markGoldenCustomer', customer:String(o.customer).trim(), phone, salesExec,
-        orderNo:o.no||'', byName:user?.name||user?.username||'' });
+      const res = await apiPost({ action:'markGoldenCustomer', orderNo:o.no, customer:String(o.customer).trim(), phone, salesExec,
+        dob: String(dob).trim(), anniversary: String(anniversary).trim() });
       if (res && res.ok) {
-        const who = res.salesExec || salesExec;
-        setGoldenCustomers(prev => {
-          const next = { ...(prev||{}), [phone]: { salesExec: who, customer: String(o.customer).trim() } };
-          try { localStorage.setItem('4s_golden', JSON.stringify(next)); } catch(e) {}
+        const rec = { phone, customer: res.customer || String(o.customer).trim(), salesExec: String(res.salesExec || salesExec).toUpperCase(),
+          dob: res.dob != null ? res.dob : dob, anniversary: res.anniversary != null ? res.anniversary : anniversary,
+          orderNo: o.no, date: new Date().toISOString().slice(0,10), by: user?.name || '', _local: true };
+        if (!res.already) setGoldenList(prev => {
+          const next = (prev||[]).concat([rec]);
+          try { localStorage.setItem('4s_golden_list', JSON.stringify(next)); } catch(e) {}
           return next;
         });
-        showToast(res.already ? 'Already in ' + (res.sheet || 'the golden list') : '⭐ Added to ' + (res.sheet || ('Golden customer list ' + who)));
+        showToast(res.already ? 'Already in ' + (res.sheet || 'the golden list') : '⭐ Added to ' + (res.sheet || ('Golden customer list ' + rec.salesExec)));
+        if (res.already) loadGoldenCustomers({ silent:true });
         return true;
       }
       showToast((res && res.error) || 'Could not mark as Golden Customer','bad'); return false;
@@ -4658,7 +4671,7 @@ function App() {
     leads, leadsLoading, loadLeads, doAddLead, doEditLead, doDeleteLead,
     gmbPhones, ldmPhones, contactTagsLoading, loadContactTags,
     offersSent, loadOffersSent, doMarkOfferSent, doResetOffersSent,
-    goldenCustomers, loadGoldenCustomers, doMarkGoldenCustomer,
+    goldenList, goldenCustomers, goldenLoading, loadGoldenCustomers, doMarkGoldenCustomer,
     offerEndDate, doSaveOfferConfig, doFetchSweetenerEmail,
     changeRequests, loadChangeRequests, doRequestOrderChange, doReviewOrderChange };
 
@@ -4684,6 +4697,7 @@ function App() {
     league:  <LeagueScreen ctx={ctx}/>,
     targets: <MonthlyTargetScreen ctx={ctx}/>,
     leads:   <LeadsScreen ctx={ctx}/>,
+    golden:  <GoldenCustomersScreen ctx={ctx}/>,
     mycustomers: <MyCustomerScreen ctx={ctx}/>,
     offerzone: <OfferZoneScreen ctx={ctx}/>,
     approvals: <ApprovalsScreen ctx={ctx}/>,
@@ -6194,6 +6208,23 @@ function LeagueScreen({ctx}) {
 // own tab), and flags leads that have converted into an order (matched by phone),
 // which earn +6 points in the 4S Premier League.
 const LEADS_PEOPLE = ['SWATI','ARCHITA','ADITYA','BISWAJIT','SAROJ','PRITISH'];
+// Same salesperson? Ignores case/spacing; "SWATI" matches "Swati Das" (one name
+// contains the other) and first names that agree also match. Mirrors
+// _sameSalesName() in the backend, which re-checks Golden Customer marks.
+function sameSalesName(a, b) {
+  a = String(a||'').trim().toUpperCase().replace(/\s+/g,' ');
+  b = String(b||'').trim().toUpperCase().replace(/\s+/g,' ');
+  if (!a || !b) return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+  return a.split(' ')[0] === b.split(' ')[0];
+}
+// An order belongs to the signed-in user when its sales person is them.
+function isMyOrder(o, user) { return !!o && sameSalesName(o.salesExec, user && user.name); }
+// Pretty "12 Mar" from a stored day-month value ('' when unknown).
+function prettyDayMonth(v) {
+  const p = parseDayMonth(v); if (!p.d || !p.m) return '';
+  return p.d + ' ' + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][Number(p.m)-1];
+}
 
 function AddLeadModal({person, canPickPerson, lead, prefill, onCancel, onSave}){
   const editing = !!lead;
@@ -6420,6 +6451,98 @@ function MyCustomerScreen({ctx}){
         <div style={{height:28}}/>
       </div>
       <BottomNav screen="home" nav={nav}/>
+    </div>
+  );
+}
+
+// ─── Golden Customers ───────────────────────────────────────
+// Every salesperson's golden list (the "Golden customer list <SALES PERSON>" tabs),
+// shown salesperson-wise just like Leads. Customers are added from Orders → Orders
+// by Sales team → "⭐ Golden" on the salesperson's own order.
+function GoldenCustomersScreen({ctx}){
+  const {user,nav,goldenList,goldenLoading,loadGoldenCustomers} = ctx;
+  const myName = String(user?.name||'').trim().toUpperCase();
+  const me = LEADS_PEOPLE.find(p=>myName.includes(p)) || (LEADS_PEOPLE.indexOf(myName)>=0?myName:'');
+  // Salesperson tabs: the usual team, plus anyone else who has a golden tab.
+  const people = React.useMemo(()=>{
+    const out = LEADS_PEOPLE.slice();
+    (goldenList||[]).forEach(g=>{ const sp=String(g&&g.salesExec||'').trim().toUpperCase(); if(sp && !out.some(p=>sameSalesName(p,sp))) out.push(sp); });
+    return out;
+  },[goldenList]);
+  const [sel,setSel] = useState(me || LEADS_PEOPLE[0]);
+  const [q,setQ] = useState('');
+  useEffect(()=>{ loadGoldenCustomers(); },[]);
+  const rowsFor = p => (goldenList||[]).filter(g=>sameSalesName(g&&g.salesExec, p));
+  const all = rowsFor(sel).slice().sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
+  const ql = q.trim().toLowerCase();
+  const rows = ql ? all.filter(g=>String(g.customer||'').toLowerCase().includes(ql) || String(g.phone||'').includes(ql.replace(/\D/g,'')||'~')) : all;
+  const withDob = all.filter(g=>prettyDayMonth(g.dob)).length;
+  const withAnn = all.filter(g=>prettyDayMonth(g.anniversary)).length;
+  return (
+    <div className="screen">
+      <div style={{flexShrink:0,background:'linear-gradient(120deg,#b8860b 0%,#7a5b00 100%)',color:'#fff',padding:'12px 16px 14px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <button onClick={()=>nav('home')} title="Home" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{Icon.home('#fff',18)}</button>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,opacity:.85}}>⭐ GOLDEN CUSTOMER LIST</div>
+            <div style={{fontSize:20,fontWeight:900,letterSpacing:-0.5}}>Golden Customers</div>
+          </div>
+          <button onClick={()=>loadGoldenCustomers()} title="Refresh" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{goldenLoading?<Spinner size={14}/>:Icon.refresh('#fff',16)}</button>
+        </div>
+        <div style={{display:'flex',gap:6,overflowX:'auto',marginTop:12,paddingBottom:2}}>
+          {people.map(nm=>{
+            const n=rowsFor(nm).length; const active=sel===nm;
+            return (
+              <button key={nm} onClick={()=>setSel(nm)} style={{flexShrink:0,padding:'7px 12px',borderRadius:99,border:`1.5px solid ${active?'#fff':'rgba(255,255,255,.3)'}`,background:active?'#fff':'rgba(255,255,255,.08)',color:active?'#7a5b00':'#fff',fontSize:12,fontWeight:800,cursor:'pointer',display:'inline-flex',alignItems:'center',gap:6}}>
+                {nm}{me===nm?' ·you':''}<span style={{fontFamily:T.mono,fontSize:10,fontWeight:800,background:active?'rgba(122,91,0,.12)':'rgba(255,255,255,.18)',borderRadius:99,padding:'1px 6px'}}>{n}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div className="scroll" style={{background:T.paper}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,padding:'12px 16px 4px'}}>
+          {[['GOLDEN',all.length],['🎂 BIRTHDAY',withDob],['💍 ANNIV.',withAnn]].map(([l,v])=>(
+            <div key={l} style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'10px 12px'}}>
+              <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>{l}</div>
+              <div style={{fontSize:22,fontWeight:800,color:T.ink,lineHeight:1.1,marginTop:2}}>{v}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{padding:'8px 16px 4px'}}>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search name or number" style={{width:'100%',boxSizing:'border-box',height:40,borderRadius:8,border:`1px solid ${T.line}`,padding:'0 12px',fontSize:14,fontFamily:T.sans,background:'#fff'}}/>
+        </div>
+        <div style={{padding:'4px 16px 8px',fontSize:11,color:T.ink4,lineHeight:1.5}}>
+          To add one: Orders → Orders by Sales team → tap <b>⭐ Golden</b> on your own order.
+        </div>
+        {rows.map((g,i)=>{
+          const dob=prettyDayMonth(g.dob), ann=prettyDayMonth(g.anniversary);
+          return (
+            <div key={g.phone+'|'+i} style={{margin:'0 16px 8px',background:'#fff',border:`1px solid ${T.line}`,borderLeft:'4px solid #d4a017',borderRadius:10,padding:'11px 12px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:8}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:14,fontWeight:800,color:T.ink}}>⭐ {g.customer||'—'}</div>
+                  <div style={{fontSize:12,fontFamily:T.mono,color:T.ink2,marginTop:2}}>{g.phone}</div>
+                </div>
+                <a href={'tel:'+g.phone} onClick={e=>e.stopPropagation()} title="Call" style={{width:34,height:32,borderRadius:6,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',textDecoration:'none',fontSize:15}}>📞</a>
+                <a href={'https://wa.me/91'+g.phone} target="_blank" rel="noopener" title="WhatsApp" style={{width:34,height:32,borderRadius:6,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',textDecoration:'none'}}>{Icon.whatsapp?Icon.whatsapp('#25d366',16):'💬'}</a>
+              </div>
+              <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:8}}>
+                <Pill tone={dob?'ok':'neutral'} size="sm">🎂 {dob||'Birthday —'}</Pill>
+                <Pill tone={ann?'ok':'neutral'} size="sm">💍 {ann||'Anniversary —'}</Pill>
+              </div>
+              <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:6}}>{[g.orderNo, g.date?('added '+prettyDate(g.date)):''].filter(Boolean).join(' · ')}</div>
+            </div>
+          );
+        })}
+        {rows.length===0 && (
+          <div style={{padding:'36px 24px',textAlign:'center'}}>
+            <div style={{fontSize:30,marginBottom:8}}>⭐</div>
+            <div style={{fontSize:14,fontWeight:700,color:T.ink2,marginBottom:4}}>{ql?'No match':'No golden customers yet for '+sel}</div>
+          </div>
+        )}
+        <div style={{height:24}}/>
+      </div>
     </div>
   );
 }
@@ -8261,6 +8384,7 @@ function HomeScreen({ctx}) {
     { key:'reports', label:'Sales Summary',        sub:'Month-to-date report',      emoji:'📊', bg:'linear-gradient(135deg,#0e7490 0%,#155e75 100%)', onClick:()=>nav('reports') },
     { key:'league',  label:'4S Premier League',    sub:'Live scoreboard',           emoji:'🏆', bg:'linear-gradient(135deg,#1e3a8a 0%,#7a1420 100%)', onClick:()=>nav('league') },
     { key:'targets', label:'Monthly Target',       sub:'Target vs invoiced',        emoji:'🎯', bg:'linear-gradient(135deg,#15803d 0%,#14532d 100%)', onClick:()=>nav('targets') },
+    { key:'golden',  label:'Golden Customers',     sub:(ctx.goldenList||[]).length+((ctx.goldenList||[]).length===1?' customer':' customers'), emoji:'⭐', bg:'linear-gradient(135deg,#b8860b 0%,#7a5b00 100%)', onClick:()=>nav('golden') },
     { key:'leads',   label:'Leads',                sub:leadTotal+(leadTotal===1?' lead':' leads'), emoji:'🎯', bg:'linear-gradient(135deg,#b45309 0%,#92400e 100%)', onClick:()=>nav('leads') },
     { key:'cust',    label:'My Customers',         sub:custToday>0?(custToday+' today'):(custEvs.length+' this month'), emoji:'🎉', bg:'linear-gradient(135deg,#be185d 0%,#9d174d 100%)', onClick:()=>nav('mycustomers') },
     { key:'collect', label:'Outstanding Payments', sub:dueTotal>0?('₹'+Math.round(dueTotal).toLocaleString('en-IN')+' to collect'):'All clear', emoji:'💰', bg:'linear-gradient(135deg,#9f1239 0%,#7a1420 100%)', onClick:()=>nav('collect') },
@@ -9906,26 +10030,6 @@ function OrderFormScreen({ctx, viewOnly}) {
         );})}
       </div>}
       <div className="scroll">
-        {/* ⭐ Golden Customer — available on any saved order (also in view-only
-            mode, so it sits outside the disabled fieldset). Adds the customer's
-            name + number to "Golden customer list <SALES PERSON>". */}
-        {!!o.no && (()=>{
-          const g = (ctx.goldenCustomers||{})[_normPhone(o.phone)];
-          const sp = String(o.salesExec||'').trim();
-          return (
-            <div style={{display:'flex',alignItems:'center',gap:10,padding:'9px 14px',background:g?'#fff8e1':'#fff',borderBottom:`1px solid ${g?'#e8c96a':T.line}`}}>
-              <span style={{fontSize:18}}>⭐</span>
-              <div style={{flex:1,minWidth:0,fontSize:12,color:T.ink2,lineHeight:1.4}}>
-                {g ? <><b style={{color:'#8a6d00'}}>Golden Customer</b> · in {(g.salesExec||sp||'').toUpperCase()}'s golden list</>
-                   : <>Mark <b>{o.customer||'this customer'}</b> as a Golden Customer{sp?<> for <b>{sp}</b></>:null}</>}
-              </div>
-              {!g && <button disabled={ctx.loading} onClick={()=>{ if(window.confirm('Mark '+(o.customer||'this customer')+' ('+(o.phone||'')+') as a Golden Customer'+(sp?' in '+sp+"'s list":'')+'?')) ctx.doMarkGoldenCustomer(o); }}
-                style={{flexShrink:0,padding:'7px 12px',borderRadius:8,border:'1px solid #c9a227',background:'linear-gradient(180deg,#f7d774,#e3b43c)',color:'#4a3a00',fontSize:12,fontWeight:800,cursor:ctx.loading?'default':'pointer',whiteSpace:'nowrap'}}>
-                Mark Golden
-              </button>}
-            </div>
-          );
-        })()}
         <fieldset disabled={viewOnly} style={{border:0,margin:0,padding:0,minWidth:0,...(viewOnly?{pointerEvents:'none'}:{})}}>
         {o.manualOrder && (
           <>
@@ -11663,7 +11767,9 @@ function HistoryScreen({ctx}) {
 
   // A single order row — reused by the ledger list and the Order-Status category
   // list. Shows the delivery date and the outstanding balance (or "Fully Paid").
-  const orderCard = o => {
+  const orderCard = (o, teamView) => {
+    const golden = (ctx.goldenCustomers||{})[_normPhone(o.phone)];
+    const canGold = teamView === true && !golden && o.status !== 'draft' && isMyOrder(o, user);
     const bal = Math.round(orderReceived(o).balance);
     // Colour the card's left edge by delivery urgency (green/orange/red) so the
     // list reads at a glance; a purple edge wins while a service request is open.
@@ -11677,6 +11783,7 @@ function HistoryScreen({ctx}) {
               <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3,flexWrap:'wrap'}}>
                 <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600}}>{o.no}</span>
                 {o.won?<Pill tone="ok" mono size="sm">{o.won}</Pill>:null}
+                {golden && <span title={'Golden Customer · '+(golden.salesExec||'')} style={{display:'inline-flex',alignItems:'center',height:16,padding:'0 6px',borderRadius:4,background:'#fff3c4',color:'#7a5b00',border:'1px solid #e8c96a',fontSize:10,fontWeight:800}}>⭐ GOLDEN</span>}
                 {pendingChangesFor(ctx.changeRequests,o).length>0 && <span onClick={e=>{e.stopPropagation();nav('approvals');}} style={{cursor:'pointer'}}><Pill tone="warn" size="sm">⏳ Change pending approval</Pill></span>}
                 {/* SO / WON is generated only for the franchise channel — a pure 4S
                     order is never prompted to add one. The prompt also disappears once
@@ -11723,6 +11830,7 @@ function HistoryScreen({ctx}) {
               <span title="Order PDF" onClick={e=>{e.stopPropagation();ctx.setOrder({...BLANK_ORDER(),...normalizeLoadedOrder(o)});nav('pdf');}} style={{width:36,height:32,borderRadius:6,background:T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.doc(T.ink3,15)}</span>
               <span title={o.serviceFlag?'Service request':'Flag a service request'} onClick={e=>{e.stopPropagation();setServiceOrder(o);}} style={{width:36,height:32,borderRadius:6,background:o.serviceFlag?(/resolved/i.test(o.serviceStatus||'')?T.greenSoft:(T.badSoft||'#fdecec')):T.paper2,display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:15,fontWeight:700,color:o.serviceFlag?(/resolved/i.test(o.serviceStatus||'')?T.green:T.bad):T.ink3}}>⚠</span>
               <span title="Share PDF on WhatsApp" onClick={e=>{e.stopPropagation();shareOrderPDF(o,'customer',ctx.showToast);}} style={{width:36,height:32,borderRadius:6,background:'#25d36622',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>{Icon.whatsapp('#25d366',15)}</span>
+              {canGold && <span title="Mark this customer as a Golden Customer" onClick={e=>{e.stopPropagation(); if(window.confirm('Mark '+(o.customer||'this customer')+' ('+(o.phone||'')+') as a Golden Customer?')) ctx.doMarkGoldenCustomer(o);}} style={{display:'inline-flex',alignItems:'center',gap:4,height:32,padding:'0 10px',borderRadius:6,background:'linear-gradient(180deg,#f7d774,#e3b43c)',border:'1px solid #c9a227',color:'#4a3a00',fontSize:12,fontWeight:800,cursor:'pointer',whiteSpace:'nowrap'}}>⭐ Golden</span>}
               {isPendWon(o)&&<span title="Send to sales team on WhatsApp — request they place the order in Salesforce and share the SO No" onClick={e=>{e.stopPropagation();shareOrderToSalesTeam(o,ctx.showToast);}} style={{display:'inline-flex',alignItems:'center',gap:4,height:32,padding:'0 10px',borderRadius:6,background:'#0b7dc422',color:'#0b6ba8',border:'1px solid #9fd0ea',fontSize:11,fontWeight:800,letterSpacing:0.3,cursor:'pointer'}}>{Icon.whatsapp('#0b6ba8',14)}SO</span>}
             </div>
           </div>
@@ -12567,7 +12675,7 @@ function HistoryScreen({ctx}) {
             </div>
           </div>
           <div style={{height:6}}/>
-          {shown.map(orderCard)}
+          {shown.map(o=>orderCard(o,true))}
           {loading && orders.length===0
             ? [0,1,2,3,4].map(i=><SkeletonOrderRow key={i}/>)
             : shown.length===0 && (
