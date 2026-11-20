@@ -3658,6 +3658,10 @@ function App() {
   const [offersSent,   setOffersSent]   = useState(() => { try { return JSON.parse(localStorage.getItem('4s_offers_sent')||'{}'); } catch { return {}; } });
   // Order change requests awaiting / past admin approval (see ORDER CHANGE APPROVAL).
   const [changeRequests, setChangeRequests] = useState([]);
+  // Golden customers — normalised phone → { salesExec, customer }. Read from every
+  // "Golden customer list <SALES PERSON>" tab in the OPS sheet; a customer is
+  // added to their order's salesperson's tab via the ⭐ button on the order.
+  const [goldenCustomers, setGoldenCustomers] = useState(() => { try { return JSON.parse(localStorage.getItem('4s_golden')||'{}')||{}; } catch { return {}; } });
 
   const showToast = (msg,type='ok') => setToast({msg,type});
   // "New order placed" celebration overlay — set by doSaveOrder on a first-time
@@ -3760,6 +3764,7 @@ function App() {
     loadLeads({ silent: true });
     loadContactTags({ silent: true });
     loadOffersSent();
+    loadGoldenCustomers();
     loadChangeRequests();
   }, [user]);
 
@@ -3782,6 +3787,7 @@ function App() {
       loadMis({ silent: true });
       loadOrders();
       loadOffersSent();
+      loadGoldenCustomers();
       loadChangeRequests();
       loadPriceListItems(false, true)   // skip local cache, use shared server cache
         .then(pi => {
@@ -4225,6 +4231,56 @@ function App() {
     }
   }
 
+  // ── Golden customers ───────────────────────────────────────────────────────
+  // Pull every salesperson's golden list and merge into local state (never drops
+  // a locally-known mark, so an optimistic mark survives a slow sync).
+  async function loadGoldenCustomers() {
+    try {
+      const res = await apiGet('goldenCustomers', {}, 30000, 2);
+      if (res && res.ok && Array.isArray(res.golden)) {
+        setGoldenCustomers(prev => {
+          const merged = { ...(prev||{}) };
+          res.golden.forEach(g => {
+            const ph = _normPhone(g && g.phone); if (!ph) return;
+            merged[ph] = { salesExec: (g && g.salesExec) || '', customer: (g && g.customer) || '' };
+          });
+          try { localStorage.setItem('4s_golden', JSON.stringify(merged)); } catch(e) {}
+          return merged;
+        });
+        return true;
+      }
+    } catch(e) { /* offline / backend not deployed yet — keep the local cache */ }
+    return false;
+  }
+  // Mark an order's customer as a Golden Customer: the backend appends their name
+  // + contact number to "Golden customer list <SALES PERSON>" for the order's
+  // salesperson, creating that tab the first time.
+  async function doMarkGoldenCustomer(o) {
+    const phone = _normPhone(o && o.phone);
+    const salesExec = String((o && o.salesExec) || user?.name || '').trim();
+    if (!o || !o.no) { showToast('Save the order first','warn'); return false; }
+    if (phone.length !== 10) { showToast('This order has no valid 10-digit contact number','bad'); return false; }
+    if (!String(o.customer||'').trim()) { showToast('This order has no customer name','bad'); return false; }
+    if (!salesExec) { showToast('This order has no sales person','bad'); return false; }
+    setLoading(true);
+    try {
+      const res = await apiPost({ action:'markGoldenCustomer', customer:String(o.customer).trim(), phone, salesExec,
+        orderNo:o.no||'', byName:user?.name||user?.username||'' });
+      if (res && res.ok) {
+        const who = res.salesExec || salesExec;
+        setGoldenCustomers(prev => {
+          const next = { ...(prev||{}), [phone]: { salesExec: who, customer: String(o.customer).trim() } };
+          try { localStorage.setItem('4s_golden', JSON.stringify(next)); } catch(e) {}
+          return next;
+        });
+        showToast(res.already ? 'Already in ' + (res.sheet || 'the golden list') : '⭐ Added to ' + (res.sheet || ('Golden customer list ' + who)));
+        return true;
+      }
+      showToast((res && res.error) || 'Could not mark as Golden Customer','bad'); return false;
+    } catch(e) { showToast(e.message || 'Network error','bad'); return false; }
+    finally { setLoading(false); }
+  }
+
   // Admin-only: clear the shared birthday/anniversary offer lock so every customer
   // can be sent the offer again — for trial runs. Wipes the backend OFFERS SENT tab
   // (re-checked as admin server-side) and the local cache/state so the Offer buttons
@@ -4602,6 +4658,7 @@ function App() {
     leads, leadsLoading, loadLeads, doAddLead, doEditLead, doDeleteLead,
     gmbPhones, ldmPhones, contactTagsLoading, loadContactTags,
     offersSent, loadOffersSent, doMarkOfferSent, doResetOffersSent,
+    goldenCustomers, loadGoldenCustomers, doMarkGoldenCustomer,
     offerEndDate, doSaveOfferConfig, doFetchSweetenerEmail,
     changeRequests, loadChangeRequests, doRequestOrderChange, doReviewOrderChange };
 
@@ -9849,6 +9906,26 @@ function OrderFormScreen({ctx, viewOnly}) {
         );})}
       </div>}
       <div className="scroll">
+        {/* ⭐ Golden Customer — available on any saved order (also in view-only
+            mode, so it sits outside the disabled fieldset). Adds the customer's
+            name + number to "Golden customer list <SALES PERSON>". */}
+        {!!o.no && (()=>{
+          const g = (ctx.goldenCustomers||{})[_normPhone(o.phone)];
+          const sp = String(o.salesExec||'').trim();
+          return (
+            <div style={{display:'flex',alignItems:'center',gap:10,padding:'9px 14px',background:g?'#fff8e1':'#fff',borderBottom:`1px solid ${g?'#e8c96a':T.line}`}}>
+              <span style={{fontSize:18}}>⭐</span>
+              <div style={{flex:1,minWidth:0,fontSize:12,color:T.ink2,lineHeight:1.4}}>
+                {g ? <><b style={{color:'#8a6d00'}}>Golden Customer</b> · in {(g.salesExec||sp||'').toUpperCase()}'s golden list</>
+                   : <>Mark <b>{o.customer||'this customer'}</b> as a Golden Customer{sp?<> for <b>{sp}</b></>:null}</>}
+              </div>
+              {!g && <button disabled={ctx.loading} onClick={()=>{ if(window.confirm('Mark '+(o.customer||'this customer')+' ('+(o.phone||'')+') as a Golden Customer'+(sp?' in '+sp+"'s list":'')+'?')) ctx.doMarkGoldenCustomer(o); }}
+                style={{flexShrink:0,padding:'7px 12px',borderRadius:8,border:'1px solid #c9a227',background:'linear-gradient(180deg,#f7d774,#e3b43c)',color:'#4a3a00',fontSize:12,fontWeight:800,cursor:ctx.loading?'default':'pointer',whiteSpace:'nowrap'}}>
+                Mark Golden
+              </button>}
+            </div>
+          );
+        })()}
         <fieldset disabled={viewOnly} style={{border:0,margin:0,padding:0,minWidth:0,...(viewOnly?{pointerEvents:'none'}:{})}}>
         {o.manualOrder && (
           <>

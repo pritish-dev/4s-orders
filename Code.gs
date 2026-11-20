@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v82';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v83';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -255,6 +255,7 @@ function doGet(e) {
       case 'leads':          result = handleLeads(p);           break;
       case 'contactTags':    result = handleContactTags(p);     break;
       case 'offersSent':     result = handleOffersSent();       break;
+      case 'goldenCustomers':result = handleGoldenCustomers();  break;
       case 'changeRequests': result = handleListChangeRequests(p); break;
       case 'debugPriceList': result = handleDebugPriceList();   break;
       default:               result = { ok: false, error: 'Unknown action: ' + (p.action || '(none)') };
@@ -318,6 +319,7 @@ function doPost(e) {
       case 'sendWhatsApp':    result = handleSendWhatsApp(body);      break;
       case 'markOfferSent':   result = handleMarkOfferSent(body);     break;
       case 'resetOffersSent': result = handleResetOffersSent(body);   break;
+      case 'markGoldenCustomer': result = handleMarkGoldenCustomer(body); break;
       case 'requestOrderChange': result = handleRequestOrderChange(body); break;
       case 'reviewOrderChange':  result = handleReviewOrderChange(body);  break;
       default:                result = { ok: false, error: 'Unknown action: ' + body.action };
@@ -4428,6 +4430,109 @@ function handleReviewOrderChange(body) {
     _appendLog(reviewer, orderNo, decision === 'approve' ? 'APPROVE_ORDER_CHANGE' : 'REJECT_ORDER_CHANGE', id + (body.note ? ' · ' + body.note : ''));
     return { ok: true, id: id, status: decision === 'approve' ? 'approved' : 'rejected',
              orderNo: saved ? saved.orderNo : orderNo, internalNo: saved ? saved.internalNo : '' };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
+  }
+}
+
+// ─── GOLDEN CUSTOMERS ─────────────────────────────────────────────────────────
+// A salesperson can tap "Mark as Golden Customer" on any saved order. The
+// customer's name + contact number are appended to that order's salesperson's
+// own tab in the OPS spreadsheet, named "Golden customer list <SALES PERSON>"
+// (e.g. "Golden customer list SWATI"). The tab is created automatically, with a
+// header row, the first time a golden customer is added for that salesperson.
+// A phone is listed only once per salesperson (marking again is a no-op).
+//   SL NO | DATE | CUSTOMER NAME | CONTACT NO | ORDER NO | MARKED BY
+var GOLDEN_TAB_PREFIX = 'Golden customer list ';
+var GOLDEN_HEADERS    = ['SL NO', 'DATE', 'CUSTOMER NAME', 'CONTACT NO', 'ORDER NO', 'MARKED BY'];
+
+function _goldenSheetName(person) {
+  // Sheet names can't contain : \ / ? * [ ] and are capped at 100 chars.
+  var p = String(person || '').trim().replace(/[:\\\/\?\*\[\]]/g, ' ').replace(/\s+/g, ' ').toUpperCase();
+  return (GOLDEN_TAB_PREFIX + p).slice(0, 100);
+}
+
+// GET: every golden customer across all salespersons' tabs.
+// Shape: { ok:true, golden:[{ phone, customer, salesExec, orderNo, date, by }] }
+function handleGoldenCustomers() {
+  try {
+    var ss = _openOPS();
+    if (!ss) return { ok: false, error: 'Cannot open OPS sheet: ' + OPS_SHEET_ID };
+    var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+    var prefLc = GOLDEN_TAB_PREFIX.toLowerCase();
+    var golden = [];
+    ss.getSheets().forEach(function (sh) {
+      var name = sh.getName();
+      if (name.toLowerCase().indexOf(prefLc) !== 0) return;
+      var person = name.slice(GOLDEN_TAB_PREFIX.length).trim();
+      if (sh.getLastRow() < 2) return;
+      var vals = sh.getRange(2, 1, sh.getLastRow() - 1, GOLDEN_HEADERS.length).getValues();
+      for (var i = 0; i < vals.length; i++) {
+        var r = vals[i];
+        var phone = _offerPhoneKey(r[3]);
+        if (!phone) continue;
+        var dv = r[1];
+        golden.push({
+          phone: phone,
+          customer: String(r[2] == null ? '' : r[2]).trim(),
+          salesExec: person,
+          orderNo: String(r[4] == null ? '' : r[4]).trim(),
+          date: (dv instanceof Date && !isNaN(dv.getTime())) ? Utilities.formatDate(dv, tz, 'yyyy-MM-dd') : String(dv == null ? '' : dv).trim(),
+          by: String(r[5] == null ? '' : r[5]).trim()
+        });
+      }
+    });
+    return { ok: true, golden: golden, scriptVersion: SCRIPT_VERSION };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+// POST: add an order's customer to its salesperson's golden list, creating the
+// "Golden customer list <SALES PERSON>" tab on first use. Idempotent per phone.
+// body: { customer, phone, salesExec, orderNo?, byName? }
+function handleMarkGoldenCustomer(body) {
+  var phone    = _offerPhoneKey(body && body.phone);
+  var customer = String((body && body.customer) || '').trim();
+  var person   = String((body && body.salesExec) || '').trim();
+  var orderNo  = String((body && body.orderNo) || '').trim();
+  var by       = String((body && (body.byName || body.by)) || '').trim();
+  if (phone.length !== 10) return { ok: false, error: 'This order has no valid 10-digit contact number.' };
+  if (!customer) return { ok: false, error: 'This order has no customer name.' };
+  if (!person) return { ok: false, error: 'This order has no sales person.' };
+
+  var lock = LockService.getScriptLock();
+  var haveLock = false;
+  try { haveLock = lock.tryLock(15000); } catch (e) {}
+  try {
+    var ss = _openOPS();
+    if (!ss) return { ok: false, error: 'Cannot open OPS sheet: ' + OPS_SHEET_ID };
+    var name = _goldenSheetName(person);
+    var sh = ss.getSheetByName(name);
+    var created = false;
+    if (!sh) {
+      sh = ss.insertSheet(name);
+      sh.appendRow(GOLDEN_HEADERS);
+      try { sh.getRange(1, 1, 1, GOLDEN_HEADERS.length).setFontWeight('bold'); sh.setFrozenRows(1); } catch (e) {}
+      created = true;
+    }
+    var last = sh.getLastRow();
+    if (last >= 2) {
+      var phones = sh.getRange(2, 4, last - 1, 1).getValues();
+      for (var i = 0; i < phones.length; i++) {
+        if (_offerPhoneKey(phones[i][0]) === phone) {
+          return { ok: true, already: true, sheet: name, salesExec: person, phone: phone };
+        }
+      }
+    }
+    var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+    var dateStr = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+    sh.appendRow([Math.max(1, last), dateStr, customer, phone, orderNo, by]);
+    // Keep the number as text so a leading digit pattern never turns into a float.
+    try { sh.getRange(sh.getLastRow(), 4).setNumberFormat('@').setValue(phone); } catch (e) {}
+    return { ok: true, already: false, created: created, sheet: name, salesExec: person, phone: phone };
   } catch (e) {
     return { ok: false, error: e.message };
   } finally {
