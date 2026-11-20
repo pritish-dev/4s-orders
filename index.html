@@ -4698,6 +4698,7 @@ function App() {
     targets: <MonthlyTargetScreen ctx={ctx}/>,
     leads:   <LeadsScreen ctx={ctx}/>,
     golden:  <GoldenCustomersScreen ctx={ctx}/>,
+    quiz:    <QuizScreen ctx={ctx}/>,
     mycustomers: <MyCustomerScreen ctx={ctx}/>,
     offerzone: <OfferZoneScreen ctx={ctx}/>,
     approvals: <ApprovalsScreen ctx={ctx}/>,
@@ -6547,6 +6548,662 @@ function GoldenCustomersScreen({ctx}){
   );
 }
 
+// ─── QUIZ ───────────────────────────────────────────────────
+// Admin builds a quiz from a question bank (tick the questions to include, set
+// the start/end date & time) and publishes it. Everyone else plays it inside
+// that window: 1 minute per question for the WHOLE quiz (10 questions = 10 min),
+// counted from the moment they start, and sees their marks + every correct
+// answer the moment they submit. Leaderboard: quiz-wise and financial-year-wise.
+// Stored in the OPS sheet tabs QUIZ / QUIZ QUESTIONS / QUIZ RESULTS (backend
+// enforces admin-only publishing, the window, one attempt and the timer).
+//
+// Question bank: Grand Wedding Offer (scheme code WED2026). Answering all of
+// these covers the complete scheme. ans = index of the correct option (0-3).
+const QUIZ_BANKS = [
+  { key:'wed2026', title:'Grand Wedding Offer — WED2026', desc:'Test your understanding of the Grand Wedding Offer: slabs, criteria, discounts, gifts and rules.', questions:[
+    { q:'In the Grand Wedding Offer, the slab discount (7% / 9% / 11% / 13% / 15% / 20%) is applicable on which products?',
+      opts:['HF, HS and Mattress products','Only HF products','Only HS products','Only Mattress products'], ans:1,
+      exp:'The Grand Wedding Offer slab discount applies only on HF products.' },
+    { q:'In a wedding package, which discount applies on HS and Mattress products?',
+      opts:['The Grand Wedding Offer slab discount','No discount at all','The Q3 slab discounts','A flat 5% discount'], ans:2,
+      exp:'For HS & Mattress products, the Q3 slab discounts are applicable — not the Grand Wedding Offer slab discount.' },
+    { q:'What must a customer fulfil to qualify for the Grand Wedding Offer rewards?',
+      opts:['Criteria 1 only','Criteria 2 only','Either Criteria 1 or Criteria 2','Both Criteria 1 and Criteria 2'], ans:3,
+      exp:'Fulfilment of BOTH Criteria 1 (package composition) and Criteria 2 (value slab) is a must for qualification of rewards.' },
+    { q:'What does "Criteria 1" of the Grand Wedding Offer refer to?',
+      opts:['The category / package composition (e.g. Bed + Wardrobe + Mattress …)','The invoice value slab','The mode of payment','The date of delivery'], ans:0,
+      exp:'Criteria 1 is the category — the combination of products in the wedding package.' },
+    { q:'What does "Criteria 2" of the Grand Wedding Offer refer to?',
+      opts:['The number of products bought','The value slab of the package (CPL + GST / MRP value)','The customer’s wedding date','The EMI bank used'], ans:1,
+      exp:'Criteria 2 is the value slab (CPL + GST) the package falls into.' },
+    { q:'A customer fulfils Criteria 1 (package composition) of a higher slab but does NOT reach that slab’s value under Criteria 2. Which reward applies?',
+      opts:['The reward of the higher slab, since the package is complete','No reward at all','The reward as per Criteria 2 — i.e. the slab matching the MRP value','The lowest slab reward (Duffle Bag) always'], ans:2,
+      exp:'If Criteria 1 is fulfilled but the MRP slab under Criteria 2 is not, the reward applicable is as per Criteria 2 — the MRP value.' },
+    { q:'Scenario: a customer buys Bed + Wardrobe + Mattress + Bedside table worth ₹2 lakh MRP. Which reward is applicable?',
+      opts:['Set of 3 VIP Luggage (Slab 3)','VIP Luggage (Slab 2)','Duffle Bag (Slab 1)','Travel Voucher from Benepik (Slab 4)'], ans:1,
+      exp:'The package matches Slab 3 composition, but ₹2 lakh falls in the Slab 2 value range (≥ 1,49,999 to 2,49,999), so the reward is VIP Luggage.' },
+    { q:'In the ₹2 lakh Bed + Wardrobe + Mattress + Bedside table scenario, why is the customer NOT given the Slab 3 reward?',
+      opts:['Because a bedside table is not part of Slab 3','Because the value is below Slab 3’s minimum of ₹2,50,000','Because Slab 3 is only for HS products','Because the scheme code was not used'], ans:1,
+      exp:'Slab 3 needs a value of ≥ ₹2,50,000. The composition is right, but the value only meets Slab 2.' },
+    { q:'Scenario: a customer buys Bed + Wardrobe (HF/HS) + Mattress + Dresser + Sofa + Dining worth ₹5 lakh MRP. What discount is the customer eligible for?',
+      opts:['20% + Digital Scratch Card','13% + Digital Scratch Card','15% + Scratch Card (min 5%) on HF products','15% on all products including HS & Mattress'], ans:2,
+      exp:'₹5 lakh falls in Slab 5: 15% + Scratch Card (minimum 5%) on HF products. HS & Mattress get the Q3 slab discounts.' },
+    { q:'In the ₹5 lakh Bed + Wardrobe + Mattress + Dresser + Sofa + Dining scenario, which products’ MRP value is considered for the REWARD (gift)?',
+      opts:['The full ₹5 lakh including Sofa and Dining','Only Sofa and Dining','Only Bed + Wardrobe (HF/HS) + Mattress + Dresser','Only the HF products'], ans:2,
+      exp:'For the reward, the team has to consider the MRP value of Bed + Wardrobe (HF/HS) + Mattress + Dresser only — the package categories.' },
+    { q:'What is the value range (CPL + GST) for Slab 1?',
+      opts:['≥ ₹50,000 to < ₹80,000','≥ ₹80,000 to < ₹1,49,999','≥ ₹1,49,999 to ₹2,49,999','≥ ₹1,00,000 to < ₹2,00,000'], ans:1,
+      exp:'Slab 1: ≥ ₹80,000 and < ₹1,49,999.' },
+    { q:'Which package composition qualifies for Slab 1?',
+      opts:['Bed + Wardrobe (HF/HS) / Mattress','Bed + Wardrobe + Mattress + Dresser','Sofa + Dining','Any single HF product'], ans:0,
+      exp:'Slab 1 composition: Bed + Wardrobe (HF/HS) / Mattress.' },
+    { q:'What does a Slab 1 customer get?',
+      opts:['9% + Digital Scratch Card + VIP Luggage','7% + Digital Scratch Card + Duffle Bag','7% + Digital Scratch Card + VIP Luggage','5% + Duffle Bag'], ans:1,
+      exp:'Slab 1: 7% + Digital Scratch Card and an assured Duffle Bag.' },
+    { q:'What is the price (with GST) of the Duffle Bag given in Slab 1?',
+      opts:['₹2,950','₹3,950','₹8,950','₹4,500'], ans:1,
+      exp:'The Duffle Bag is worth ₹3,950 with GST.' },
+    { q:'What is the value range for Slab 2 and its discount?',
+      opts:['≥ ₹1,49,999 to ₹2,49,999 — 9% + Digital Scratch Card','≥ ₹2,50,000 to ₹3,49,999 — 11% + Digital Scratch Card','≥ ₹80,000 to < ₹1,49,999 — 9% + Digital Scratch Card','≥ ₹1,49,999 to ₹2,49,999 — 7% + Digital Scratch Card'], ans:0,
+      exp:'Slab 2: ≥ ₹1,49,999 to ₹2,49,999, 9% + Digital Scratch Card, package Bed + Wardrobe (HF/HS) + Mattress.' },
+    { q:'Which assured gift is given in Slab 2, and what is its price with GST?',
+      opts:['Duffle Bag — ₹3,950','VIP Luggage — ₹8,950','Set of 3 VIP Luggage — ₹30,000','VIP Luggage — ₹3,950'], ans:1,
+      exp:'Slab 2 gift: VIP Luggage worth ₹8,950.' },
+    { q:'Which package composition is required for Slab 3?',
+      opts:['Bed + Wardrobe (HF/HS) + Mattress + Side table / Dresser','Bed + Wardrobe only','Bed + Mattress + Sofa','Bed + Wardrobe + Mattress + Dresser + Side table + any other HF / Kreation'], ans:0,
+      exp:'Slab 3: Bed + Wardrobe (HF/HS) + Mattress + Side table / Dresser.' },
+    { q:'What does a Slab 3 customer (≥ ₹2,50,000 to ₹3,49,999) get?',
+      opts:['11% + Digital Scratch Card + Set of 3 VIP Luggage (₹30,000)','13% + Digital Scratch Card + Travel Voucher (₹45,000)','9% + Digital Scratch Card + VIP Luggage (₹8,950)','11% + Digital Scratch Card + VIP Luggage (₹8,950)'], ans:0,
+      exp:'Slab 3: 11% + Digital Scratch Card and a Set of 3 VIP Luggage worth ₹30,000.' },
+    { q:'A customer buys Bed + Wardrobe + Mattress + Dresser + Side table worth ₹3,80,000. What do they get?',
+      opts:['11% + Digital Scratch Card + Set of 3 VIP Luggage','13% + Digital Scratch Card + Travel Voucher from Benepik (₹45,000)','15% + Digital Scratch Card + Gold Jewellery Voucher','13% + Digital Scratch Card + Gold Jewellery Voucher (₹75,000)'], ans:1,
+      exp:'₹3,80,000 with the full Slab 4 package (≥ ₹3,50,000 to ₹4,99,999): 13% + Digital Scratch Card + Travel Voucher from Benepik worth ₹45,000.' },
+    { q:'What is the value range and assured gift for Slab 5?',
+      opts:['≥ ₹5,00,000 to ₹8,49,999 — Gold Jewellery Voucher from Benepik (₹75,000)','≥ ₹3,50,000 to ₹4,99,999 — Travel Voucher (₹45,000)','≥ ₹8,50,000 — Gold Jewellery + Travel vouchers (₹1,00,000)','≥ ₹5,00,000 to ₹8,49,999 — Set of 3 VIP Luggage (₹30,000)'], ans:0,
+      exp:'Slab 5: ≥ ₹5,00,000 to ₹8,49,999, 15% + Digital Scratch Card, Gold Jewellery Voucher from Benepik worth ₹75,000.' },
+    { q:'What is the minimum value for Slab 6 and its discount?',
+      opts:['₹5,00,000 — 15%','₹8,50,000 — 20% + Digital Scratch Card','₹10,00,000 — 20%','₹8,50,000 — 15% + Digital Scratch Card'], ans:1,
+      exp:'Slab 6: ≥ ₹8,50,000 with 20% + Digital Scratch Card.' },
+    { q:'Compared to Slab 5, what EXTRA product is needed in the package to qualify for Slab 6?',
+      opts:['A second mattress','Any other HF / Kreation product','A sofa only','Nothing extra — only the value matters'], ans:1,
+      exp:'Slab 6: Bed + Wardrobe (HF/HS) + Mattress + Dresser + Side table + any other HF / Kreation.' },
+    { q:'A Slab 6 customer gets ₹1 lakh worth of Benepik vouchers. How can they take it?',
+      opts:['Only as a Gold Jewellery Voucher','Only as a Travel Voucher','As Jewellery Voucher, Travel Voucher, or a combination of both','As a cash discount on the invoice'], ans:2,
+      exp:'For Slab 6, the customer can choose ₹1 lakh worth of Jewellery Voucher or Travel Voucher or a combination of both.' },
+    { q:'A customer’s package is worth ₹9,00,000 but has only Bed + Wardrobe + Mattress + Dresser + Side table (no other HF / Kreation product). Does it qualify for Slab 6?',
+      opts:['Yes — the value is above ₹8,50,000','No — both the package composition and the value criteria must be met for Slab 6','Yes, but only for the 20% discount','Only if the customer pays by Card EMI'], ans:1,
+      exp:'Eligibility needs BOTH the package composition (Criteria 1) and the value (Criteria 2). Without any other HF / Kreation product, Slab 6 composition is not met.' },
+    { q:'For Slabs 4 to 6 (Benepik rewards), how is the customer’s eligibility confirmed?',
+      opts:['The store gives the voucher immediately at booking','Post billing, HO checks the eligibility after collecting the data in the prescribed format','The customer applies directly on the Benepik website','The bank confirms it after EMI approval'], ans:1,
+      exp:'For Slab 4-6 Benepik rewards, HO checks eligibility post billing after collecting the data in the prescribed format (format to be shared).' },
+    { q:'Through whom are the Travel and Jewellery vouchers fulfilled?',
+      opts:['The store directly','The bank (HDFC / SBICC / IDFC First)','Benepik, as per the approved redemption process','The jeweller chosen by the customer'], ans:2,
+      exp:'Travel and Jewellery vouchers are fulfilled through Benepik as per the approved redemption process.' },
+    { q:'Who gets the Digital Scratch Card under the Grand Wedding Offer?',
+      opts:['Only Slab 5 and Slab 6 customers','Only customers paying by Card EMI','All eligible customers — it is an integral part of the offer','Only the first 100 customers'], ans:2,
+      exp:'Digital Scratch Cards are an integral part of the Grand Wedding Offer and are provided to all eligible customers.' },
+    { q:'How does the Grand Wedding Offer relate to the prevailing Q3 Consumer Scheme?',
+      opts:['It replaces the Q3 Consumer Scheme','It is over and above the Q3 Consumer Scheme','The customer must choose one of the two','It applies only after the Q3 scheme ends'], ans:1,
+      exp:'This scheme is over and above the prevailing Q3 Consumer Scheme — an extra reason to upgrade to a higher-value wedding package.' },
+    { q:'Instant cashback on Card EMI backing this scheme is available with which banks?',
+      opts:['HDFC, ICICI & Axis','SBI, Kotak & Yes Bank','HDFC, SBICC & IDFC First','Only HDFC'], ans:2,
+      exp:'Instant cashback on Card EMI is available with HDFC, SBICC & IDFC First Cards.' },
+    { q:'Till when is the instant cashback offer on Card EMI valid?',
+      opts:['31st October 2026','30th November 2026','31st December 2026','31st March 2027'], ans:1,
+      exp:'The Card EMI instant cashback is valid till 30th November 2026.' },
+    { q:'Which scheme code is mandatory for orders under the Grand Wedding Offer?',
+      opts:['WED2026','GWO2026','Q3WED','WEDDING26'], ans:0,
+      exp:'Use of scheme code “WED2026” is mandatory.' },
+    { q:'By when must all orders booked under this offer be billed?',
+      opts:['30th November 2026','15th December 2026','31st December 2026','31st January 2027'], ans:2,
+      exp:'All orders booked under this offer must be billed latest by 31st December 2026.' },
+    { q:'On which purchases is the Grand Wedding Offer applicable?',
+      opts:['Any purchase above ₹50,000','Only qualifying wedding package purchases booked during the scheme period','Only online orders','Any order with a wedding date mentioned'], ans:1,
+      exp:'The offer applies only to qualifying wedding package purchases booked during the scheme period.' },
+    { q:'A customer buys a Bed + Wardrobe (HF) package worth ₹1,20,000. What do they get?',
+      opts:['7% + Digital Scratch Card + Duffle Bag (Slab 1)','9% + Digital Scratch Card + VIP Luggage (Slab 2)','No offer — a mattress is compulsory','11% + Set of 3 VIP Luggage'], ans:0,
+      exp:'Bed + Wardrobe (HF/HS) / Mattress worth ≥ ₹80,000 and < ₹1,49,999 is Slab 1: 7% + Digital Scratch Card + Duffle Bag.' },
+    { q:'A customer’s Bed + Wardrobe package is worth ₹70,000. Is it eligible for the Grand Wedding Offer?',
+      opts:['Yes — Slab 1','No — it is below the Slab 1 minimum of ₹80,000','Yes, but only for the Digital Scratch Card','Yes, if the customer pays by Card EMI'], ans:1,
+      exp:'The lowest slab starts at ₹80,000, so ₹70,000 does not meet Criteria 2.' },
+    { q:'A Slab 4 customer buys an HF Bed and an HS Wardrobe. How is the 13% Grand Wedding Offer discount applied?',
+      opts:['13% on both the bed and the wardrobe','13% on the HF Bed; the HS Wardrobe gets the Q3 slab discount','13% on the HS Wardrobe only','No discount since HS is included'], ans:1,
+      exp:'The slab discount applies only on HF products; HS products get the Q3 slab discounts.' },
+    { q:'A customer buys Bed + Wardrobe + Mattress + Dresser + Side table worth ₹2,90,000. What do they get?',
+      opts:['13% + Travel Voucher (Slab 4)','11% + Digital Scratch Card + Set of 3 VIP Luggage (Slab 3)','9% + VIP Luggage (Slab 2)','15% + Gold Jewellery Voucher (Slab 5)'], ans:1,
+      exp:'The composition meets Slab 3 (and above), but ₹2,90,000 is in the Slab 3 value range (≥ ₹2,50,000 to ₹3,49,999) — the reward follows the value.' },
+    { q:'What are stores asked to do to promote the Grand Wedding Offer?',
+      opts:['Nothing — it is promoted only by HO','Display and create Wedding Packages with gifts and benefits communication at the store','Only share it on WhatsApp','Offer it only to walk-in customers who ask'], ans:1,
+      exp:'Stores should display and create Wedding Packages along with gifts and benefits communication; ATL/BTL campaigns are aligned and the offer is promoted on social media.' },
+  ]},
+];
+
+const QUIZ_LETTERS = ['A','B','C','D'];
+function _quizMs(v) {   // 'yyyy-MM-dd HH:mm' (IST) → epoch ms
+  const m = String(v||'').match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  return m ? Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00+05:30`) : 0;
+}
+function _quizPretty(v) {
+  const ms = typeof v === 'number' ? v : _quizMs(v);
+  if (!ms) return '—';
+  return new Date(ms).toLocaleString('en-IN', { timeZone: IST_TZ, day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit', hour12:true });
+}
+function _quizClock(sec) { sec = Math.max(0, Math.floor(sec)); return String(Math.floor(sec/60)).padStart(2,'0') + ':' + String(sec%60).padStart(2,'0'); }
+function _quizLeft(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  if (sec >= 86400) return Math.floor(sec/86400) + 'd ' + Math.floor((sec%86400)/3600) + 'h';
+  if (sec >= 3600) return Math.floor(sec/3600) + 'h ' + Math.floor((sec%3600)/60) + 'm';
+  return _quizClock(sec);
+}
+function _quizState(q, now) {
+  if (q.status !== 'published') return 'draft';
+  if (now < q.startMs) return 'upcoming';
+  if (now > q.endMs) return 'ended';
+  return 'live';
+}
+function _quizFY(ms) {
+  const d = new Date(ms || Date.now());
+  const y = Number(d.toLocaleString('en-IN', { timeZone: IST_TZ, year:'numeric' }));
+  const m = Number(d.toLocaleString('en-IN', { timeZone: IST_TZ, month:'numeric' }));
+  const s = m >= 4 ? y : y - 1;
+  return 'FY ' + s + '-' + String((s + 1) % 100).padStart(2, '0');
+}
+// Rank rows: score high→low, then quicker time; ties share a rank.
+function _quizRank(rows) {
+  const sorted = rows.slice().sort((a,b)=> (b.score-a.score) || ((a.timeSec||1e9)-(b.timeSec||1e9)) || String(a.name).localeCompare(String(b.name)));
+  let rank = 0, prev = null;
+  return sorted.map((r,i)=>{ const k = r.score+'|'+(r.timeSec||0); if (k !== prev) { rank = i+1; prev = k; } return { ...r, rank }; });
+}
+
+function QuizScreen({ctx}) {
+  const {user, nav, showToast} = ctx;
+  const [data, setData] = useState(() => { try { return JSON.parse(localStorage.getItem('4s_quiz_cache')||'null'); } catch(e) { return null; } });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [view, setView] = useState('home');      // home | play | result | manage | edit
+  const [play, setPlay] = useState(null);        // { id, title, questions, deadlineMs, offset }
+  const [result, setResult] = useState(null);
+  const [edit, setEdit] = useState(null);
+  const [, setTick] = useState(0);
+  useEffect(() => { const t = setInterval(() => setTick(x => x + 1), 1000); return () => clearInterval(t); }, []);
+
+  async function load(silent) {
+    if (!silent) setBusy(true);
+    try {
+      const res = await apiGet('quizData', {}, 30000, 2);
+      if (res && res.ok) {
+        res._offset = (res.serverNow || Date.now()) - Date.now();
+        setData(res); setErr('');
+        try { localStorage.setItem('4s_quiz_cache', JSON.stringify({ ...res, quizzes: (res.quizzes||[]).map(q=>({ ...q, questions: undefined })) })); } catch(e) {}
+      } else setErr((res && res.error) || 'Could not load quizzes');
+    } catch(e) { setErr(e.message || 'Network error'); }
+    finally { if (!silent) setBusy(false); }
+  }
+  useEffect(() => { load(!!data); }, []);
+
+  const offset = (data && data._offset) || 0;
+  const now = Date.now() + offset;
+  const isAdmin = !!(data && data.isAdmin);
+  const quizzes = (data && data.quizzes) || [];
+
+  async function startQuiz(q) {
+    if (!q.myAttempt && !window.confirm(`Start "${q.title}"?\n\n${q.qCount} questions · ${q.durationMin} minutes in total.\nThe timer starts now and cannot be paused. You get ONE attempt.`)) return;
+    setBusy(true);
+    try {
+      const res = await apiPost({ action:'quizStart', id:q.id });
+      if (res && res.ok && res.done) { setResult(res); setView('result'); load(true); }
+      else if (res && res.ok) {
+        setPlay({ id:q.id, title:res.title, questions:res.questions||[], deadlineMs:res.deadlineMs, offset:(res.serverNow||Date.now())-Date.now() });
+        setView('play');
+      } else showToast((res && res.error) || 'Could not start the quiz', 'bad');
+    } catch(e) { showToast('Network error — try again', 'bad'); }
+    finally { setBusy(false); }
+  }
+  async function viewResult(q) { return startQuiz({ ...q, myAttempt: q.myAttempt || true }); }
+
+  const header = (title, sub, onBack, right) => (
+    <div style={{flexShrink:0,background:'linear-gradient(120deg,#4c1d95 0%,#1e3a8a 100%)',color:'#fff',padding:'12px 16px 14px'}}>
+      <div style={{display:'flex',alignItems:'center',gap:10}}>
+        <button onClick={onBack} title="Back" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{onBack===homeBack?Icon.home('#fff',18):Icon.back('#fff',18)}</button>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,opacity:.85}}>{sub}</div>
+          <div style={{fontSize:20,fontWeight:900,letterSpacing:-0.5,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{title}</div>
+        </div>
+        {right}
+      </div>
+    </div>
+  );
+  function homeBack() { nav('home'); }
+
+  if (view === 'play' && play) return <QuizPlay play={play} onDone={res => { setResult(res); setPlay(null); setView(res ? 'result' : 'home'); load(true); }} showToast={showToast} header={header}/>;
+  if (view === 'result' && result) return <QuizResult result={result} header={header} onBack={() => { setResult(null); setView('home'); }}/>;
+  if (view === 'manage' && isAdmin) return <QuizManage quizzes={quizzes} now={now} header={header} onBack={() => setView('home')}
+      onNew={() => { setEdit(null); setView('edit'); }} onEdit={q => { setEdit(q); setView('edit'); }} reload={() => load()} showToast={showToast} busy={busy}/>;
+  if (view === 'edit' && isAdmin) return <QuizEditor quiz={edit} header={header} onBack={() => setView('manage')} showToast={showToast}
+      onSaved={() => { load(); setView('manage'); }}/>;
+
+  const live = quizzes.filter(q => _quizState(q, now) === 'live');
+  const upcoming = quizzes.filter(q => _quizState(q, now) === 'upcoming').sort((a,b)=>a.startMs-b.startMs);
+  const pastMine = quizzes.filter(q => q.status === 'published' && _quizState(q, now) === 'ended' && q.myAttempt);
+  return (
+    <div className="screen">
+      {header('Quiz', '🧠 4S QUIZ', homeBack, <>
+        {isAdmin && <button onClick={() => setView('manage')} style={{height:32,padding:'0 10px',borderRadius:6,background:'#fff',color:'#4c1d95',border:'none',fontSize:12,fontWeight:800,cursor:'pointer',flexShrink:0}}>⚙ Manage</button>}
+        <button onClick={() => load()} title="Refresh" style={{width:32,height:32,borderRadius:6,background:'rgba(255,255,255,.14)',border:'1px solid rgba(255,255,255,.25)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>{busy?<Spinner size={14} color="#fff"/>:Icon.refresh('#fff',16)}</button>
+      </>)}
+      <div className="scroll" style={{background:T.paper}}>
+        {err && !data && <div style={{margin:'14px 16px',padding:'10px 12px',background:T.badSoft,border:`1px solid ${T.badLine}`,borderRadius:8,fontSize:12,color:T.bad}}>{err}</div>}
+        {!data && !err && <div style={{padding:30,display:'flex',justifyContent:'center'}}><Spinner/></div>}
+        {data && <>
+          {live.map(q => {
+            const a = q.myAttempt; const left = Math.max(0, (q.endMs - now)/1000);
+            const inProg = a && a.status === 'IN PROGRESS' && a.deadlineMs + 90000 > now;
+            return (
+              <div key={q.id} style={{margin:'14px 16px 4px',background:'#fff',border:'2px solid #6d28d9',borderRadius:12,padding:'14px',boxShadow:'0 4px 14px rgba(76,29,149,.12)'}}>
+                <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
+                  <span style={{fontSize:10,fontWeight:900,color:'#fff',background:'#dc2626',borderRadius:4,padding:'2px 7px',letterSpacing:.8}}>● LIVE</span>
+                  <span style={{fontSize:11,color:T.ink4,fontFamily:T.mono}}>closes in {_quizLeft(left)}</span>
+                </div>
+                <div style={{fontSize:17,fontWeight:900,color:T.ink,lineHeight:1.25}}>{q.title}</div>
+                {q.desc && <div style={{fontSize:12,color:T.ink3,marginTop:4,lineHeight:1.45}}>{q.desc}</div>}
+                <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:8}}>
+                  <Pill tone="purple" size="sm">{q.qCount} questions</Pill>
+                  <Pill tone="info" size="sm">⏱ {q.durationMin} min total</Pill>
+                  <Pill tone="neutral" size="sm">Ends {_quizPretty(q.endMs)}</Pill>
+                </div>
+                {!a && <button onClick={() => startQuiz(q)} disabled={busy} style={{marginTop:12,width:'100%',height:46,borderRadius:8,border:'none',background:'linear-gradient(90deg,#6d28d9,#1d4ed8)',color:'#fff',fontSize:15,fontWeight:900,cursor:'pointer'}}>▶ Start Quiz</button>}
+                {inProg && <button onClick={() => startQuiz(q)} disabled={busy} style={{marginTop:12,width:'100%',height:46,borderRadius:8,border:'none',background:T.warn,color:'#fff',fontSize:15,fontWeight:900,cursor:'pointer'}}>⏱ Resume — {_quizClock((a.deadlineMs - now)/1000)} left</button>}
+                {a && !inProg && <div style={{marginTop:12,display:'flex',alignItems:'center',gap:10}}>
+                  <div style={{flex:1,fontSize:13,color:T.ink2}}>{a.status==='SUBMITTED'?<>Your score: <b style={{fontSize:18,color:'#4c1d95'}}>{a.score}/{a.total}</b></>:<b style={{color:T.bad}}>Time up — 0/{a.total}</b>}</div>
+                  <button onClick={() => viewResult(q)} disabled={busy} style={{height:36,padding:'0 12px',borderRadius:8,border:`1px solid #6d28d9`,background:'#fff',color:'#6d28d9',fontSize:12,fontWeight:800,cursor:'pointer'}}>See answers</button>
+                </div>}
+              </div>
+            );
+          })}
+          {upcoming.map(q => (
+            <div key={q.id} style={{margin:'12px 16px 4px',background:'#fff',border:`1px dashed ${T.line2}`,borderRadius:12,padding:'12px 14px'}}>
+              <div style={{fontSize:10,fontWeight:800,color:T.blue,letterSpacing:.8}}>UPCOMING</div>
+              <div style={{fontSize:15,fontWeight:800,color:T.ink,marginTop:2}}>{q.title}</div>
+              <div style={{fontSize:12,color:T.ink3,marginTop:4}}>Opens {_quizPretty(q.startMs)} · {q.qCount} questions · {q.durationMin} min</div>
+            </div>
+          ))}
+          {live.length === 0 && upcoming.length === 0 && (
+            <div style={{margin:'14px 16px 4px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:12,padding:'14px',textAlign:'center'}}>
+              <div style={{fontSize:26}}>🧠</div>
+              <div style={{fontSize:14,fontWeight:800,color:T.ink2,marginTop:4}}>No quiz is live right now</div>
+              <div style={{fontSize:12,color:T.ink4,marginTop:3}}>Check the leaderboard below. A new quiz will appear here when it is published.</div>
+            </div>
+          )}
+          {pastMine.length > 0 && <div style={{padding:'10px 16px 0',display:'flex',gap:6,flexWrap:'wrap'}}>
+            {pastMine.map(q => <button key={q.id} onClick={() => viewResult(q)} style={{height:30,padding:'0 10px',borderRadius:99,border:`1px solid ${T.line2}`,background:'#fff',fontSize:11,fontWeight:700,color:T.ink2,cursor:'pointer'}}>📄 {q.title.slice(0,28)} · {q.myAttempt.status==='SUBMITTED'?q.myAttempt.score+'/'+q.myAttempt.total:'0'}</button>)}
+          </div>}
+          <QuizLeaderboard data={data} user={user} now={now}/>
+        </>}
+        <div style={{height:24}}/>
+      </div>
+    </div>
+  );
+}
+
+function QuizLeaderboard({data, user, now}) {
+  const quizzes = (data.quizzes||[]).filter(q => q.status === 'published' && now >= q.startMs).sort((a,b)=>b.startMs-a.startMs);
+  const people = data.people || [];
+  const results = data.results || [];
+  const fys = Array.from(new Set([data.currentFY || _quizFY(now)].concat(quizzes.map(q=>q.fy)).filter(Boolean))).sort().reverse();
+  const [mode, setMode] = useState('fy');
+  const [fySel, setFy] = useState(fys[0]);
+  const [qidSel, setQid] = useState(quizzes[0] ? quizzes[0].id : '');
+  const fy = fys.indexOf(fySel) >= 0 ? fySel : fys[0];
+  const qid = quizzes.some(q => q.id === qidSel) ? qidSel : (quizzes[0] ? quizzes[0].id : '');
+  const me = String(user?.code || user?.username || '').toLowerCase();
+  // Everyone who can sign in starts at 0; add anyone else who has a result.
+  const base = {};
+  people.forEach(p => { base[p.user] = { user:p.user, name:p.name, score:0, total:0, timeSec:0, played:0 }; });
+  results.forEach(r => { if (!base[r.user]) base[r.user] = { user:r.user, name:r.name, score:0, total:0, timeSec:0, played:0 }; });
+  let rows;
+  if (mode === 'quiz') {
+    const q = quizzes.find(x => x.id === qid);
+    rows = Object.values(base).map(p => {
+      const r = results.find(x => x.quizId === qid && x.user === p.user);
+      return { ...p, score: r ? r.score : 0, total: q ? q.qCount : 0, timeSec: r ? r.timeSec : 0, played: r ? 1 : 0, status: r ? r.status : '' };
+    });
+  } else {
+    const inFy = new Set(quizzes.filter(q => q.fy === fy).map(q => q.id));
+    const maxTotal = quizzes.filter(q => q.fy === fy).reduce((s,q)=>s+q.qCount,0);
+    rows = Object.values(base).map(p => {
+      const mine = results.filter(x => inFy.has(x.quizId) && x.user === p.user);
+      return { ...p, score: mine.reduce((s,x)=>s+x.score,0), total: maxTotal, timeSec: mine.reduce((s,x)=>s+(x.timeSec||0),0), played: mine.length };
+    });
+  }
+  const ranked = _quizRank(rows);
+  const medal = r => r.score > 0 && r.rank <= 3 ? ['🥇','🥈','🥉'][r.rank-1] : '';
+  const tabBtn = (k, label) => <button onClick={() => setMode(k)} style={{flex:1,height:34,borderRadius:7,border:'none',background:mode===k?'#4c1d95':'transparent',color:mode===k?'#fff':T.ink2,fontSize:12,fontWeight:800,cursor:'pointer'}}>{label}</button>;
+  const sel = {width:'100%',height:38,borderRadius:8,border:`1px solid ${T.line}`,padding:'0 10px',fontSize:13,fontFamily:T.sans,background:'#fff',marginTop:8};
+  return (
+    <div style={{margin:'16px 16px 0'}}>
+      <div style={{fontSize:11,fontWeight:800,color:T.ink4,letterSpacing:1,marginBottom:6}}>🏆 LEADERBOARD</div>
+      <div style={{display:'flex',gap:4,background:T.paper2,borderRadius:9,padding:3}}>
+        {tabBtn('fy','Overall · Financial Year')}{tabBtn('quiz','Quiz-wise')}
+      </div>
+      {mode === 'fy'
+        ? <select value={fy} onChange={e=>setFy(e.target.value)} style={sel}>{fys.map(f=><option key={f} value={f}>{f} (Apr–Mar)</option>)}</select>
+        : (quizzes.length
+            ? <select value={qid} onChange={e=>setQid(e.target.value)} style={sel}>{quizzes.map(q=><option key={q.id} value={q.id}>{q.title} · {_quizPretty(q.startMs)}</option>)}</select>
+            : <div style={{fontSize:12,color:T.ink4,marginTop:8}}>No quiz has been held yet.</div>)}
+      <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:10,marginTop:8,overflow:'hidden'}}>
+        <div style={{display:'grid',gridTemplateColumns:'44px 1fr 64px 62px',padding:'8px 10px',background:T.paper2,fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:.6}}>
+          <div>RANK</div><div>NAME</div><div style={{textAlign:'right'}}>SCORE</div><div style={{textAlign:'right'}}>{mode==='fy'?'QUIZZES':'TIME'}</div>
+        </div>
+        {ranked.map(r => {
+          const mine = r.user === me;
+          return (
+            <div key={r.user} style={{display:'grid',gridTemplateColumns:'44px 1fr 64px 62px',alignItems:'center',padding:'9px 10px',borderTop:`1px solid ${T.line}`,background:mine?'#f3efff':'#fff'}}>
+              <div style={{fontFamily:T.mono,fontWeight:800,fontSize:13,color:T.ink2}}>{medal(r) || '#'+r.rank}</div>
+              <div style={{fontSize:13,fontWeight:mine?900:700,color:T.ink,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.name}{mine?' (you)':''}
+                {r.status==='TIME UP' && <span style={{fontSize:9,color:T.bad,fontWeight:800,marginLeft:6}}>TIME UP</span>}
+              </div>
+              <div style={{textAlign:'right',fontFamily:T.mono,fontWeight:900,fontSize:14,color:r.score?'#4c1d95':T.ink4}}>{r.score}<span style={{fontSize:10,color:T.ink4,fontWeight:600}}>{r.total?'/'+r.total:''}</span></div>
+              <div style={{textAlign:'right',fontFamily:T.mono,fontSize:11,color:T.ink3}}>{mode==='fy' ? r.played : (r.played && r.timeSec ? _quizClock(r.timeSec) : '—')}</div>
+            </div>
+          );
+        })}
+        {ranked.length === 0 && <div style={{padding:16,fontSize:12,color:T.ink4,textAlign:'center'}}>No players yet.</div>}
+      </div>
+      <div style={{fontSize:10,color:T.ink4,marginTop:6,lineHeight:1.5}}>1 mark per correct answer. Ties are broken by the quicker finishing time.</div>
+    </div>
+  );
+}
+
+function QuizPlay({play, onDone, showToast, header}) {
+  const key = '4s_quiz_ans_' + play.id;
+  const [answers, setAnswers] = useState(() => { try { return JSON.parse(localStorage.getItem(key)||'{}')||{}; } catch(e) { return {}; } });
+  const [idx, setIdx] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const sentRef = React.useRef(false);
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 500); return () => clearInterval(t); }, []);
+  const left = Math.max(0, (play.deadlineMs - (now + play.offset)) / 1000);
+  const qs = play.questions;
+  const answered = qs.filter(q => answers[q.no] !== undefined).length;
+
+  async function submit(auto) {
+    if (sentRef.current) return;
+    if (!auto && answered < qs.length && !window.confirm(`You have answered ${answered} of ${qs.length}. Submit anyway?`)) return;
+    sentRef.current = true; setSubmitting(true);
+    try {
+      const res = await apiPost({ action:'quizSubmit', id:play.id, answers });
+      if (res && res.ok) { try { localStorage.removeItem(key); } catch(e) {} onDone(res); return; }
+      showToast((res && res.error) || 'Could not submit — try again', 'bad');
+    } catch(e) { showToast('Network error — tap Submit again', 'bad'); }
+    sentRef.current = false; setSubmitting(false);
+  }
+  useEffect(() => { if (left <= 0 && !sentRef.current) submit(true); }, [left <= 0]);
+
+  function choose(q, i) {
+    if (left <= 0) return;
+    setAnswers(prev => { const next = { ...prev, [q.no]: i }; try { localStorage.setItem(key, JSON.stringify(next)); } catch(e) {} return next; });
+  }
+  const q = qs[idx];
+  const low = left <= 60;
+  return (
+    <div className="screen">
+      {header(play.title, 'QUESTION ' + (idx+1) + ' OF ' + qs.length, () => { if (window.confirm('Leave the quiz? The timer keeps running — you can resume from the Quiz page before time is up.')) onDone(null); },
+        <div style={{flexShrink:0,minWidth:76,textAlign:'center',padding:'5px 8px',borderRadius:8,background:low?'#dc2626':'rgba(255,255,255,.16)',fontFamily:T.mono,fontWeight:900,fontSize:18}}>⏱ {_quizClock(left)}</div>)}
+      <div style={{flexShrink:0,height:4,background:T.paper2}}><div style={{height:4,width:(answered/qs.length*100)+'%',background:'#6d28d9',transition:'width .3s'}}/></div>
+      <div className="scroll" style={{background:T.paper}}>
+        {q && <div style={{padding:'16px'}}>
+          <div style={{fontSize:16,fontWeight:800,color:T.ink,lineHeight:1.45}}>{idx+1}. {q.q}</div>
+          <div style={{marginTop:14,display:'flex',flexDirection:'column',gap:9}}>
+            {q.opts.map((o,i) => {
+              const on = answers[q.no] === i;
+              return (
+                <button key={i} onClick={() => choose(q,i)} disabled={left<=0} style={{display:'flex',alignItems:'flex-start',gap:10,textAlign:'left',padding:'12px',borderRadius:10,border:`2px solid ${on?'#6d28d9':T.line}`,background:on?'#f3efff':'#fff',cursor:'pointer',fontFamily:T.sans}}>
+                  <span style={{flexShrink:0,width:26,height:26,borderRadius:99,background:on?'#6d28d9':T.paper2,color:on?'#fff':T.ink2,display:'inline-flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:12}}>{QUIZ_LETTERS[i]}</span>
+                  <span style={{fontSize:14,color:T.ink,lineHeight:1.4,fontWeight:on?700:500}}>{o}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div style={{display:'flex',gap:8,marginTop:16}}>
+            <button onClick={() => setIdx(i => Math.max(0, i-1))} disabled={idx===0} style={{flex:1,height:44,borderRadius:8,border:`1px solid ${T.line2}`,background:'#fff',fontSize:14,fontWeight:800,color:idx===0?T.ink4:T.ink,cursor:'pointer'}}>← Previous</button>
+            {idx < qs.length-1
+              ? <button onClick={() => setIdx(i => Math.min(qs.length-1, i+1))} style={{flex:1,height:44,borderRadius:8,border:'none',background:'#4c1d95',color:'#fff',fontSize:14,fontWeight:800,cursor:'pointer'}}>Next →</button>
+              : <button onClick={() => submit(false)} disabled={submitting} style={{flex:1,height:44,borderRadius:8,border:'none',background:'#15803d',color:'#fff',fontSize:14,fontWeight:900,cursor:'pointer'}}>{submitting?'Submitting…':'✓ Submit'}</button>}
+          </div>
+          <div style={{marginTop:18,fontSize:11,fontWeight:800,color:T.ink4,letterSpacing:.8}}>JUMP TO QUESTION · {answered}/{qs.length} answered</div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:6,marginTop:8}}>
+            {qs.map((x,i) => { const done = answers[x.no] !== undefined; const cur = i===idx; return (
+              <button key={x.no} onClick={() => setIdx(i)} style={{width:36,height:36,borderRadius:8,border:`2px solid ${cur?'#4c1d95':done?'#6d28d9':T.line}`,background:done?'#ede9fe':'#fff',fontFamily:T.mono,fontWeight:800,fontSize:12,color:T.ink2,cursor:'pointer'}}>{i+1}</button>
+            ); })}
+          </div>
+          <button onClick={() => submit(false)} disabled={submitting} style={{marginTop:18,width:'100%',height:46,borderRadius:8,border:'none',background:'#15803d',color:'#fff',fontSize:15,fontWeight:900,cursor:'pointer'}}>{submitting?'Submitting…':'✓ Submit Quiz'}</button>
+          {left <= 0 && <div style={{marginTop:10,fontSize:12,color:T.bad,fontWeight:700,textAlign:'center'}}>Time is up — submitting your answers…</div>}
+        </div>}
+        <div style={{height:24}}/>
+      </div>
+    </div>
+  );
+}
+
+function QuizResult({result, header, onBack}) {
+  const pct = result.total ? Math.round(result.score * 100 / result.total) : 0;
+  const tone = pct >= 80 ? '#15803d' : pct >= 50 ? '#a6610b' : '#9b2917';
+  return (
+    <div className="screen">
+      {header(result.title || 'Quiz result', 'YOUR RESULT', onBack)}
+      <div className="scroll" style={{background:T.paper}}>
+        <div style={{margin:'16px',background:'#fff',border:`2px solid ${tone}`,borderRadius:14,padding:'18px',textAlign:'center'}}>
+          {result.status === 'TIME UP'
+            ? <><div style={{fontSize:34}}>⌛</div><div style={{fontSize:18,fontWeight:900,color:T.bad}}>Time was up — not submitted</div><div style={{fontSize:13,color:T.ink3,marginTop:4}}>Score: 0 / {result.total}</div></>
+            : <>
+                <div style={{fontSize:12,fontWeight:800,color:T.ink4,letterSpacing:1}}>YOU SCORED</div>
+                <div style={{fontSize:46,fontWeight:900,color:tone,lineHeight:1.1,marginTop:4}}>{result.score}<span style={{fontSize:22,color:T.ink4}}> / {result.total}</span></div>
+                <div style={{fontSize:15,fontWeight:800,color:tone,marginTop:2}}>{pct}% {pct===100?'🏆 Perfect!':pct>=80?'🎉 Excellent':pct>=50?'👍 Good — revise the misses':'📘 Please revise the scheme'}</div>
+                {result.timeSec ? <div style={{fontSize:12,color:T.ink4,marginTop:6,fontFamily:T.mono}}>Time taken {_quizClock(result.timeSec)}</div> : null}
+              </>}
+        </div>
+        <div style={{padding:'0 16px 6px',fontSize:11,fontWeight:800,color:T.ink4,letterSpacing:1}}>ALL QUESTIONS WITH CORRECT ANSWERS</div>
+        {(result.review||[]).map((r,i) => {
+          const right = r.your === r.ans;
+          return (
+            <div key={r.no} style={{margin:'0 16px 10px',background:'#fff',border:`1px solid ${T.line}`,borderLeft:`4px solid ${right?'#15803d':'#dc2626'}`,borderRadius:10,padding:'12px'}}>
+              <div style={{fontSize:13,fontWeight:800,color:T.ink,lineHeight:1.4}}>{right?'✅':'❌'} {i+1}. {r.q}</div>
+              <div style={{marginTop:8,display:'flex',flexDirection:'column',gap:5}}>
+                {r.opts.map((o,k) => {
+                  const isAns = k === r.ans, isYour = k === r.your;
+                  return <div key={k} style={{fontSize:12.5,padding:'6px 8px',borderRadius:6,lineHeight:1.35,background:isAns?'#dcfce7':isYour?'#fee2e2':'transparent',color:isAns?'#14532d':isYour?'#7f1d1d':T.ink3,fontWeight:isAns||isYour?700:400}}>
+                    {QUIZ_LETTERS[k]}. {o}{isAns?'  ✓ correct':''}{isYour&&!isAns?'  ✗ your answer':''}
+                  </div>;
+                })}
+                {r.your < 0 && <div style={{fontSize:11,color:T.bad,fontWeight:700}}>Not answered</div>}
+              </div>
+              {r.exp && <div style={{marginTop:8,fontSize:12,color:T.ink2,background:T.paper,borderRadius:6,padding:'7px 9px',lineHeight:1.45}}>💡 {r.exp}</div>}
+            </div>
+          );
+        })}
+        <div style={{padding:'0 16px'}}><button onClick={onBack} style={{width:'100%',height:44,borderRadius:8,border:'none',background:'#4c1d95',color:'#fff',fontSize:14,fontWeight:800,cursor:'pointer'}}>Back to Quiz & Leaderboard</button></div>
+        <div style={{height:24}}/>
+      </div>
+    </div>
+  );
+}
+
+function QuizManage({quizzes, now, header, onBack, onNew, onEdit, reload, showToast, busy}) {
+  async function del(q) {
+    if (!window.confirm(`Delete "${q.title}"? Its questions and everyone's results for it will be removed from the sheet.`)) return;
+    const res = await apiPost({ action:'quizDelete', id:q.id }).catch(()=>null);
+    if (res && res.ok) { showToast('Quiz deleted'); reload(); } else showToast((res && res.error) || 'Could not delete', 'bad');
+  }
+  async function setStatus(q, status) {
+    if (status === 'published' && (!q.startMs || !q.endMs)) { onEdit(q); return; }
+    const res = await apiPost({ action:'quizSave', quiz:{ id:q.id, title:q.title, desc:q.desc, status, startAt:q.startAt, endAt:q.endAt,
+      questions:(q.questions||[]).map(x=>({ q:x.q, opts:x.opts, ans:x.ans, exp:x.exp })) } }).catch(()=>null);
+    if (res && res.ok) { showToast(status==='published'?'Published — everyone can see it':'Unpublished'); reload(); } else showToast((res && res.error) || 'Could not update', 'bad');
+  }
+  const label = { draft:['DRAFT',T.ink4], upcoming:['SCHEDULED',T.blue], live:['LIVE','#dc2626'], ended:['ENDED',T.ink3] };
+  return (
+    <div className="screen">
+      {header('Manage Quizzes', 'ADMIN', onBack, busy ? <Spinner size={14} color="#fff"/> : null)}
+      <div className="scroll" style={{background:T.paper}}>
+        <div style={{padding:'14px 16px 6px'}}>
+          <button onClick={onNew} style={{width:'100%',height:46,borderRadius:8,border:'none',background:'linear-gradient(90deg,#6d28d9,#1d4ed8)',color:'#fff',fontSize:15,fontWeight:900,cursor:'pointer'}}>+ Create a new quiz</button>
+        </div>
+        {quizzes.slice().sort((a,b)=>(b.startMs||0)-(a.startMs||0)).map(q => {
+          const st = _quizState(q, now); const [lt, lc] = label[st];
+          return (
+            <div key={q.id} style={{margin:'8px 16px',background:'#fff',border:`1px solid ${T.line}`,borderRadius:10,padding:'12px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:8}}>
+                <span style={{fontSize:10,fontWeight:900,color:lc,letterSpacing:.8}}>{lt}</span>
+                <span style={{fontSize:10,color:T.ink4,fontFamily:T.mono}}>{q.id} · {q.fy}</span>
+              </div>
+              <div style={{fontSize:15,fontWeight:800,color:T.ink,marginTop:3}}>{q.title}</div>
+              <div style={{fontSize:12,color:T.ink3,marginTop:3}}>{q.qCount} questions · {q.durationMin} min · {_quizPretty(q.startMs)} → {_quizPretty(q.endMs)}</div>
+              <div style={{display:'flex',gap:6,marginTop:10,flexWrap:'wrap'}}>
+                <button onClick={() => onEdit(q)} style={mBtn()}>✎ Edit</button>
+                {q.status === 'published'
+                  ? <button onClick={() => setStatus(q,'draft')} style={mBtn()}>Unpublish</button>
+                  : <button onClick={() => setStatus(q,'published')} style={mBtn('#15803d','#fff')}>Publish</button>}
+                <button onClick={() => del(q)} style={mBtn('#fff',T.bad,T.bad)}>Delete</button>
+              </div>
+            </div>
+          );
+        })}
+        {quizzes.length === 0 && <div style={{padding:'24px',textAlign:'center',fontSize:13,color:T.ink4}}>No quizzes yet — create the first one.</div>}
+        <div style={{padding:'8px 16px',fontSize:11,color:T.ink4,lineHeight:1.5}}>Saved in the Google Sheet tabs <b>QUIZ</b>, <b>QUIZ QUESTIONS</b> and <b>QUIZ RESULTS</b>.</div>
+        <div style={{height:24}}/>
+      </div>
+    </div>
+  );
+}
+function mBtn(bg, fg, bd) { return { height:32, padding:'0 12px', borderRadius:6, border:`1px solid ${bd||bg||T.line2}`, background:bg||'#fff', color:fg||T.ink2, fontSize:12, fontWeight:800, cursor:'pointer' }; }
+
+// Shuffle a new question's options (so the right answer isn't always the same
+// letter) and re-point its correct answer.
+function _quizShuffle(x) {
+  const order = [0,1,2,3];
+  for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+  return { q:x.q, opts:order.map(k => x.opts[k]), ans:order.indexOf(x.ans), exp:x.exp||'' };
+}
+function QuizEditor({quiz, header, onBack, onSaved, showToast}) {
+  const bank = QUIZ_BANKS[0];
+  const toLocal = v => String(v||'').replace(' ', 'T').slice(0,16);
+  // Questions in the editor: the quiz's saved questions first (exactly as saved,
+  // in their order), then the rest of the bank.
+  const savedQs = (quiz && quiz.questions) || [];
+  const [pool, setPool] = useState(() => {
+    const base = savedQs.map(x => ({ q:x.q, opts:x.opts.slice(), ans:x.ans, exp:x.exp||'', saved:true, custom:!bank.questions.some(b => b.q === x.q) }));
+    bank.questions.forEach(x => { if (!base.some(b => b.q === x.q)) base.push({ ...x }); });
+    return base;
+  });
+  const [picked, setPicked] = useState(() => new Set(quiz ? (quiz.questions||[]).map(x => x.q) : []));
+  const [title, setTitle] = useState(quiz ? quiz.title : bank.title);
+  const [desc, setDesc] = useState(quiz ? quiz.desc : bank.desc);
+  const [startAt, setStartAt] = useState(quiz ? toLocal(quiz.startAt) : '');
+  const [endAt, setEndAt] = useState(quiz ? toLocal(quiz.endAt) : '');
+  const [saving, setSaving] = useState(false);
+  const [adding, setAdding] = useState(null);
+  const chosen = pool.filter(x => picked.has(x.q));
+  function toggle(q) { setPicked(prev => { const n = new Set(prev); n.has(q) ? n.delete(q) : n.add(q); return n; }); }
+  async function save(status) {
+    if (!title.trim()) { showToast('Give the quiz a title','warn'); return; }
+    if (!chosen.length) { showToast('Tick at least one question','warn'); return; }
+    if (status === 'published') {
+      if (!startAt || !endAt) { showToast('Set the start and end date & time','warn'); return; }
+      if (_quizMs(endAt) <= _quizMs(startAt)) { showToast('End must be after start','warn'); return; }
+      if (!window.confirm(`Publish "${title}" to everyone?\n\n${chosen.length} questions · ${chosen.length} minutes\n${_quizPretty(startAt)} → ${_quizPretty(endAt)}`)) return;
+    }
+    setSaving(true);
+    try {
+      const res = await apiPost({ action:'quizSave', quiz:{ id: quiz ? quiz.id : '', title:title.trim(), desc:desc.trim(), status,
+        startAt: startAt.replace('T',' '), endAt: endAt.replace('T',' '), questions: chosen.map(x => x.saved ? { q:x.q, opts:x.opts, ans:x.ans, exp:x.exp||'' } : _quizShuffle(x)) } });
+      if (res && res.ok) { showToast(status==='published' ? '🧠 Quiz published' : 'Draft saved'); onSaved(); }
+      else showToast((res && res.error) || 'Could not save', 'bad');
+    } catch(e) { showToast('Network error — try again','bad'); }
+    finally { setSaving(false); }
+  }
+  const inp = {width:'100%',boxSizing:'border-box',height:40,borderRadius:8,border:`1px solid ${T.line}`,padding:'0 10px',fontSize:14,fontFamily:T.sans,background:'#fff'};
+  const lbl = {fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:.8,margin:'12px 0 5px'};
+  return (
+    <div className="screen">
+      {header(quiz ? 'Edit quiz' : 'New quiz', 'ADMIN · QUIZ SETTINGS', onBack)}
+      <div className="scroll" style={{background:T.paper}}>
+        <div style={{padding:'4px 16px 0'}}>
+          <div style={lbl}>TITLE</div>
+          <input value={title} onChange={e=>setTitle(e.target.value)} style={inp}/>
+          <div style={lbl}>DESCRIPTION (optional)</div>
+          <input value={desc} onChange={e=>setDesc(e.target.value)} style={inp}/>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+            <div><div style={lbl}>START DATE & TIME</div><input type="datetime-local" value={startAt} onChange={e=>setStartAt(e.target.value)} style={{...inp,fontSize:13}}/></div>
+            <div><div style={lbl}>END DATE & TIME</div><input type="datetime-local" value={endAt} onChange={e=>setEndAt(e.target.value)} style={{...inp,fontSize:13}}/></div>
+          </div>
+          <div style={{marginTop:12,padding:'10px 12px',background:'#ede9fe',border:'1px solid #c4b5fd',borderRadius:8,fontSize:13,color:'#4c1d95',fontWeight:700}}>
+            {chosen.length} question{chosen.length===1?'':'s'} selected → <b>{chosen.length} minute{chosen.length===1?'':'s'}</b> to finish (1 min per question, for the whole quiz)
+          </div>
+          <div style={{display:'flex',alignItems:'center',gap:8,margin:'14px 0 6px'}}>
+            <div style={{flex:1,fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:.8}}>QUESTIONS · {bank.title.toUpperCase()}</div>
+            <button onClick={() => setPicked(new Set(pool.map(x=>x.q)))} style={mBtn()}>All</button>
+            <button onClick={() => setPicked(new Set())} style={mBtn()}>None</button>
+          </div>
+        </div>
+        {pool.map((x,i) => {
+          const on = picked.has(x.q);
+          return (
+            <div key={i} onClick={() => toggle(x.q)} style={{margin:'0 16px 8px',background:'#fff',border:`1.5px solid ${on?'#6d28d9':T.line}`,borderRadius:10,padding:'10px 12px',cursor:'pointer',display:'flex',gap:10}}>
+              <input type="checkbox" checked={on} readOnly style={{width:18,height:18,marginTop:2,flexShrink:0,accentColor:'#6d28d9'}}/>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:13,fontWeight:700,color:T.ink,lineHeight:1.4}}>{i+1}. {x.q}{x.custom && <span style={{fontSize:9,color:T.blue,fontWeight:800,marginLeft:6}}>CUSTOM</span>}</div>
+                <div style={{fontSize:11.5,color:'#15803d',marginTop:4,fontWeight:700}}>✓ {QUIZ_LETTERS[x.ans]}. {x.opts[x.ans]}</div>
+              </div>
+            </div>
+          );
+        })}
+        <div style={{padding:'0 16px'}}>
+          {!adding && <button onClick={() => setAdding({ q:'', opts:['','','',''], ans:0, exp:'' })} style={{...mBtn(), width:'100%', height:40}}>+ Add your own question</button>}
+          {adding && <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:10,padding:12}}>
+            <div style={lbl}>QUESTION</div>
+            <textarea value={adding.q} onChange={e=>setAdding({...adding,q:e.target.value})} rows={2} style={{...inp,height:'auto',padding:8}}/>
+            {adding.opts.map((o,k) => (
+              <div key={k} style={{display:'flex',alignItems:'center',gap:8,marginTop:6}}>
+                <input type="radio" name="qans" checked={adding.ans===k} onChange={()=>setAdding({...adding,ans:k})} title="Correct answer" style={{accentColor:'#15803d'}}/>
+                <input value={o} placeholder={'Option '+QUIZ_LETTERS[k]} onChange={e=>{ const opts=adding.opts.slice(); opts[k]=e.target.value; setAdding({...adding,opts}); }} style={inp}/>
+              </div>
+            ))}
+            <div style={{fontSize:10,color:T.ink4,marginTop:4}}>Select the radio button next to the correct option.</div>
+            <div style={lbl}>EXPLANATION (shown after the quiz)</div>
+            <input value={adding.exp} onChange={e=>setAdding({...adding,exp:e.target.value})} style={inp}/>
+            <div style={{display:'flex',gap:8,marginTop:10}}>
+              <button onClick={() => setAdding(null)} style={{...mBtn(), flex:1, height:38}}>Cancel</button>
+              <button onClick={() => {
+                if (!adding.q.trim() || adding.opts.some(o=>!o.trim())) { showToast('Fill the question and all 4 options','warn'); return; }
+                if (pool.some(p=>p.q===adding.q.trim())) { showToast('That question is already in the list','warn'); return; }
+                const nq = { q:adding.q.trim(), opts:adding.opts.map(o=>o.trim()), ans:adding.ans, exp:adding.exp.trim(), custom:true };
+                setPool(p => p.concat([nq])); setPicked(s => new Set([...s, nq.q])); setAdding(null);
+              }} style={{...mBtn('#4c1d95','#fff'), flex:1, height:38}}>Add question</button>
+            </div>
+          </div>}
+        </div>
+        <div style={{display:'flex',gap:8,padding:'16px'}}>
+          <button onClick={() => save('draft')} disabled={saving} style={{flex:1,height:46,borderRadius:8,border:`1px solid ${T.line2}`,background:'#fff',fontSize:14,fontWeight:800,color:T.ink,cursor:'pointer'}}>Save draft</button>
+          <button onClick={() => save('published')} disabled={saving} style={{flex:1.4,height:46,borderRadius:8,border:'none',background:'#15803d',color:'#fff',fontSize:14,fontWeight:900,cursor:'pointer'}}>{saving?'Saving…':'🚀 Publish'}</button>
+        </div>
+        <div style={{height:24}}/>
+      </div>
+    </div>
+  );
+}
+
+// Home-tile subtitle for the Quiz: "LIVE" when a published quiz is open now
+// (from the last Quiz-screen load, cached locally), else the leaderboard.
+function quizTileSub() {
+  try {
+    const d = JSON.parse(localStorage.getItem('4s_quiz_cache') || 'null');
+    const now = Date.now() + ((d && d._offset) || 0);
+    const live = ((d && d.quizzes) || []).find(q => q.status === 'published' && now >= q.startMs && now <= q.endMs);
+    if (live) return '🔴 LIVE · ' + live.title;
+  } catch (e) {}
+  return 'Scheme quiz · Leaderboard';
+}
+
 function LeadsScreen({ctx}){
   const {user,orders,leads,leadsLoading,nav,loadLeads,doAddLead,doEditLead,doDeleteLead} = ctx;
   const isManager = hasManagerAccess(user);
@@ -8385,6 +9042,7 @@ function HomeScreen({ctx}) {
     { key:'league',  label:'4S Premier League',    sub:'Live scoreboard',           emoji:'🏆', bg:'linear-gradient(135deg,#1e3a8a 0%,#7a1420 100%)', onClick:()=>nav('league') },
     { key:'targets', label:'Monthly Target',       sub:'Target vs invoiced',        emoji:'🎯', bg:'linear-gradient(135deg,#15803d 0%,#14532d 100%)', onClick:()=>nav('targets') },
     { key:'golden',  label:'Golden Customers',     sub:(ctx.goldenList||[]).length+((ctx.goldenList||[]).length===1?' customer':' customers'), emoji:'⭐', bg:'linear-gradient(135deg,#b8860b 0%,#7a5b00 100%)', onClick:()=>nav('golden') },
+    { key:'quiz',    label:'Quiz',                 sub:quizTileSub(), emoji:'🧠', bg:'linear-gradient(135deg,#6d28d9 0%,#1e3a8a 100%)', onClick:()=>nav('quiz') },
     { key:'leads',   label:'Leads',                sub:leadTotal+(leadTotal===1?' lead':' leads'), emoji:'🎯', bg:'linear-gradient(135deg,#b45309 0%,#92400e 100%)', onClick:()=>nav('leads') },
     { key:'cust',    label:'My Customers',         sub:custToday>0?(custToday+' today'):(custEvs.length+' this month'), emoji:'🎉', bg:'linear-gradient(135deg,#be185d 0%,#9d174d 100%)', onClick:()=>nav('mycustomers') },
     { key:'collect', label:'Outstanding Payments', sub:dueTotal>0?('₹'+Math.round(dueTotal).toLocaleString('en-IN')+' to collect'):'All clear', emoji:'💰', bg:'linear-gradient(135deg,#9f1239 0%,#7a1420 100%)', onClick:()=>nav('collect') },
