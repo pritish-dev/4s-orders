@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v83';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v84';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -231,6 +231,7 @@ function doGet(e) {
     var auth = _verifyToken(p.token);
     if (!auth) return _jsonOut(callback, _authFail());
     p.by = auth.u;   // bind the actor to the verified token (no role spoofing via ?by=)
+    p.authName = auth.n || auth.u || '';   // signed-in user's display name (never trusted from the client)
   }
 
   var result;
@@ -256,6 +257,7 @@ function doGet(e) {
       case 'contactTags':    result = handleContactTags(p);     break;
       case 'offersSent':     result = handleOffersSent();       break;
       case 'goldenCustomers':result = handleGoldenCustomers();  break;
+      case 'quizData':       result = handleQuizData(p);        break;
       case 'changeRequests': result = handleListChangeRequests(p); break;
       case 'debugPriceList': result = handleDebugPriceList();   break;
       default:               result = { ok: false, error: 'Unknown action: ' + (p.action || '(none)') };
@@ -321,6 +323,10 @@ function doPost(e) {
       case 'markOfferSent':   result = handleMarkOfferSent(body);     break;
       case 'resetOffersSent': result = handleResetOffersSent(body);   break;
       case 'markGoldenCustomer': result = handleMarkGoldenCustomer(body); break;
+      case 'quizSave':        result = handleQuizSave(body);          break;
+      case 'quizDelete':      result = handleQuizDelete(body);        break;
+      case 'quizStart':       result = handleQuizStart(body);         break;
+      case 'quizSubmit':      result = handleQuizSubmit(body);        break;
       case 'requestOrderChange': result = handleRequestOrderChange(body); break;
       case 'reviewOrderChange':  result = handleReviewOrderChange(body);  break;
       default:                result = { ok: false, error: 'Unknown action: ' + body.action };
@@ -6388,4 +6394,363 @@ function _writeNormalizedTab(ss, tabName, items) {
   });
   sh.getRange(1, 1, rows.length, 6).setValues(rows);
   _boldRow1(sh);
+}
+
+// ─── QUIZ ─────────────────────────────────────────────────────────────────────
+// Admin publishes multiple-choice quizzes (e.g. on the current scheme); everyone
+// else plays them inside the admin-set window and sees their marks + the correct
+// answers the moment they submit. Everything lives in the OPS spreadsheet:
+//   QUIZ            one row per quiz (title, status, start/end, no. of questions…)
+//   QUIZ QUESTIONS  the questions + options + correct option, per quiz
+//   QUIZ RESULTS    one row per person per quiz (start, submit, score, answers)
+//
+// Rules enforced HERE (not just in the app):
+//   • Only an ADMIN may create / edit / publish / delete a quiz.
+//   • A quiz can be started only while it is published and inside its window.
+//   • One attempt per person per quiz. The time allowed is 1 minute per question,
+//     for the whole quiz, counted from the moment it was started on the server.
+//     A submission that arrives after that (plus a small network grace) scores 0.
+//   • Correct answers are never sent to a player before they have submitted.
+var QUIZ_TAB      = 'QUIZ';
+var QUIZ_Q_TAB    = 'QUIZ QUESTIONS';
+var QUIZ_RES_TAB  = 'QUIZ RESULTS';
+var QUIZ_HEADERS  = ['QUIZ ID', 'TITLE', 'DESCRIPTION', 'STATUS', 'START', 'END', 'NO. OF QUESTIONS',
+                     'DURATION (MIN)', 'FINANCIAL YEAR', 'CREATED BY', 'CREATED AT', 'UPDATED BY', 'UPDATED AT'];
+var QUIZ_Q_HEADERS = ['QUIZ ID', 'Q NO', 'QUESTION', 'OPTION A', 'OPTION B', 'OPTION C', 'OPTION D',
+                      'CORRECT OPTION', 'EXPLANATION'];
+var QUIZ_RES_HEADERS = ['QUIZ ID', 'QUIZ TITLE', 'USERNAME', 'NAME', 'STARTED AT', 'DEADLINE', 'SUBMITTED AT',
+                        'TIME TAKEN (SEC)', 'SCORE', 'TOTAL', 'PERCENT', 'STATUS', 'ANSWERS', 'FINANCIAL YEAR',
+                        'STARTED MS', 'DEADLINE MS'];
+var QUIZ_GRACE_MS = 90 * 1000;   // network allowance on top of the quiz timer
+var QUIZ_LETTERS  = ['A', 'B', 'C', 'D'];
+
+function _quizTz() { return Session.getScriptTimeZone() || 'Asia/Kolkata'; }
+function _quizSheet(ss, name, headers) {
+  var sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+    try { sh.getRange(1, 1, 1, headers.length).setFontWeight('bold'); sh.setFrozenRows(1); } catch (e) {}
+  }
+  return sh;
+}
+function _quizRows(sh, ncol) {
+  var last = sh.getLastRow();
+  if (last < 2) return [];
+  return sh.getRange(2, 1, last - 1, ncol).getValues();
+}
+// "yyyy-MM-dd HH:mm" (IST) ⇄ epoch ms. Accepts a Date cell too.
+function _quizParse(v) {
+  if (v instanceof Date && !isNaN(v.getTime())) return v.getTime();
+  var s = String(v == null ? '' : v).trim().replace('T', ' ');
+  if (!s) return 0;
+  try { return Utilities.parseDate(s.slice(0, 16), _quizTz(), 'yyyy-MM-dd HH:mm').getTime(); } catch (e) { return 0; }
+}
+function _quizFmt(ms) { return ms ? Utilities.formatDate(new Date(ms), _quizTz(), 'yyyy-MM-dd HH:mm') : ''; }
+function _quizFmtSec(ms) { return ms ? Utilities.formatDate(new Date(ms), _quizTz(), 'yyyy-MM-dd HH:mm:ss') : ''; }
+// Indian financial year (April–March) of a moment, e.g. "FY 2026-27".
+function _quizFY(ms) {
+  var d = new Date(ms || Date.now());
+  var y = Number(Utilities.formatDate(d, _quizTz(), 'yyyy')), m = Number(Utilities.formatDate(d, _quizTz(), 'M'));
+  var s = m >= 4 ? y : y - 1;
+  return 'FY ' + s + '-' + String((s + 1) % 100).padStart(2, '0');
+}
+function _quizIsAdmin(body) { return _lookupRole(body && body.by) === 'admin'; }
+
+function _quizList(ss) {
+  var sh = ss.getSheetByName(QUIZ_TAB);
+  if (!sh) return [];
+  return _quizRows(sh, QUIZ_HEADERS.length).filter(function (r) { return String(r[0] || '').trim(); }).map(function (r) {
+    var startMs = _quizParse(r[4]), endMs = _quizParse(r[5]);
+    return {
+      id: String(r[0]).trim(), title: String(r[1] || '').trim(), desc: String(r[2] || '').trim(),
+      status: String(r[3] || 'draft').trim().toLowerCase() === 'published' ? 'published' : 'draft',
+      startAt: _quizFmt(startMs), endAt: _quizFmt(endMs), startMs: startMs, endMs: endMs,
+      qCount: Number(r[6]) || 0, durationMin: Number(r[7]) || Number(r[6]) || 0,
+      fy: String(r[8] || '').trim() || _quizFY(startMs)
+    };
+  });
+}
+function _quizQuestions(ss, quizId) {
+  var sh = ss.getSheetByName(QUIZ_Q_TAB);
+  if (!sh) return [];
+  var out = [];
+  _quizRows(sh, QUIZ_Q_HEADERS.length).forEach(function (r) {
+    if (String(r[0] || '').trim() !== quizId) return;
+    var ans = QUIZ_LETTERS.indexOf(String(r[7] || '').trim().toUpperCase());
+    out.push({ no: Number(r[1]) || out.length + 1, q: String(r[2] || ''),
+               opts: [r[3], r[4], r[5], r[6]].map(function (x) { return String(x == null ? '' : x); }),
+               ans: ans, exp: String(r[8] || '') });
+  });
+  out.sort(function (a, b) { return a.no - b.no; });
+  return out;
+}
+function _quizResults(ss) {
+  var sh = ss.getSheetByName(QUIZ_RES_TAB);
+  if (!sh) return [];
+  return _quizRows(sh, QUIZ_RES_HEADERS.length).map(function (r, i) {
+    return { row: i + 2, quizId: String(r[0] || '').trim(), title: String(r[1] || ''), user: String(r[2] || '').trim().toLowerCase(),
+             name: String(r[3] || '').trim(), submittedAt: r[6] instanceof Date ? _quizFmtSec(r[6].getTime()) : String(r[6] || ''),
+             timeSec: Number(r[7]) || 0, score: Number(r[8]) || 0, total: Number(r[9]) || 0,
+             status: String(r[11] || '').trim().toUpperCase(), answers: String(r[12] || ''), fy: String(r[13] || '').trim(),
+             startedMs: Number(r[14]) || 0, deadlineMs: Number(r[15]) || 0 };
+  }).filter(function (x) { return x.quizId && x.user; });
+}
+// Everyone who can sign in (active, not view-only) — they appear on the
+// leaderboard with 0 until they play.
+function _quizPeople(ss) {
+  var out = [];
+  try {
+    var sh = ss.getSheetByName('APP_ORDERING_CREDS');
+    if (!sh) return out;
+    var rows = sh.getDataRange().getValues();
+    if (rows.length < 2) return out;
+    var hdr = rows[0].map(function (c) { return String(c || '').toLowerCase().trim(); });
+    var cName = _hdrIdx(hdr, ['sales person name', 'salesperson name', 'name', 'sales person']); if (cName < 0) cName = 0;
+    var cUser = _hdrIdx(hdr, ['username', 'user name', 'user']); if (cUser < 0) cUser = 1;
+    var cActive = _hdrIdx(hdr, ['active', 'status', 'enabled']); if (cActive < 0) cActive = 4;
+    var cRole = _hdrIdx(hdr, ['role', 'user role', 'access', 'access level', 'designation']);
+    for (var i = 1; i < rows.length; i++) {
+      var u = String(rows[i][cUser] || '').toLowerCase().trim();
+      if (!u) continue;
+      var act = cActive < rows[i].length ? String(rows[i][cActive] || '').toLowerCase().trim() : '';
+      if (act && act !== 'true' && act !== 'yes' && act !== '1') continue;
+      if (cRole >= 0 && _normRole(rows[i][cRole]) === 'dummy') continue;
+      out.push({ user: u, name: String(rows[i][cName] || '').trim() || u });
+    }
+  } catch (e) {}
+  return out;
+}
+function _quizStrip(q) {   // a question as a player may see it (no answer)
+  return { no: q.no, q: q.q, opts: q.opts };
+}
+function _quizReview(questions, answers) {
+  var score = 0;
+  var review = questions.map(function (q) {
+    var your = answers.hasOwnProperty(String(q.no)) ? Number(answers[String(q.no)]) : -1;
+    if (your === q.ans) score++;
+    return { no: q.no, q: q.q, opts: q.opts, ans: q.ans, your: your, exp: q.exp };
+  });
+  return { score: score, total: questions.length, review: review };
+}
+function _quizParseAnswers(s) {   // "1:B | 2:C" → { "1":1, "2":2 }
+  var out = {};
+  String(s || '').split('|').forEach(function (p) {
+    var m = String(p).trim().match(/^(\d+)\s*:\s*([A-D])$/i);
+    if (m) out[m[1]] = QUIZ_LETTERS.indexOf(m[2].toUpperCase());
+  });
+  return out;
+}
+
+// GET quizData: quizzes (with my attempt), people, results for the leaderboard.
+// Admin also gets every quiz's questions with answers (for editing).
+function handleQuizData(p) {
+  try {
+    var ss = _openOPS();
+    if (!ss) return { ok: false, error: 'Cannot open OPS sheet' };
+    var me = String((p && p.by) || '').toLowerCase().trim();
+    var admin = _quizIsAdmin(p);
+    var quizzes = _quizList(ss);
+    var results = _quizResults(ss);
+    var byId = {};
+    quizzes.forEach(function (q) { byId[q.id] = q; });
+    var now = Date.now();
+    var visible = quizzes.filter(function (q) { return admin || q.status === 'published'; });
+    visible.forEach(function (q) {
+      var mine = results.filter(function (r) { return r.quizId === q.id && r.user === me; })[0];
+      if (mine) {
+        // An attempt whose timer ran out without a submission counts as 0.
+        var expired = mine.status === 'IN PROGRESS' && mine.deadlineMs && now > mine.deadlineMs + QUIZ_GRACE_MS;
+        q.myAttempt = { status: expired ? 'TIME UP' : mine.status, score: mine.score, total: mine.total || q.qCount,
+                        deadlineMs: mine.deadlineMs, timeSec: mine.timeSec };
+      }
+      if (admin) q.questions = _quizQuestions(ss, q.id);
+    });
+    var lb = results.filter(function (r) { return byId[r.quizId] && byId[r.quizId].status === 'published'; }).map(function (r) {
+      var done = r.status === 'SUBMITTED';
+      return { quizId: r.quizId, user: r.user, name: r.name, score: done ? r.score : 0, total: r.total || byId[r.quizId].qCount,
+               timeSec: done ? r.timeSec : 0, status: (r.status === 'IN PROGRESS' && now > r.deadlineMs + QUIZ_GRACE_MS) ? 'TIME UP' : r.status,
+               fy: r.fy || byId[r.quizId].fy };
+    });
+    return { ok: true, isAdmin: admin, serverNow: now, currentFY: _quizFY(now), quizzes: visible, people: _quizPeople(ss), results: lb };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+// POST quizSave (admin): create or update a quiz.
+// body.quiz: { id?, title, desc, status:'draft'|'published', startAt:'yyyy-MM-dd HH:mm', endAt, questions:[{q,opts[4],ans,exp}] }
+function handleQuizSave(body) {
+  if (!_quizIsAdmin(body)) return { ok: false, error: 'Only an admin can create or publish a quiz.' };
+  var qz = (body && body.quiz) || {};
+  var title = String(qz.title || '').trim();
+  var status = String(qz.status || '').toLowerCase() === 'published' ? 'published' : 'draft';
+  var startMs = _quizParse(qz.startAt), endMs = _quizParse(qz.endAt);
+  var qs = Array.isArray(qz.questions) ? qz.questions : [];
+  if (!title) return { ok: false, error: 'Give the quiz a title.' };
+  if (!qs.length) return { ok: false, error: 'Select at least one question.' };
+  for (var i = 0; i < qs.length; i++) {
+    var o = qs[i] || {};
+    if (!String(o.q || '').trim()) return { ok: false, error: 'Question ' + (i + 1) + ' is empty.' };
+    if (!Array.isArray(o.opts) || o.opts.length !== 4 || o.opts.some(function (x) { return !String(x || '').trim(); }))
+      return { ok: false, error: 'Question ' + (i + 1) + ' needs 4 options.' };
+    if (!(Number(o.ans) >= 0 && Number(o.ans) <= 3)) return { ok: false, error: 'Question ' + (i + 1) + ' has no correct option.' };
+  }
+  if (status === 'published') {
+    if (!startMs || !endMs) return { ok: false, error: 'Set the start and end date & time before publishing.' };
+    if (endMs <= startMs) return { ok: false, error: 'The end time must be after the start time.' };
+  }
+  var lock = LockService.getScriptLock(), haveLock = false;
+  try { haveLock = lock.tryLock(20000); } catch (e) {}
+  try {
+    var ss = _openOPS();
+    if (!ss) return { ok: false, error: 'Cannot open OPS sheet' };
+    var sh = _quizSheet(ss, QUIZ_TAB, QUIZ_HEADERS);
+    var qsh = _quizSheet(ss, QUIZ_Q_TAB, QUIZ_Q_HEADERS);
+    _quizSheet(ss, QUIZ_RES_TAB, QUIZ_RES_HEADERS);
+    var id = String(qz.id || '').trim();
+    var rowIx = -1, existing = null;
+    if (id) {
+      var rows = _quizRows(sh, QUIZ_HEADERS.length);
+      for (var r = 0; r < rows.length; r++) if (String(rows[r][0]).trim() === id) { rowIx = r + 2; existing = rows[r]; break; }
+      if (rowIx < 0) return { ok: false, error: 'Quiz not found — it may have been deleted.' };
+    } else {
+      id = 'QZ' + Utilities.formatDate(new Date(), _quizTz(), 'yyMMddHHmmss');
+    }
+    var attempts = _quizResults(ss).filter(function (x) { return x.quizId === id; }).length;
+    var oldQs = existing ? _quizQuestions(ss, id) : [];
+    var sameQs = JSON.stringify(oldQs.map(function (q) { return [q.q, q.opts, q.ans]; })) ===
+                 JSON.stringify(qs.map(function (q) { return [String(q.q).trim(), q.opts.map(function (x) { return String(x).trim(); }), Number(q.ans)]; }));
+    if (attempts && !sameQs) return { ok: false, error: attempts + ' person(s) have already taken this quiz — its questions can no longer be changed. You can still change the dates or unpublish it.' };
+
+    var now = Date.now(), who = String(body.authName || body.by || '');
+    var fy = _quizFY(startMs || now);
+    var row = [id, title, String(qz.desc || '').trim(), status, _quizFmt(startMs), _quizFmt(endMs), qs.length, qs.length, fy,
+               existing ? existing[9] : who, existing ? existing[10] : _quizFmtSec(now), who, _quizFmtSec(now)];
+    if (rowIx > 0) sh.getRange(rowIx, 1, 1, row.length).setNumberFormat('@').setValues([row.map(String)]);
+    else { var nr = sh.getLastRow() + 1; sh.getRange(nr, 1, 1, row.length).setNumberFormat('@').setValues([row.map(String)]); }
+
+    if (!sameQs || !existing) {
+      // Replace this quiz's questions (delete old rows bottom-up, then append).
+      var qrows = _quizRows(qsh, 1);
+      for (var k = qrows.length - 1; k >= 0; k--) if (String(qrows[k][0]).trim() === id) qsh.deleteRow(k + 2);
+      var add = qs.map(function (q, n) {
+        return [id, String(n + 1), String(q.q).trim()].concat(q.opts.map(function (x) { return String(x).trim(); }))
+          .concat([QUIZ_LETTERS[Number(q.ans)], String(q.exp || '').trim()]);
+      });
+      var start = qsh.getLastRow() + 1;
+      qsh.getRange(start, 1, add.length, QUIZ_Q_HEADERS.length).setNumberFormat('@').setValues(add);
+    }
+    _appendLog(body.by, '', 'QUIZ_SAVE', id + ' · ' + status + ' · ' + title);
+    return { ok: true, id: id, status: status };
+  } catch (e) { return { ok: false, error: e.message }; }
+  finally { if (haveLock) try { lock.releaseLock(); } catch (e) {} }
+}
+
+// POST quizDelete (admin): remove a quiz, its questions and its results.
+function handleQuizDelete(body) {
+  if (!_quizIsAdmin(body)) return { ok: false, error: 'Only an admin can delete a quiz.' };
+  var id = String((body && body.id) || '').trim();
+  if (!id) return { ok: false, error: 'No quiz id.' };
+  var lock = LockService.getScriptLock(), haveLock = false;
+  try { haveLock = lock.tryLock(20000); } catch (e) {}
+  try {
+    var ss = _openOPS();
+    if (!ss) return { ok: false, error: 'Cannot open OPS sheet' };
+    [QUIZ_TAB, QUIZ_Q_TAB, QUIZ_RES_TAB].forEach(function (name) {
+      var sh = ss.getSheetByName(name); if (!sh) return;
+      var rows = _quizRows(sh, 1);
+      for (var k = rows.length - 1; k >= 0; k--) if (String(rows[k][0]).trim() === id) sh.deleteRow(k + 2);
+    });
+    _appendLog(body.by, '', 'QUIZ_DELETE', id);
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+  finally { if (haveLock) try { lock.releaseLock(); } catch (e) {} }
+}
+
+function _quizFind(ss, id) { return _quizList(ss).filter(function (q) { return q.id === id; })[0] || null; }
+function _quizMyResult(ss, id, me) { return _quizResults(ss).filter(function (r) { return r.quizId === id && r.user === me; })[0] || null; }
+function _quizFinished(ss, quiz, res) {
+  var qs = _quizQuestions(ss, quiz.id);
+  var rv = _quizReview(qs, res.status === 'SUBMITTED' ? _quizParseAnswers(res.answers) : {});
+  return { ok: true, done: true, status: res.status, score: res.status === 'SUBMITTED' ? res.score : 0,
+           total: qs.length, timeSec: res.timeSec, review: rv.review, title: quiz.title };
+}
+
+// POST quizStart: begin (or resume) my attempt. Returns the questions without
+// answers and the server deadline; if I have already finished, returns my result.
+function handleQuizStart(body) {
+  var id = String((body && body.id) || '').trim();
+  var me = String((body && body.by) || '').toLowerCase().trim();
+  if (!id || !me) return { ok: false, error: 'Please sign in again.' };
+  var lock = LockService.getScriptLock(), haveLock = false;
+  try { haveLock = lock.tryLock(20000); } catch (e) {}
+  try {
+    var ss = _openOPS();
+    if (!ss) return { ok: false, error: 'Cannot open OPS sheet' };
+    var quiz = _quizFind(ss, id);
+    if (!quiz || quiz.status !== 'published') return { ok: false, error: 'This quiz is not available.' };
+    var now = Date.now();
+    var res = _quizMyResult(ss, id, me);
+    var rsh = _quizSheet(ss, QUIZ_RES_TAB, QUIZ_RES_HEADERS);
+    if (res) {
+      if (res.status === 'IN PROGRESS' && now > res.deadlineMs + QUIZ_GRACE_MS) {
+        rsh.getRange(res.row, 9, 1, 4).setValues([[0, res.total, 0, 'TIME UP']]);
+        res.status = 'TIME UP';
+      }
+      if (res.status !== 'IN PROGRESS') return _quizFinished(ss, quiz, res);
+      var qs0 = _quizQuestions(ss, id);
+      return { ok: true, done: false, title: quiz.title, deadlineMs: res.deadlineMs, serverNow: now,
+               durationMin: quiz.durationMin, questions: qs0.map(_quizStrip) };
+    }
+    if (now < quiz.startMs) return { ok: false, error: 'This quiz opens on ' + quiz.startAt + '.' };
+    if (now > quiz.endMs) return { ok: false, error: 'This quiz closed on ' + quiz.endAt + '.' };
+    var qs = _quizQuestions(ss, id);
+    if (!qs.length) return { ok: false, error: 'This quiz has no questions.' };
+    var deadline = now + qs.length * 60 * 1000;   // 1 minute per question, for the whole quiz
+    var row = [id, quiz.title, me, String(body.authName || me), _quizFmtSec(now), _quizFmtSec(deadline), '', '', '', qs.length, '',
+               'IN PROGRESS', '', quiz.fy, now, deadline];
+    var nr = rsh.getLastRow() + 1;
+    rsh.getRange(nr, 1, 1, row.length).setValues([row]);
+    return { ok: true, done: false, title: quiz.title, deadlineMs: deadline, serverNow: now,
+             durationMin: qs.length, questions: qs.map(_quizStrip) };
+  } catch (e) { return { ok: false, error: e.message }; }
+  finally { if (haveLock) try { lock.releaseLock(); } catch (e) {} }
+}
+
+// POST quizSubmit: grade my answers ({ "1":0, "2":3, … } = option index per Q NO).
+function handleQuizSubmit(body) {
+  var id = String((body && body.id) || '').trim();
+  var me = String((body && body.by) || '').toLowerCase().trim();
+  if (!id || !me) return { ok: false, error: 'Please sign in again.' };
+  var lock = LockService.getScriptLock(), haveLock = false;
+  try { haveLock = lock.tryLock(20000); } catch (e) {}
+  try {
+    var ss = _openOPS();
+    if (!ss) return { ok: false, error: 'Cannot open OPS sheet' };
+    var quiz = _quizFind(ss, id);
+    if (!quiz) return { ok: false, error: 'This quiz is not available.' };
+    var res = _quizMyResult(ss, id, me);
+    if (!res) return { ok: false, error: 'Start the quiz first.' };
+    if (res.status !== 'IN PROGRESS') return _quizFinished(ss, quiz, res);
+    var rsh = ss.getSheetByName(QUIZ_RES_TAB);
+    var now = Date.now();
+    var qs = _quizQuestions(ss, id);
+    if (now > res.deadlineMs + QUIZ_GRACE_MS) {
+      rsh.getRange(res.row, 7, 1, 6).setValues([[_quizFmtSec(now), '', 0, qs.length, 0, 'TIME UP']]);
+      res.status = 'TIME UP';
+      return _quizFinished(ss, quiz, res);
+    }
+    var raw = (body && body.answers) || {}, answers = {};
+    qs.forEach(function (q) {
+      var v = raw[String(q.no)];
+      if (v !== undefined && v !== null && v !== '' && Number(v) >= 0 && Number(v) <= 3) answers[String(q.no)] = Number(v);
+    });
+    var rv = _quizReview(qs, answers);
+    var timeSec = Math.max(0, Math.round((Math.min(now, res.deadlineMs) - res.startedMs) / 1000));
+    var ansStr = qs.map(function (q) { var a = answers[String(q.no)]; return q.no + ':' + (a >= 0 ? QUIZ_LETTERS[a] : '-'); }).join(' | ');
+    var pct = qs.length ? Math.round(rv.score * 1000 / qs.length) / 10 : 0;
+    rsh.getRange(res.row, 7, 1, 7).setValues([[_quizFmtSec(now), timeSec, rv.score, qs.length, pct, 'SUBMITTED', ansStr]]);
+    return { ok: true, done: true, status: 'SUBMITTED', score: rv.score, total: qs.length, timeSec: timeSec,
+             review: rv.review, title: quiz.title };
+  } catch (e) { return { ok: false, error: e.message }; }
+  finally { if (haveLock) try { lock.releaseLock(); } catch (e) {} }
 }
