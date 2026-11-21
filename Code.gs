@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v84';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v85';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -4245,11 +4245,49 @@ function _lookupName(username) {
 // the client does: the user's display name (or, as a fallback, the raw
 // identifier) contains one of the LEADS_PEOPLE names. Returns '' when none.
 function _leadsPersonForUser(by) {
-  var up = String(_lookupName(by) || by || '').toUpperCase();
-  for (var i = 0; i < LEADS_PEOPLE.length; i++) {
-    if (up.indexOf(LEADS_PEOPLE[i]) >= 0) return LEADS_PEOPLE[i];
+  var up = String(_lookupName(by) || by || '').trim().toUpperCase();
+  return _leadsPersonFromName(up, _leadsPeople());
+}
+
+// Same matching rule as the client: a name that contains a known register name
+// owns that register; otherwise the first word of the person's name becomes
+// their own register (e.g. "Jitendra Kumar" → "JITENDRA"), so every salesperson
+// gets a lead register automatically without a code change.
+function _leadsPersonFromName(upName, people) {
+  upName = String(upName || '').trim().toUpperCase();
+  if (!upName) return '';
+  for (var i = 0; i < people.length; i++) {
+    if (upName.indexOf(people[i]) >= 0) return people[i];
   }
-  return '';
+  var first = upName.split(/[^A-Z0-9]+/).filter(function (w) { return w; })[0] || '';
+  return first;
+}
+
+// Every lead register: the core team plus any "<NAME> LEADS" tab that exists in
+// the OPS sheet (tabs are created on a salesperson's first lead).
+function _leadsPeople() {
+  var out = LEADS_PEOPLE.slice();
+  try {
+    var ss = _openOPS();
+    if (ss) {
+      ss.getSheets().forEach(function (sh) {
+        var m = String(sh.getName() || '').trim().toUpperCase().match(/^(.+?)\s+LEADS$/);
+        if (m && m[1] && out.indexOf(m[1]) < 0) out.push(m[1]);
+      });
+    }
+  } catch (e) {}
+  return out;
+}
+
+// Authorize a lead write: an admin may act on any register; everyone else only
+// on their own. Returns '' when allowed, or an error message.
+function _leadsAuthError(by, person, verb) {
+  if (!person) return 'Unknown sales person: (blank)';
+  var role = _lookupRole(by);
+  if (role === 'dummy') return 'Read-only login — changes are not allowed.';
+  if (role === 'admin') return '';
+  if (_leadsPersonForUser(by) === person) return '';
+  return 'You can only ' + verb + ' your own leads.';
 }
 
 // ─── AUDIT LOG ────────────────────────────────────────────────────────────────
@@ -4688,7 +4726,8 @@ function handleLeads(p) {
       return String(v == null ? '' : v).trim();
     }
     var byPerson = {};
-    LEADS_PEOPLE.forEach(function (person) {
+    var people = _leadsPeople();
+    people.forEach(function (person) {
       var rows = [];
       var sh = ss.getSheetByName(_leadsSheetName(person));
       if (sh) {
@@ -4719,7 +4758,7 @@ function handleLeads(p) {
       }
       byPerson[person] = rows;
     });
-    return { ok: true, leads: byPerson, people: LEADS_PEOPLE, scriptVersion: SCRIPT_VERSION };
+    return { ok: true, leads: byPerson, people: people, scriptVersion: SCRIPT_VERSION };
   } catch (e) { return { ok: false, error: e.message }; }
 }
 
@@ -4800,8 +4839,8 @@ function handleAddLead(body) {
   var dateIn   = String((body && body.date) || '').trim();
   var by       = String((body && (body.by || body.createdBy)) || '').trim();
 
-  if (LEADS_PEOPLE.indexOf(person) < 0)
-    return { ok: false, error: 'Unknown sales person: ' + (person || '(blank)') };
+  var authErr = _leadsAuthError(by, person, 'add');
+  if (authErr) return { ok: false, error: authErr };
   if (!customer && !contact)
     return { ok: false, error: 'Enter at least a customer name or contact number.' };
 
@@ -4852,8 +4891,8 @@ function handleEditLead(body) {
   var dateIn   = String((body && body.date) || '').trim();
   var by       = String((body && (body.by || body.createdBy)) || '').trim();
 
-  if (LEADS_PEOPLE.indexOf(person) < 0)
-    return { ok: false, error: 'Unknown sales person: ' + (person || '(blank)') };
+  var authErr = _leadsAuthError(by, person, 'edit');
+  if (authErr) return { ok: false, error: authErr };
   if (!slNo)
     return { ok: false, error: 'Missing lead reference (SL NO).' };
   if (!customer && !contact)
@@ -4904,13 +4943,11 @@ function handleDeleteLead(body) {
   var slNo   = String((body && body.slNo) || '').trim();
   var by     = String((body && (body.by || body.createdBy)) || '').trim();
 
-  if (LEADS_PEOPLE.indexOf(person) < 0)
-    return { ok: false, error: 'Unknown sales person: ' + (person || '(blank)') };
   if (!slNo)
     return { ok: false, error: 'Missing lead reference (SL NO).' };
   // An admin may delete anyone's lead; a salesperson only their own register.
-  if (_lookupRole(by) !== 'admin' && _leadsPersonForUser(by) !== person)
-    return { ok: false, error: 'You can only delete your own leads.' };
+  var authErr = _leadsAuthError(by, person, 'delete');
+  if (authErr) return { ok: false, error: authErr };
 
   var lock = LockService.getScriptLock();
   var haveLock = false;

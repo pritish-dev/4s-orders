@@ -6209,6 +6209,18 @@ function LeagueScreen({ctx}) {
 // own tab), and flags leads that have converted into an order (matched by phone),
 // which earn +6 points in the 4S Premier League.
 const LEADS_PEOPLE = ['SWATI','ARCHITA','ADITYA','BISWAJIT','SAROJ','PRITISH'];
+// Which lead register a user owns. A name containing a known register name owns
+// it; otherwise the first word of their name is their own register (e.g.
+// "Jitendra Kumar" → "JITENDRA"), so every salesperson can add leads without a
+// code change. Mirrors _leadsPersonFromName() in the backend.
+function leadsPersonFor(user, people){
+  const nm = String((user&&user.name)||'').trim().toUpperCase();
+  if(!nm) return '';
+  const list = people||LEADS_PEOPLE;
+  const hit = list.find(p=>nm.includes(p));
+  if(hit) return hit;
+  return nm.split(/[^A-Z0-9]+/).filter(Boolean)[0]||'';
+}
 // Same salesperson? Ignores case/spacing; "SWATI" matches "Swati Das" (one name
 // contains the other) and first names that agree also match. Mirrors
 // _sameSalesName() in the backend, which re-checks Golden Customer marks.
@@ -6227,7 +6239,7 @@ function prettyDayMonth(v) {
   return p.d + ' ' + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][Number(p.m)-1];
 }
 
-function AddLeadModal({person, canPickPerson, lead, prefill, onCancel, onSave}){
+function AddLeadModal({person, people, canPickPerson, lead, prefill, onCancel, onSave}){
   const editing = !!lead;
   const newCycle = !editing && !!(prefill && (prefill.customer || prefill.contact)); // "new items" for a converted customer
   const pickPerson = canPickPerson && !editing;   // an existing lead lives in one person's tab
@@ -6266,7 +6278,7 @@ function AddLeadModal({person, canPickPerson, lead, prefill, onCancel, onSave}){
         <div style={lbl}>Sales person</div>
         {pickPerson ? (
           <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
-            {LEADS_PEOPLE.map(nm=>(
+            {(people||LEADS_PEOPLE).map(nm=>(
               <button key={nm} onClick={()=>setP(nm)} style={{padding:'7px 12px',borderRadius:99,border:`1.5px solid ${p===nm?T.green:T.line}`,background:p===nm?T.green:'#fff',color:p===nm?'#fff':T.ink2,fontSize:12,fontWeight:700,cursor:'pointer'}}>{nm}</button>
             ))}
           </div>
@@ -7206,13 +7218,23 @@ function quizTileSub() {
 
 function LeadsScreen({ctx}){
   const {user,orders,leads,leadsLoading,nav,loadLeads,doAddLead,doEditLead,doDeleteLead} = ctx;
-  const isManager = hasManagerAccess(user);
+  // Access: every salesperson (and manager) sees, adds, edits and deletes only
+  // their OWN lead register. Only an admin can open and change every register.
+  // A read-only (dummy) login can view all registers but change nothing.
   const isAdmin = normRole(user?.role) === 'admin';
-  const myName = String(user?.name||'').trim().toUpperCase();
-  const me = LEADS_PEOPLE.find(p=>myName.includes(p)) || (LEADS_PEOPLE.indexOf(myName)>=0?myName:'');
-  const [sel,setSel]   = useState(me || LEADS_PEOPLE[0]);
-  // A salesperson "owns" the register that carries their own name — they may edit
-  // and delete only those leads (managers can edit any; admins can delete any).
+  const readOnly = isReadOnlyUser(user);
+  const canViewAll = isAdmin || readOnly;
+  // All registers: the core team plus any "<NAME> LEADS" tab the server returned.
+  const allPeople = React.useMemo(()=>{
+    const out = LEADS_PEOPLE.slice();
+    Object.keys(leads||{}).forEach(k=>{ const n=String(k||'').trim().toUpperCase(); if(n && out.indexOf(n)<0) out.push(n); });
+    return out;
+  },[leads]);
+  const me = leadsPersonFor(user, allPeople);
+  const people = canViewAll ? (me && allPeople.indexOf(me)<0 ? allPeople.concat([me]) : allPeople) : (me ? [me] : []);
+  const [sel,setSel]   = useState(me || people[0] || '');
+  useEffect(()=>{ if(!canViewAll && me && sel!==me) setSel(me); },[me,canViewAll]);
+  // A salesperson "owns" the register that carries their own name.
   const isOwn = !!me && sel===me;
   const [showAdd,setShowAdd] = useState(false);
   const [editLead,setEditLead] = useState(null);   // the lead being edited (managers/admins)
@@ -7266,7 +7288,7 @@ function LeadsScreen({ctx}){
   const totalConv = rows.reduce((s,l)=>s+(isConverted(l)?_leadAmt(l):0),0);
 
   // A regular salesperson may only add to their own register; a manager/admin to any.
-  const canAdd = isManager || !!me;
+  const canAdd = !readOnly && (isAdmin || !!me);
   // Opening the Add sheet with a customer+contact seed creates a fresh "new items"
   // lead cycle for a converted customer — the original converted lead (and its
   // league points) is left untouched.
@@ -7286,7 +7308,7 @@ function LeadsScreen({ctx}){
         </div>
         {/* Salesperson selector */}
         <div style={{display:'flex',gap:6,overflowX:'auto',marginTop:12,paddingBottom:2}}>
-          {LEADS_PEOPLE.map(nm=>{
+          {people.map(nm=>{
             const n=((leads&&leads[nm])||[]).length;
             const active=sel===nm;
             return (
@@ -7342,11 +7364,11 @@ function LeadsScreen({ctx}){
         {/* Add-lead button */}
         {canAdd && (
           <div style={{padding:'8px 16px 4px'}}>
-            <button onClick={()=>{setAddPrefill(null);setShowAdd(true);}} style={{width:'100%',height:44,borderRadius:10,background:T.green,color:'#fff',border:'none',fontSize:14,fontWeight:800,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>{Icon.plus('#fff',18)} Add a lead{(!isManager&&me)?' for '+me:''}</button>
+            <button onClick={()=>{setAddPrefill(null);setShowAdd(true);}} style={{width:'100%',height:44,borderRadius:10,background:T.green,color:'#fff',border:'none',fontSize:14,fontWeight:800,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>{Icon.plus('#fff',18)} Add a lead{(!isAdmin&&me)?' for '+me:''}</button>
           </div>
         )}
         {!canAdd && (
-          <div style={{margin:'8px 16px 4px',padding:'10px 12px',background:T.warnSoft,border:'1px solid #e6cc95',borderRadius:8,fontSize:12,color:T.warn}}>Your login isn't linked to a lead register, so you can view leads but not add them.</div>
+          <div style={{margin:'8px 16px 4px',padding:'10px 12px',background:T.warnSoft,border:'1px solid #e6cc95',borderRadius:8,fontSize:12,color:T.warn}}>{readOnly?'Read-only login — you can view leads but not add them.':"Your login isn't linked to a lead register. Ask the admin to check your name in the staff sheet."}</div>
         )}
 
         {/* Lead list */}
@@ -7381,9 +7403,9 @@ function LeadsScreen({ctx}){
                     <div style={{textAlign:'right',flexShrink:0}}>
                       {l.amount?<div style={{fontSize:14,fontFamily:T.mono,fontWeight:800,color:T.ink}}>₹{(Number(String(l.amount).replace(/[^\d.]/g,''))||0).toLocaleString('en-IN')}</div>:<div style={{fontSize:11,color:T.ink4}}>—</div>}
                       <div style={{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:10,marginTop:6}}>
-                        {isManager && conv && <button onClick={e=>{e.stopPropagation();setAddPrefill({customer:l.customer||'',contact:l.contact||''});setShowAdd(true);}} title="Log new items this customer now wants — starts a fresh lead; the converted one keeps its points" style={{fontSize:11,fontWeight:800,color:T.green,background:'none',border:'none',padding:0,cursor:'pointer'}}>＋ New items</button>}
-                        {(isManager||isOwn) && <button onClick={e=>{e.stopPropagation();setEditLead({...l,_person:sel,_converted:conv});}} style={{fontSize:11,fontWeight:700,color:T.ink3,background:'none',border:'none',padding:0,cursor:'pointer'}}>Edit ✎</button>}
-                        {(isAdmin||isOwn) && <button onClick={async e=>{e.stopPropagation(); if(!window.confirm('Delete lead #'+(l.slNo||(i+1))+(l.customer?' · '+l.customer:'')+' for '+sel+'? This cannot be undone.')) return; await doDeleteLead({salesPerson:sel,slNo:l.slNo});}} style={{fontSize:11,fontWeight:700,color:T.bad,background:'none',border:'none',padding:0,cursor:'pointer'}}>Delete ✕</button>}
+                        {!readOnly && (isAdmin||isOwn) && conv && <button onClick={e=>{e.stopPropagation();setAddPrefill({customer:l.customer||'',contact:l.contact||''});setShowAdd(true);}} title="Log new items this customer now wants — starts a fresh lead; the converted one keeps its points" style={{fontSize:11,fontWeight:800,color:T.green,background:'none',border:'none',padding:0,cursor:'pointer'}}>＋ New items</button>}
+                        {!readOnly && (isAdmin||isOwn) && <button onClick={e=>{e.stopPropagation();setEditLead({...l,_person:sel,_converted:conv});}} style={{fontSize:11,fontWeight:700,color:T.ink3,background:'none',border:'none',padding:0,cursor:'pointer'}}>Edit ✎</button>}
+                        {!readOnly && (isAdmin||isOwn) && <button onClick={async e=>{e.stopPropagation(); if(!window.confirm('Delete lead #'+(l.slNo||(i+1))+(l.customer?' · '+l.customer:'')+' for '+sel+'? This cannot be undone.')) return; await doDeleteLead({salesPerson:sel,slNo:l.slNo});}} style={{fontSize:11,fontWeight:700,color:T.bad,background:'none',border:'none',padding:0,cursor:'pointer'}}>Delete ✕</button>}
                         {l.contact && <a href={'https://wa.me/91'+_normPhone(l.contact)} target="_blank" rel="noopener" onClick={e=>e.stopPropagation()} style={{fontSize:11,fontWeight:700,color:T.green,textDecoration:'none'}}>WhatsApp ↗</a>}
                       </div>
                     </div>
@@ -7398,8 +7420,9 @@ function LeadsScreen({ctx}){
 
       {showAdd && (
         <AddLeadModal
-          person={(!isManager&&me)?me:sel}
-          canPickPerson={isManager}
+          person={(!isAdmin&&me)?me:sel}
+          people={people}
+          canPickPerson={isAdmin}
           prefill={addPrefill}
           onCancel={()=>{setShowAdd(false);setAddPrefill(null);}}
           onSave={doAddLead}
