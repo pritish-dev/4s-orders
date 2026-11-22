@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v85';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v86';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -1796,6 +1796,8 @@ function handleOrders(p) {
   var cHappyDt = colOf(['HAPPY CODE DATE','INSTALLATION HAPPY CODE DATE']);
   // Complimentary gift(s) given with the order — JSON array of { item, qty, price }.
   var cGifts   = colOf(['GIFTS GIVEN','GIFT ITEMS','GIFTS']);
+  var cTime    = colOf(CRM_H.TIME);
+  var _crmTz   = (function () { try { return sh.getParent().getSpreadsheetTimeZone(); } catch (e) { return 'Asia/Kolkata'; } })();
   // Per-item columns
   var cICode = colOf(['ITEM CODE','CODE']);
   var cIName = colOf(['PRODUCT NAME']);
@@ -1933,6 +1935,13 @@ function handleOrders(p) {
         challanNo: sval(r, cChalNo),
         challanDate: dstr(r, cChalDate),
         date: sval(r, cDate),
+        // Time of sale. Sheets may auto-convert "03:45 PM" into a time value, so a
+        // Date cell is formatted back to hh:mm AM/PM.
+        time: (function () {
+          var tv = cell(r, cTime);
+          if (tv instanceof Date && !isNaN(tv.getTime())) return Utilities.formatDate(tv, _crmTz, 'hh:mm a');
+          return String(tv == null ? '' : tv).trim();
+        })(),
         // After-sales service / issue tracking.
         serviceFlag: /^(yes|true|1)$/i.test(sval(r, cSvcFlag)),
         serviceReqNo: sval(r, cSvcReqNo),
@@ -2245,6 +2254,9 @@ var CRM_H = {
   // WON and Godrej SO No are the same thing — the WON lands in the GODREJ SO NO column.
   WON:      ['WON', 'WON NO', 'WON NO.', 'WON NUMBER', 'GODREJ SO NO', 'GODREJ SO NO.', 'GODREJ SO NUMBER'],
   DATE:     ['ORDER DATE'],
+  // Time of the sale (hh:mm AM/PM, IST) — stamped once when the order is first
+  // booked and kept unchanged on every later edit.
+  TIME:     ['ORDER TIME', 'BOOKING TIME', 'SALE TIME'],
   CUSTOMER: ['CUSTOMER NAME'],
   SALES:    ['SALES PERSON'],
   AMOUNT:   ['ORDER AMOUNT (WITH TAX AND AFTER DISC )', 'ORDER AMOUNT (WITH TAX AND AFTER DISC)'],
@@ -2261,6 +2273,7 @@ var CRM_APP_COLUMNS = [
   // Idempotency key from the app (see CRM_H.CLIENT_ID) — dedupes retried/double saves.
   ['CLIENT ORDER ID', 'CLIENT ID', 'IDEMPOTENCY KEY'],
   ['ORDER DATE'],
+  ['ORDER TIME', 'BOOKING TIME', 'SALE TIME'],
   ['ORDER NO', 'ORDER NO.'],
   ['GODREJ SO NO', 'GODREJ SO NO.', 'GODREJ SO NUMBER', 'WON', 'WON NO', 'WON NUMBER'],
   ['ITEM CODE', 'CODE'],
@@ -2478,7 +2491,7 @@ function handleSaveOrder(o) {
     var who = o.byName || o.by || o.salesExec || '';
     var act = (o.no || o.internalNo) ? 'EDIT_ORDER' : 'CREATE_ORDER';
     _appendLog(who, res.orderNo, act, (o.customer || '') + (o.totalWithTax ? ' · ₹' + (Number(o.totalWithTax) || 0) : ''));
-    return { ok: true, orderNo: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo, crmRows: res.rows };
+    return { ok: true, orderNo: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo, orderDate: res.orderDate || '', orderTime: res.orderTime || '', crmRows: res.rows };
   } finally {
     if (haveLock) { try { lock.releaseLock(); } catch (e) {} }
   }
@@ -3013,6 +3026,7 @@ function _writeOrderToCRM(o) {
   var cClient  = colOf(CRM_H.CLIENT_ID);
   var cWon     = colOf(CRM_H.WON);
   var cDate    = colOf(CRM_H.DATE);
+  var cTime    = colOf(CRM_H.TIME);
   var cRcpt    = colOf(['ORDER FORM RECEIPT NO', 'ORDER FORM RECEIPT NO.', 'ORDER FORM RECEIPT']);
   var cManualC = colOf(['MANUAL ORDER', 'IS MANUAL ORDER', 'MANUAL']);
   var cStage   = colOf(['ORDER STATUS', 'ORDER STAGE', 'DRAFT/SUBMITTED']);
@@ -3032,7 +3046,7 @@ function _writeOrderToCRM(o) {
   // neither an internal no nor an order no yet) idempotent: a double-click or a lost-
   // response network retry re-sends the same clientId, so the second write lands on
   // the rows the first one already created instead of booking a duplicate order.
-  var matchRows = [], existingWon = '', existingDate = '', existingStage = '';
+  var matchRows = [], existingWon = '', existingDate = '', existingStage = '', existingTime = '';
   if ((incomingInt || incomingOrder || incomingClient) && (cIntNo >= 0 || cOrderNo >= 0 || cClient >= 0)) {
     for (var i = 0; i < data.length; i++) {
       var rowInt    = cIntNo   >= 0 ? Number(data[i][cIntNo]) || 0 : 0;
@@ -3045,6 +3059,12 @@ function _writeOrderToCRM(o) {
       matchRows.push(i);
       if (cWon   >= 0 && !existingWon)   existingWon   = String(data[i][cWon]   || '').trim();
       if (cDate  >= 0 && !existingDate)  existingDate  = String(data[i][cDate]  || '').trim();
+      if (cTime  >= 0 && !existingTime) {
+        var tv0 = data[i][cTime];
+        existingTime = (tv0 instanceof Date && !isNaN(tv0.getTime()))
+          ? Utilities.formatDate(tv0, (function () { try { return sh.getParent().getSpreadsheetTimeZone(); } catch (e) { return 'Asia/Kolkata'; } })(), 'hh:mm a')
+          : String(tv0 || '').trim();
+      }
       if (cStage >= 0 && !existingStage) existingStage = String(data[i][cStage] || '').trim().toLowerCase();
     }
   }
@@ -3096,6 +3116,13 @@ function _writeOrderToCRM(o) {
   var now          = new Date();
   var todayStr     = now.toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'2-digit' }).replace(/\//g,'.');
   var orderDateStr = String(o.date || '') || existingDate || todayStr;   // keep original date on re-save
+  // Time of sale: stamped once when the order is first booked (the app sends the
+  // moment it was booked, which also covers offline orders synced later) and kept
+  // unchanged on every re-save. Older orders that never had a time stay blank, and
+  // manual (back-dated) orders aren't stamped with the time they were keyed in.
+  var orderTimeStr = existingTime ||
+    ((isExisting || o.manualOrder) ? '' : (String(o.time || '').trim() || Utilities.formatDate(now, 'Asia/Kolkata', 'hh:mm a')));
+  o.orderTime = orderTimeStr;
   // WON (Godrej SO No): the client's order-level value is authoritative on every
   // save — an empty string means the user CLEARED it, so it must be blanked, not
   // silently restored from the sheet. Only fall back to the existing WON when the
@@ -3136,7 +3163,7 @@ function _writeOrderToCRM(o) {
       // Order now has no items — remove its rows (bottom-up) so nothing stale remains.
       var delRows = sortedIdx.map(function(x){ return x + 2; }).sort(function(a, b){ return b - a; });
       for (var d = 0; d < delRows.length; d++) sh.deleteRow(delRows[d]);
-      return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: 0, isNew: !isExisting };
+      return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: 0, isNew: !isExisting, orderDate: orderDateStr, orderTime: orderTimeStr };
     }
 
     var oldCount = matchRows.length, newCount = built.length;
@@ -3149,7 +3176,7 @@ function _writeOrderToCRM(o) {
       for (var dd = oldCount - 1; dd >= newCount; dd--) sh.deleteRow(firstSheetRow + dd);
     }
     _stampDayMonthText(sh, colOf, firstSheetRow, newCount, o.dob, o.anniversary);
-    return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: newCount, isNew: !isExisting };
+    return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: newCount, isNew: !isExisting, orderDate: orderDateStr, orderTime: orderTimeStr };
   }
 
   // New order (or non-contiguous legacy rows): delete any old rows, append at bottom.
@@ -3159,11 +3186,11 @@ function _writeOrderToCRM(o) {
   }
 
   var built = _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wonToWrite, sh.getLastRow());
-  if (!built.length) return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: 0, isNew: !isExisting };
+  if (!built.length) return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: 0, isNew: !isExisting, orderDate: orderDateStr, orderTime: orderTimeStr };
   var appendAt = sh.getLastRow() + 1;
   sh.getRange(appendAt, 1, built.length, ncol).setValues(built);
   _stampDayMonthText(sh, colOf, appendAt, built.length, o.dob, o.anniversary);
-  return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: built.length, isNew: !isExisting };
+  return { ok: true, orderNo: orderNo, internalNo: internalNo, orderFormReceiptNo: o.orderFormReceiptNo || '', rows: built.length, isNew: !isExisting, orderDate: orderDateStr, orderTime: orderTimeStr };
 }
 
 // Round a rupee amount once, at the end; the 2-decimal pre-pass drops float noise
@@ -3205,6 +3232,7 @@ function _buildOrderRows(o, header, colOf, orderNo, internalNo, orderDateStr, wo
     // matches this order's rows instead of creating a duplicate. See handleSaveOrder.
     put(CRM_H.CLIENT_ID, o.clientId || '');
     put(CRM_H.DATE, orderDateStr);
+    put(CRM_H.TIME, o.orderTime || '');
     put(CRM_H.ORDER_NO, orderNo);
     // WON == Godrej SO No. Per-item WON (it.won) wins so a single order can carry
     // several SO numbers across its items; falls back to the order-level WON.
@@ -4668,13 +4696,17 @@ function handleMarkGoldenCustomer(body) {
 // ─── LEADS ────────────────────────────────────────────────────────────────────
 // Every salesperson keeps a lead register in the OPS spreadsheet, one tab per
 // person named "<NAME> LEADS" (e.g. "SWATI LEADS"). Each tab shares the header:
-//   SL NO | DATE | CUSTOMER NAME | CONTACT NO | PRODUCT DETAILS | AMOUNT
+//   SL NO | DATE | CUSTOMER NAME | CONTACT NO | PRODUCT DETAILS | AMOUNT | TIME
+// TIME (hh:mm AM/PM, IST) is the moment the lead was added; older tabs without
+// a TIME column get one appended on their next lead.
+// Only an admin may put a lead on any date — everyone else's leads are always
+// dated today (server time) and their dates can't be changed on edit.
 // The app reads every salesperson's leads (grouped by person) and lets a
 // salesperson add a new lead, which is appended to their own tab. A lead that
 // later converts into an order is matched by contact number on the client and
 // earns +6 league points (see leagueAuto in the app).
 var LEADS_PEOPLE  = ['SWATI', 'ARCHITA', 'ADITYA', 'BISWAJIT', 'SAROJ', 'PRITISH'];
-var LEADS_HEADERS = ['SL NO', 'DATE', 'CUSTOMER NAME', 'CONTACT NO', 'PRODUCT DETAILS', 'AMOUNT'];
+var LEADS_HEADERS = ['SL NO', 'DATE', 'CUSTOMER NAME', 'CONTACT NO', 'PRODUCT DETAILS', 'AMOUNT', 'TIME'];
 
 function _leadsSheetName(person) { return String(person || '').trim().toUpperCase() + ' LEADS'; }
 
@@ -4711,8 +4743,27 @@ function _leadCols(sh) {
     customer: find(function (s) { return s.indexOf('customer') >= 0 || s.indexOf('name') >= 0; }, 2),
     contact:  find(function (s) { return s.indexOf('contact') >= 0 || s.indexOf('phone') >= 0 || s.indexOf('mobile') >= 0; }, 3),
     product:  find(function (s) { return s.indexOf('product') >= 0 || s.indexOf('detail') >= 0; }, 4),
-    amount:   find(function (s) { return s.indexOf('amount') >= 0 || s.indexOf('value') >= 0; }, 5)
+    amount:   find(function (s) { return s.indexOf('amount') >= 0 || s.indexOf('value') >= 0; }, 5),
+    // No positional fallback: older tabs simply have no TIME column (-1).
+    time:     find(function (s) { return s === 'time' || s.indexOf('time') === 0 || s.indexOf(' time') >= 0; }, -1)
   };
+}
+
+// Make sure a leads tab has a TIME column; appends the header when missing.
+// Returns the refreshed column map.
+function _ensureLeadTimeCol(sh) {
+  var C = _leadCols(sh);
+  if (C.time >= 0) return C;
+  var lastCol = Math.max(1, sh.getLastColumn());
+  sh.getRange(1, lastCol + 1).setValue('TIME');
+  try { sh.getRange(1, lastCol + 1).setFontWeight('bold'); } catch (e) {}
+  return _leadCols(sh);
+}
+
+// "hh:mm AM/PM" for a leads TIME cell (Sheets may store it as a time value).
+function _leadTimeStr(v, tz) {
+  if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, tz, 'hh:mm a');
+  return String(v == null ? '' : v).trim();
 }
 
 // Read every salesperson's leads, grouped by person. Open to any logged-in user.
@@ -4721,6 +4772,7 @@ function handleLeads(p) {
     var ss = _openOPS();
     if (!ss) return { ok: false, error: 'Cannot open OPS sheet: ' + OPS_SHEET_ID };
     var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+    var ssTz = (function () { try { return ss.getSpreadsheetTimeZone() || tz; } catch (e) { return tz; } })();
     function ds(v) {
       if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
       return String(v == null ? '' : v).trim();
@@ -4748,6 +4800,7 @@ function handleLeads(p) {
             rows.push({
               slNo:     (g(C.sl) === '' || g(C.sl) == null) ? String(rows.length + 1) : String(g(C.sl)).trim(),
               date:     dateStr,
+              time:     _leadTimeStr(g(C.time), ssTz),
               customer: customer,
               contact:  contact,
               product:  product,
@@ -4851,10 +4904,16 @@ function handleAddLead(body) {
     var sh = _leadsSheet(person, true);
     if (!sh) return { ok: false, error: 'Cannot open leads sheet for ' + person };
     var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
-    var C = _leadCols(sh);
+    var C = _ensureLeadTimeCol(sh);
     var last = sh.getLastRow();
     var slNo = Math.max(0, last - 1) + 1;                 // next running SL NO
-    var dateStr = dateIn || Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+    var nowD = new Date();
+    var todayStr = Utilities.formatDate(nowD, 'Asia/Kolkata', 'yyyy-MM-dd');
+    // Only an admin may add a lead on another date; everyone else's lead is
+    // always dated today, whatever date the client sent.
+    var isAdmin = _lookupRole(by) === 'admin';
+    var dateStr = (isAdmin && /^\d{4}-\d{2}-\d{2}$/.test(dateIn)) ? dateIn : todayStr;
+    var timeStr = Utilities.formatDate(nowD, 'Asia/Kolkata', 'hh:mm a');
     var ncol = Math.max(C.ncol, LEADS_HEADERS.length);
     var row = new Array(ncol);
     for (var k = 0; k < ncol; k++) row[k] = '';
@@ -4865,10 +4924,11 @@ function handleAddLead(body) {
     put(C.contact, contact);
     put(C.product, product);
     put(C.amount, (amountIn === '' ? '' : (Number(amountIn) || amountIn)));
+    put(C.time, timeStr);
     sh.appendRow(row);
 
     _appendLog(by, '', 'ADD_LEAD', person + ' · ' + customer + (contact ? ' · ' + contact : ''));
-    return { ok: true, slNo: String(slNo), scriptVersion: SCRIPT_VERSION };
+    return { ok: true, slNo: String(slNo), date: dateStr, time: timeStr, scriptVersion: SCRIPT_VERSION };
   } catch (e) {
     return { ok: false, error: e.message };
   } finally {
@@ -4919,7 +4979,8 @@ function handleEditLead(body) {
     var row = vals[target].slice();
     while (row.length < ncol) row.push('');
     function put(ci, val) { if (ci >= 0 && ci < ncol) row[ci] = val; }
-    if (dateIn) put(C.date, dateIn);
+    // Only an admin may move a lead to another date.
+    if (dateIn && _lookupRole(by) === 'admin') put(C.date, dateIn);
     put(C.customer, customer);
     put(C.contact, contact);
     put(C.product, product);
