@@ -2077,6 +2077,8 @@ function generatePDF(order, copyType) {
   const rcptNo   = order.orderFormReceiptNo || order.internalNo || '—';
   const orderRef = slNo + ' / ' + rcptNo;
   const oDate    = order.date||istToday({day:'2-digit',month:'2-digit',year:'numeric'});
+  // Date + time of the sale (time is stamped once when the order is first booked).
+  const oDateTime = oDate + (order.time ? '  ' + order.time : '');
 
   const DRED=[180,0,0], NAVY=[20,20,80], INK=[20,20,20], BLK=[0,0,0], GR=[120,120,120], LGR=[200,200,200];
 
@@ -2198,7 +2200,7 @@ function generatePDF(order, copyType) {
     doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(...DRED);
     doc.text(fit1(order.won||'Pending', c2w-3, 10), ml+c1w+1, y+11);
     lbl(ml+c1w+1, y+16.5, 'Date :');
-    val(ml+c1w+11, y+16.5, fit1(oDate, c2w-14, 7.5), 7.5);
+    val(ml+c1w+11, y+16.5, fit1(oDateTime, c2w-14, 7.5), 7.5);
     const ox = ml+c1w+c2w;
     lbl(ox+1, y+3.5, 'Order No. (Sl / Receipt)');
     doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...DRED);
@@ -2206,7 +2208,7 @@ function generatePDF(order, copyType) {
     // Order booking date — the date the order was booked (current date for app
     // bookings) — printed right beside the order number on both copies.
     lbl(ox+1, y+17, 'Booking Date :');
-    val(ox+19, y+17, fit1(oDate, c3w-21, 7.5), 7.5, true);
+    val(ox+19, y+17, fit1(oDateTime, c3w-21, 7.5), 7.5, true);
     y += r1H;
 
     // Billing / Delivery header
@@ -4406,7 +4408,8 @@ function App() {
     try {
       const res = await apiPost({ action:'saveOrder', order:{ ...draft, totalWithTax: orderTotals(draft).total, by: user?.code, byName: user?.name } });
       if (res.ok) {
-        const saved = {...draft, no: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo || draft.orderFormReceiptNo};
+        const saved = {...draft, no: res.orderNo, internalNo: res.internalNo, orderFormReceiptNo: res.orderFormReceiptNo || draft.orderFormReceiptNo,
+          date: draft.date || res.orderDate || '', time: draft.time || res.orderTime || ''};
         rememberMeasurements(saved);
         setOrder(saved);
         showToast('Order '+res.orderNo+' saved ✓');
@@ -4425,7 +4428,9 @@ function App() {
       // Persist the clientId with the queued order so the offline re-send (flushQueue)
       // resolves to the same order server-side instead of creating a duplicate.
       rememberMeasurements(draft);
-      q.push({...draft, _queuedAt: Date.now()});
+      // Stamp the booking time now so an order synced later keeps its real sale time.
+      const _t = (draft.no||draft.internalNo||draft.manualOrder) ? (draft.time||'') : (draft.time || new Date().toLocaleTimeString('en-IN',{timeZone:IST_TZ,hour:'2-digit',minute:'2-digit',hour12:true}).toUpperCase());
+      q.push({...draft, time:_t, _queuedAt: Date.now()});
       localStorage.setItem('4s_queue', JSON.stringify(q));
       return draft;
     } finally { setLoading(false); _savingIds.delete(clientId); }
@@ -5016,7 +5021,7 @@ function _ptsTxt(n){ n=Number(n)||0; return (n>0?'+':'')+n+' point'+(Math.abs(n)
 function _normPhone(v){ const d=String(v||'').replace(/\D/g,''); return d.length>10 ? d.slice(-10) : d; }
 // Build { salesperson-match-key → Map(last-10-digit contact → earliest add-date) }
 // from the leads register, so an order can be recognised as a converted lead for
-// that player — but ONLY when the order was booked on/after the lead was added.
+// that player — but ONLY when the order was booked on a later day than the lead was added.
 // The value is the lead's earliest recorded date (yyyy-mm-dd) for that phone.
 function leadContactMap(leads){
   const map = {};
@@ -5109,9 +5114,10 @@ function leagueTeamsFor(league, monthKey){
 // stripped out of the value so only the net-basic franchise sale counts.
 // `leadPhones` (optional) is a Map of the player's lead contact numbers (last 10
 // digits) → the lead's earliest add-date. An order whose customer phone is in that
-// map, booked ON/AFTER the lead was added, is a converted lead and earns +6
-// (leadConv), credited to the week the order was booked. An order that predates the
-// lead does NOT convert it.
+// map, booked on a LATER calendar day than the lead was added (e.g. lead added on
+// Saturday, sale on Sunday), is a converted lead and earns +6 (leadConv), credited
+// to the week the order was booked. A sale on the SAME day the lead was added, or
+// an order that predates the lead, does NOT convert it — no points.
 function leagueAuto(orders, matchKey, startISO, endISO, leadPhones){
   let orderCount=0, basic=0, happyCalls=0, leadConv=0;
   (orders||[]).forEach(o=>{
@@ -5134,8 +5140,9 @@ function leagueAuto(orders, matchKey, startISO, endISO, leadPhones){
     orderCount++;                                                     // orders booked (excl. B2B)
     basic += _channelSplit(o).franchise;                             // net basic (excl. 4S channel)
     // Converted lead: this order's customer matches one of the player's leads AND
-    // the order was booked on/after the lead was added (a pre-existing order doesn't count).
-    if(leadPhones && leadPhones.size){ const ph=_normPhone(o.phone); if(ph && ph.length>=10 && leadPhones.has(ph)){ const ld=leadPhones.get(ph); if(!ld || iso>=ld) leadConv++; } }
+    // the order was booked on a later calendar day than the lead was added. A lead
+    // added and sold on the same day (or an order that predates it) earns nothing.
+    if(leadPhones && leadPhones.size){ const ph=_normPhone(o.phone); if(ph && ph.length>=10 && leadPhones.has(ph)){ const ld=leadPhones.get(ph); if(!ld || iso>ld) leadConv++; } }
   });
   return { orderCount, basic, happyCalls, leadConv };
 }
@@ -6046,7 +6053,7 @@ function LeagueScreen({ctx}) {
                 ['Total sales value (basic) %','team score = % of target achieved (100% → 100 pts)'],
                 ['Negative points',_ptsTxt(PTS.followupMissed)+' missed follow-ups, '+_ptsTxt(PTS.timingPenalty)+' timings, '+_ptsTxt(PTS.dressCode)+' dress code / presentation'],
                 ['Happy calling',_ptsTxt(PTS.happyCalling)+' per order with a Happy Code (auto)'],
-                ['Lead converted',_ptsTxt(PTS.leadConv)+' when a lead you added books an order (auto, matched by phone)'],
+                ['Lead converted',_ptsTxt(PTS.leadConv)+' when a lead you added books an order on a LATER day (auto, matched by phone). Lead added and sold on the same day → no points'],
                 ['Weekly sales target (auto)','your monthly target is split by days into each league week (e.g. 7 days of a 30-day month = 7/30 of it). On the last day of each week (7th, 14th, 21st, 28th & month end): invoiced in that week ≥ your weekly share → '+_ptsTxt(Math.abs(PTS.targetWeek))+', below it → '+_ptsTxt(-Math.abs(PTS.targetWeek))+'. Applied once, on that last day, from November 2026. No monthly target set → no points'],
                 ['Target ± points (manual)','the admin can also add or deduct extra points'],
                 ['Overdue delivery (auto)',_ptsTxt(-Math.abs(PTS.overdueDelivery))+' per order whose delivery date has passed and is not yet Scheduled / Delivered / Installation Done'],
@@ -6288,7 +6295,7 @@ function prettyDayMonth(v) {
   return p.d + ' ' + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][Number(p.m)-1];
 }
 
-function AddLeadModal({person, people, canPickPerson, lead, prefill, onCancel, onSave}){
+function AddLeadModal({person, people, canPickPerson, canPickDate, lead, prefill, onCancel, onSave}){
   const editing = !!lead;
   const newCycle = !editing && !!(prefill && (prefill.customer || prefill.contact)); // "new items" for a converted customer
   const pickPerson = canPickPerson && !editing;   // an existing lead lives in one person's tab
@@ -6298,14 +6305,17 @@ function AddLeadModal({person, people, canPickPerson, lead, prefill, onCancel, o
   const [contact,setContact] = useState(seed.contact||'');
   const [product,setProduct] = useState((lead&&lead.product)||'');
   const [amount,setAmount]   = useState((lead&&lead.amount!=null&&lead.amount!=='')?String(lead.amount).replace(/[^\d.]/g,''):'');
-  const [date,setDate]       = useState((lead&&lead.date)||_todayISO());
+  // Only an admin may put a lead on another date. Everyone else always adds on
+  // today's date, and can't move an existing lead's date (the backend enforces this too).
+  const [date,setDate]       = useState(lead ? (lead.date||'') : istTodayISO());
   const [saving,setSaving]   = useState(false);
   const fld={width:'100%',height:40,border:`1px solid ${T.line}`,borderRadius:8,padding:'0 12px',fontSize:14,color:T.ink,background:'#fff',outline:'none',boxSizing:'border-box'};
   const lbl={fontSize:10,fontWeight:800,color:T.ink4,letterSpacing:.6,textTransform:'uppercase',margin:'10px 0 4px'};
   async function submit(){
     if(!customer.trim() && !contact.trim()){ return; }
     setSaving(true);
-    const payload={ salesPerson:p, customer:customer.trim(), contact:contact.trim(), product:product.trim(), amount:amount.trim(), date };
+    const payload={ salesPerson:p, customer:customer.trim(), contact:contact.trim(), product:product.trim(), amount:amount.trim() };
+    if(canPickDate) payload.date = date;
     if(editing) payload.slNo = lead.slNo;
     const ok=await onSave(payload);
     setSaving(false);
@@ -6342,7 +6352,9 @@ function AddLeadModal({person, people, canPickPerson, lead, prefill, onCancel, o
         <input value={product} onChange={e=>setProduct(e.target.value)} placeholder="e.g. 3-seater sofa, wardrobe" style={fld}/>
         <div style={{display:'flex',gap:10}}>
           <div style={{flex:1}}><div style={lbl}>Amount (₹)</div><input value={amount} onChange={e=>setAmount(e.target.value.replace(/[^\d.]/g,''))} inputMode="decimal" placeholder="est. value" style={fld}/></div>
-          <div style={{flex:1}}><div style={lbl}>Date</div><input type="date" value={date} onChange={e=>setDate(e.target.value)} style={fld}/></div>
+          <div style={{flex:1}}><div style={lbl}>Date</div>{canPickDate
+            ? <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={fld}/>
+            : <div title="Leads are always added on today's date — only an admin can change it" style={{...fld,display:'flex',alignItems:'center',background:T.paper2||'#f7f7f8',fontFamily:T.mono,fontWeight:700}}>{editing?(date||'—'):'Today · '+date}</div>}</div>
         </div>
         <button onClick={submit} disabled={saving||(!customer.trim()&&!contact.trim())} style={{marginTop:16,width:'100%',height:46,borderRadius:10,background:(saving||(!customer.trim()&&!contact.trim()))?T.line:T.green,color:'#fff',border:'none',fontSize:15,fontWeight:800,cursor:(saving||(!customer.trim()&&!contact.trim()))?'default':'pointer'}}>{saving?'Saving…':(editing?'Save changes':'Add lead')}</button>
       </div>
@@ -7291,7 +7303,8 @@ function LeadsScreen({ctx}){
 
   const rows = (leads&&leads[sel])||[];
   // Every booking date this salesperson has, per customer phone (sorted ascending).
-  // A lead is "converted" by the FIRST order booked ON/AFTER the lead was added; an
+  // A lead is "converted" by the FIRST order booked on a LATER DAY than the lead was
+  // added (lead Saturday → sale Sunday counts; same-day sale does not). An
   // order that predates the lead (or a fresh "new items" lead added later) is not
   // counted against it. Using the first-order-on/after date also tells us WHICH
   // month the conversion happened in (for the month-wise value breakdown below).
@@ -7301,14 +7314,14 @@ function LeadsScreen({ctx}){
     m.forEach(arr=>arr.sort());
     return m;
   },[orders,sel]);
-  // The order ISO date that converted this lead (earliest booking on/after it was
-  // added), or null if it hasn't converted. No lead date → any matching order.
+  // The order ISO date that converted this lead (earliest booking on a day after it
+  // was added), or null if it hasn't converted. No lead date → any matching order.
   const convOrderISO = l => {
     const ph=_normPhone(l&&l.contact); if(!(ph&&ph.length>=10)) return null;
     const arr=ordersByPhone.get(ph); if(!arr||!arr.length) return null;
     const ld=String((l&&l.date)||'').slice(0,10);
     if(!ld) return arr[arr.length-1];
-    for(let i=0;i<arr.length;i++){ if(arr[i]>=ld) return arr[i]; }
+    for(let i=0;i<arr.length;i++){ if(arr[i]>ld) return arr[i]; }
     return null;
   };
   const isConverted = l => !!convOrderISO(l);
@@ -7447,7 +7460,7 @@ function LeadsScreen({ctx}){
                         {conv && <span style={{fontSize:9,fontWeight:900,letterSpacing:.4,color:'#fff',background:T.green,padding:'2px 7px',borderRadius:99,textTransform:'uppercase'}}>Converted · +6</span>}
                       </div>
                       {l.product && <div style={{fontSize:12,color:T.ink2,marginTop:3}}>{l.product}</div>}
-                      <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:3}}>{l.date||'—'}{l.contact?' · '+l.contact:''}{conv?' · converted '+_monLabel(cISO.slice(0,7)):''}</div>
+                      <div style={{fontSize:11,color:T.ink4,fontFamily:T.mono,marginTop:3}}>{l.date||'—'}{l.time?' '+l.time:''}{l.contact?' · '+l.contact:''}{conv?' · converted '+_monLabel(cISO.slice(0,7)):''}</div>
                     </div>
                     <div style={{textAlign:'right',flexShrink:0}}>
                       {l.amount?<div style={{fontSize:14,fontFamily:T.mono,fontWeight:800,color:T.ink}}>₹{(Number(String(l.amount).replace(/[^\d.]/g,''))||0).toLocaleString('en-IN')}</div>:<div style={{fontSize:11,color:T.ink4}}>—</div>}
@@ -7472,6 +7485,7 @@ function LeadsScreen({ctx}){
           person={(!isAdmin&&me)?me:sel}
           people={people}
           canPickPerson={isAdmin}
+          canPickDate={isAdmin}
           prefill={addPrefill}
           onCancel={()=>{setShowAdd(false);setAddPrefill(null);}}
           onSave={doAddLead}
@@ -7481,6 +7495,7 @@ function LeadsScreen({ctx}){
         <AddLeadModal
           person={editLead._person||sel}
           canPickPerson={false}
+          canPickDate={isAdmin}
           lead={editLead}
           onCancel={()=>setEditLead(null)}
           onSave={doEditLead}
@@ -7515,7 +7530,7 @@ function ReportOrderMini({o, onOpen}){
           <span style={{fontFamily:T.mono,fontSize:11,color:T.ink2,fontWeight:600,flexShrink:0}}>{o.no||'—'}</span>
           <span style={{fontSize:13,fontWeight:700,color:T.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{o.customer||'—'}</span>
         </div>
-        <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{((o.salesExec||'').trim()||'(unassigned)')}{o.date?' · '+o.date:''}</div>
+        <div style={{fontSize:10,color:T.ink4,fontFamily:T.mono,marginTop:2}}>{((o.salesExec||'').trim()||'(unassigned)')}{o.date?' · '+o.date:''}{o.time?' '+o.time:''}</div>
       </div>
       <div style={{textAlign:'right',flexShrink:0,paddingLeft:10}}>
         <div style={{fontSize:13,fontFamily:T.mono,fontWeight:700,color:T.ink}}>{_fmtAmt(amt)}</div>
