@@ -31,7 +31,7 @@ var OPS_SHEET_ID    = '12RtOVqlOicoGlF2oLRBv3wB9eeludiz08AFKbhPcNqs';
 // CRM spreadsheet ("B2C FRANCHISE APP ORDER DETAILS 26-27") — one row per ordered item
 var CRM_SHEET_ID    = '1wFpK-WokcZB6k1vzG7B6JO5TdGHrUwdgvVm_-UQse54';
 var CRM_TAB_NAME    = 'B2C FRANCHISE APP ORDER DETAILS 26-27';
-var SCRIPT_VERSION  = 'v86';   // bump this whenever you redeploy
+var SCRIPT_VERSION  = 'v87';   // bump this whenever you redeploy
 // MIS_Daily tab (in the OPS sheet) — Godrej MIS committed-stock feed, imported by
 // the CRM dashboard (godrej-crm-streamlit) from the daily Godrej MIS e-mail.
 // Keyed by SO_NO (= the order's WON / Godrej SO number).
@@ -634,9 +634,9 @@ function handleStock() {
     if (v === '' || v == null) return '';
     var d = (v instanceof Date) ? v : new Date(v);
     if (isNaN(d.getTime())) return '';
-    return Utilities.formatDate(d, _tz, 'yyyy-MM-dd');
+    return _fmtDate(d, _tz, 'yyyy-MM-dd');
   }
-  var todayKey = Utilities.formatDate(new Date(), _tz, 'yyyy-MM-dd');
+  var todayKey = _fmtDate(new Date(), _tz, 'yyyy-MM-dd');
 
   // First pass: discover the newest fetch date present, and whether today's
   // snapshot exists at all.
@@ -1508,7 +1508,7 @@ function _getDiscontinuedMap(opsSS) {
 function _fmtDate(v) {
   if (v === null || v === undefined || v === '') return '';
   if (Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v)) {
-    return Utilities.formatDate(v, Session.getScriptTimeZone(), 'dd MMM yyyy');
+    return _fmtDate(v, Session.getScriptTimeZone(), 'dd MMM yyyy');
   }
   return String(v).trim();
 }
@@ -1840,7 +1840,7 @@ function handleOrders(p) {
   })();
   function dstr(r, ci) {
     var v = cell(r, ci);
-    if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, _tz, 'yyyy-MM-dd');
+    if (v instanceof Date && !isNaN(v.getTime())) return _fmtDate(v, _tz, 'yyyy-MM-dd');
     return String(v || '').trim();
   }
 
@@ -1939,7 +1939,7 @@ function handleOrders(p) {
         // Date cell is formatted back to hh:mm AM/PM.
         time: (function () {
           var tv = cell(r, cTime);
-          if (tv instanceof Date && !isNaN(tv.getTime())) return Utilities.formatDate(tv, _crmTz, 'hh:mm a');
+          if (tv instanceof Date && !isNaN(tv.getTime())) return _fmtDate(tv, _crmTz, 'hh:mm a');
           return String(tv == null ? '' : tv).trim();
         })(),
         // After-sales service / issue tracking.
@@ -2142,7 +2142,7 @@ function handleMisData() {
   // Normalise dates to yyyy-MM-dd. Handles real Date cells, dd-mm-yyyy, dd-MMM-yyyy
   // and yyyy-mm-dd strings (all appear in the MIS export).
   function dnorm(v) {
-    if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+    if (v instanceof Date && !isNaN(v.getTime())) return _fmtDate(v, tz, 'yyyy-MM-dd');
     var s = String(v || '').trim();
     if (!s) return '';
     var m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);            // yyyy-mm-dd[ hh:mm:ss]
@@ -3062,7 +3062,7 @@ function _writeOrderToCRM(o) {
       if (cTime  >= 0 && !existingTime) {
         var tv0 = data[i][cTime];
         existingTime = (tv0 instanceof Date && !isNaN(tv0.getTime()))
-          ? Utilities.formatDate(tv0, (function () { try { return sh.getParent().getSpreadsheetTimeZone(); } catch (e) { return 'Asia/Kolkata'; } })(), 'hh:mm a')
+          ? _fmtDate(tv0, (function () { try { return sh.getParent().getSpreadsheetTimeZone(); } catch (e) { return 'Asia/Kolkata'; } })(), 'hh:mm a')
           : String(tv0 || '').trim();
       }
       if (cStage >= 0 && !existingStage) existingStage = String(data[i][cStage] || '').trim().toLowerCase();
@@ -3121,7 +3121,7 @@ function _writeOrderToCRM(o) {
   // unchanged on every re-save. Older orders that never had a time stay blank, and
   // manual (back-dated) orders aren't stamped with the time they were keyed in.
   var orderTimeStr = existingTime ||
-    ((isExisting || o.manualOrder) ? '' : (String(o.time || '').trim() || Utilities.formatDate(now, 'Asia/Kolkata', 'hh:mm a')));
+    ((isExisting || o.manualOrder) ? '' : (String(o.time || '').trim() || _fmtDate(now, 'Asia/Kolkata', 'hh:mm a')));
   o.orderTime = orderTimeStr;
   // WON (Godrej SO No): the client's order-level value is authoritative on every
   // save — an empty string means the user CLEARED it, so it must be blanked, not
@@ -3553,7 +3553,7 @@ function handleUpdateDelivery(body) {
   // Order type (B2C / B2B) — a B2B order skips the Happy Code, like a pure-4S order.
   var cOrdType = colOf(['ORDER TYPE', 'B2C/B2B', 'ORDER CATEGORY']);
   var _tzD = (function(){ try { return sh.getParent().getSpreadsheetTimeZone() || Session.getScriptTimeZone(); } catch (e) { return Session.getScriptTimeZone(); } })();
-  var todayD = Utilities.formatDate(new Date(), _tzD, 'yyyy-MM-dd');
+  var todayD = _fmtDate(new Date(), _tzD, 'yyyy-MM-dd');
   if (cDeliv < 0) return { ok: false, error: 'No "Delivery Remarks" column found in the CRM sheet.' };
 
   var lastRow = sh.getLastRow();
@@ -3637,7 +3637,7 @@ function handleUpdateService(body) {
   var happyCode= String(body.happyCode || body.serviceHappyCode || '').trim();
   // Sensible defaults: raising a request with no explicit status/date fills them in.
   if (flagOn && !status)  status = resolved ? 'Resolved' : 'Open';
-  if (flagOn && !raised)  raised = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  if (flagOn && !raised)  raised = _fmtDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
   if (!flagOn) { issue = ''; raised = ''; assignee = ''; resolved = ''; status = ''; }
 
   var sh;
@@ -3662,7 +3662,7 @@ function handleUpdateService(body) {
   // A dated remark to append to the timeline (optional). Computed once from the
   // first matching row's existing history, then written to every row of the order.
   var newRemark = String(body.serviceNewRemark || body.newRemark || '').trim();
-  var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  var today = _fmtDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
   var remarksJson = null;
 
   var lastRow = sh.getLastRow();
@@ -3819,7 +3819,7 @@ function handleListServiceRequests() {
 
   var tz = _svcTz(sh);
   function ds(v) {
-    if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+    if (v instanceof Date && !isNaN(v.getTime())) return _fmtDate(v, tz, 'yyyy-MM-dd');
     return String(v == null ? '' : v).trim();
   }
 
@@ -3868,7 +3868,7 @@ function handleCreateServiceRequest(body) {
     var sh;
     try { sh = _openManualSvcSheet(true); } catch (e) { return { ok: false, error: e.message }; }
     var tz = _svcTz(sh);
-    var today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+    var today = _fmtDate(new Date(), tz, 'yyyy-MM-dd');
     var id = 'MSR-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
     var remarks = [];
     if (remark) remarks.push({ date: today, text: remark, by: by });
@@ -3921,7 +3921,7 @@ function handleUpdateServiceRequest(body) {
   var cId = C.col('ID'), cStat = C.col('STATUS'), cRes = C.col('RESOLVED DATE'), cRem = C.col('REMARKS DATA'),
       cHappy = C.col('HAPPY CODE');
   var tz = _svcTz(sh);
-  var today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  var today = _fmtDate(new Date(), tz, 'yyyy-MM-dd');
 
   var data = sh.getRange(2, 1, lastRow - 1, ncol).getValues();
   for (var i = 0; i < data.length; i++) {
@@ -4019,7 +4019,7 @@ function handleLookupCustomer(p) {
   try { tz = ss.getSpreadsheetTimeZone() || Session.getScriptTimeZone(); }
   catch (e) { tz = Session.getScriptTimeZone(); }
   function fmt(v) {
-    if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+    if (v instanceof Date && !isNaN(v.getTime())) return _fmtDate(v, tz, 'yyyy-MM-dd');
     return String(v == null ? '' : v).trim();
   }
 
@@ -4336,7 +4336,7 @@ function _appendLog(user, orderNo, action, detail) {
       try { sh.setFrozenRows(1); } catch(e) {}
     }
     var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
-    var ts = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss');
+    var ts = _fmtDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss');
     sh.appendRow([ts, String(user || '—'), String(orderNo || ''), String(action || ''), String(detail || '')]);
   } catch(e) {}
 }
@@ -4357,7 +4357,7 @@ function handleAuditLog(p) {
     var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
     var vals = sh.getRange(last - n + 1, 1, n, 5).getValues();
     var entries = vals.map(function(r){
-      var ts = (r[0] instanceof Date) ? Utilities.formatDate(r[0], tz, 'yyyy-MM-dd HH:mm:ss') : String(r[0] || '');
+      var ts = (r[0] instanceof Date) ? _fmtDate(r[0], tz, 'yyyy-MM-dd HH:mm:ss') : String(r[0] || '');
       return { ts: ts, user: String(r[1] || ''), orderNo: String(r[2] || ''), action: String(r[3] || ''), detail: String(r[4] || '') };
     }).reverse();   // newest first
     return { ok: true, entries: entries, scriptVersion: SCRIPT_VERSION };
@@ -4390,7 +4390,7 @@ function _changeReqSheet(create) {
 }
 
 function _changeReqRow(r, tz, withJson) {
-  var ts = function (v) { return (v instanceof Date) ? Utilities.formatDate(v, tz, 'yyyy-MM-dd HH:mm:ss') : String(v == null ? '' : v); };
+  var ts = function (v) { return (v instanceof Date) ? _fmtDate(v, tz, 'yyyy-MM-dd HH:mm:ss') : String(v == null ? '' : v); };
   var parse = function (v) { try { return v ? JSON.parse(String(v)) : null; } catch (e) { return null; } };
   var o = {
     id: String(r[0] || ''), requestedAt: ts(r[1]), orderNo: String(r[2] || ''), internalNo: Number(r[3]) || 0,
@@ -4543,7 +4543,7 @@ function _sameSalesName(a, b) {
 // A DOB / anniversary cell as a short "DD/MM" string (the year is never stored).
 function _goldenDayMonth(v) {
   if (v instanceof Date && !isNaN(v.getTime())) {
-    return Utilities.formatDate(v, Session.getScriptTimeZone() || 'Asia/Kolkata', 'dd/MM');
+    return _fmtDate(v, Session.getScriptTimeZone() || 'Asia/Kolkata', 'dd/MM');
   }
   return String(v == null ? '' : v).trim();
 }
@@ -4616,7 +4616,7 @@ function handleGoldenCustomers() {
           dob: _goldenDayMonth(r[cB]),
           anniversary: _goldenDayMonth(r[cA]),
           orderNo: String(r[cO] == null ? '' : r[cO]).trim(),
-          date: (dv instanceof Date && !isNaN(dv.getTime())) ? Utilities.formatDate(dv, tz, 'yyyy-MM-dd') : String(dv == null ? '' : dv).trim(),
+          date: (dv instanceof Date && !isNaN(dv.getTime())) ? _fmtDate(dv, tz, 'yyyy-MM-dd') : String(dv == null ? '' : dv).trim(),
           by: String(r[cM] == null ? '' : r[cM]).trim()
         });
       }
@@ -4679,7 +4679,7 @@ function handleMarkGoldenCustomer(body) {
       }
     }
     var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
-    var dateStr = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+    var dateStr = _fmtDate(new Date(), tz, 'yyyy-MM-dd');
     var row = last + 1;
     // Phone / birthday / anniversary as plain text so Sheets never reinterprets them.
     sh.getRange(row, 1, 1, GOLDEN_HEADERS.length).setNumberFormat('@')
@@ -4762,7 +4762,7 @@ function _ensureLeadTimeCol(sh) {
 
 // "hh:mm AM/PM" for a leads TIME cell (Sheets may store it as a time value).
 function _leadTimeStr(v, tz) {
-  if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, tz, 'hh:mm a');
+  if (v instanceof Date && !isNaN(v.getTime())) return _fmtDate(v, tz, 'hh:mm a');
   return String(v == null ? '' : v).trim();
 }
 
@@ -4774,7 +4774,7 @@ function handleLeads(p) {
     var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
     var ssTz = (function () { try { return ss.getSpreadsheetTimeZone() || tz; } catch (e) { return tz; } })();
     function ds(v) {
-      if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+      if (v instanceof Date && !isNaN(v.getTime())) return _fmtDate(v, tz, 'yyyy-MM-dd');
       return String(v == null ? '' : v).trim();
     }
     var byPerson = {};
@@ -4908,12 +4908,12 @@ function handleAddLead(body) {
     var last = sh.getLastRow();
     var slNo = Math.max(0, last - 1) + 1;                 // next running SL NO
     var nowD = new Date();
-    var todayStr = Utilities.formatDate(nowD, 'Asia/Kolkata', 'yyyy-MM-dd');
+    var todayStr = _fmtDate(nowD, 'Asia/Kolkata', 'yyyy-MM-dd');
     // Only an admin may add a lead on another date; everyone else's lead is
     // always dated today, whatever date the client sent.
     var isAdmin = _lookupRole(by) === 'admin';
     var dateStr = (isAdmin && /^\d{4}-\d{2}-\d{2}$/.test(dateIn)) ? dateIn : todayStr;
-    var timeStr = Utilities.formatDate(nowD, 'Asia/Kolkata', 'hh:mm a');
+    var timeStr = _fmtDate(nowD, 'Asia/Kolkata', 'hh:mm a');
     var ncol = Math.max(C.ncol, LEADS_HEADERS.length);
     var row = new Array(ncol);
     for (var k = 0; k < ncol; k++) row[k] = '';
@@ -5082,7 +5082,7 @@ function _leagueTab() {
 function _leagueDate(v) {
   if (v instanceof Date) {
     var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
-    return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+    return _fmtDate(v, tz, 'yyyy-MM-dd');
   }
   return String(v || '').trim();
 }
@@ -5139,7 +5139,7 @@ function _mtFyMatch(v, fyStart) {
 function handleMonthlyTargets(p) {
   var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
   var mk = String((p && p.month) || '').slice(0, 7);
-  if (!/^\d{4}-\d{2}$/.test(mk)) mk = Utilities.formatDate(new Date(), tz, 'yyyy-MM');
+  if (!/^\d{4}-\d{2}$/.test(mk)) mk = _fmtDate(new Date(), tz, 'yyyy-MM');
   var year = Number(mk.slice(0, 4)), mIdx = Number(mk.slice(5, 7)) - 1;
   var monthName = _MONTH_NAMES[mIdx];
   var fyStart = mIdx >= 3 ? year : year - 1;
@@ -5346,7 +5346,7 @@ function handleOffersSent() {
         if (!phone) continue;
         var dv = r[5];
         var dateStr = (dv instanceof Date && !isNaN(dv.getTime()))
-          ? Utilities.formatDate(dv, tz, 'yyyy-MM-dd') : String(dv == null ? '' : dv).trim();
+          ? _fmtDate(dv, tz, 'yyyy-MM-dd') : String(dv == null ? '' : dv).trim();
         offers.push({
           phone: phone,
           occasion: String(r[1] == null ? '' : r[1]).trim(),
@@ -5372,7 +5372,7 @@ function handleMarkOfferSent(body) {
   if (!phone) return { ok: false, error: 'A valid customer phone is required to record the offer.' };
   var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
   var occasion = String((body && body.occasion) || '').trim();
-  var year     = String((body && body.year) || '').trim() || Utilities.formatDate(new Date(), tz, 'yyyy');
+  var year     = String((body && body.year) || '').trim() || _fmtDate(new Date(), tz, 'yyyy');
   var customer = String((body && body.customer) || '').trim();
   var by       = String((body && (body.by || body.sentBy)) || '').trim();
   var occLc    = occasion.toLowerCase();
@@ -5394,7 +5394,7 @@ function handleMarkOfferSent(body) {
         }
       }
     }
-    var dateStr = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+    var dateStr = _fmtDate(new Date(), tz, 'yyyy-MM-dd');
     sh.appendRow([phone, occasion, year, customer, by, dateStr]);
     return { ok: true, already: false, phone: phone, occasion: occasion, year: year };
   } catch (e) {
@@ -5502,7 +5502,7 @@ function handleLeagueSaveScore(body) {
   try {
     var sh = _leagueTab();
     var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
-    var stamp = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss');
+    var stamp = _fmtDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss');
     var row = [date, player, team];
     LEAGUE_NUM_FIELDS.forEach(function (f) { row.push(Math.round(Number(body && body[f]) || 0)); });
     row.push(String((body && body.notes) || ''), by, stamp);
@@ -5546,7 +5546,7 @@ function handleLeagueSettleTargetWeeks(body) {
   var weeks = body && body.weeks;
   if (!weeks || typeof weeks !== 'object') return { ok: false, error: 'weeks is required.' };
   var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
-  var today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  var today = _fmtDate(new Date(), tz, 'yyyy-MM-dd');
   var lock = LockService.getScriptLock();
   var haveLock = false;
   try {
@@ -5575,7 +5575,7 @@ function handleLeagueSettleTargetWeeks(body) {
         };
       });
       stored[ws] = { month: ws.slice(0, 7), end: we, src: String(w.src || ''), players: players, by: by,
-                     at: Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss') };
+                     at: _fmtDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss') };
       added.push(ws);
     });
     if (added.length) {
@@ -5614,7 +5614,7 @@ function handleLeagueSettleDisciplineWeeks(body) {
   var weeks = body && body.weeks;
   if (!weeks || typeof weeks !== 'object') return { ok: false, error: 'weeks is required.' };
   var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
-  var today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  var today = _fmtDate(new Date(), tz, 'yyyy-MM-dd');
   var lock = LockService.getScriptLock();
   var haveLock = false;
   try {
@@ -5644,7 +5644,7 @@ function handleLeagueSettleDisciplineWeeks(body) {
                         pts: Math.max(-999, Math.min(0, Math.round(Number(pl.pts) || 0))) };
       });
       byMonth[key][ws] = { end: we, players: players, by: by,
-                           at: Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss') };
+                           at: _fmtDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss') };
       added.push(ws);
     });
     Object.keys(byMonth).forEach(function (k) { props.setProperty(k, JSON.stringify(byMonth[k])); });
@@ -5704,7 +5704,7 @@ function handleLeagueSaveConfig(body) {
         score: Math.round((Number(sp.score) || 0) * 10) / 10,
         visible: !!sp.visible,
         by: by,
-        at: Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Kolkata', 'yyyy-MM-dd HH:mm:ss')
+        at: _fmtDate(new Date(), Session.getScriptTimeZone() || 'Asia/Kolkata', 'yyyy-MM-dd HH:mm:ss')
       };
       props.setProperty('LEAGUE_SOM_PUBLISHED', JSON.stringify(somMap));
       _appendLog(by, '', 'LEAGUE_SOM', smk + ' ' + somMap[smk].name + (somMap[smk].visible ? ' (visible)' : ' (hidden)'));
@@ -5745,7 +5745,7 @@ function handleLeagueSaveConfig(body) {
           titans:   _clean(r.titans),
           captains: { strikers: String(caps.strikers || ''), titans: String(caps.titans || '') },
           updatedBy: by,
-          updatedAt: Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Kolkata', 'yyyy-MM-dd HH:mm:ss')
+          updatedAt: _fmtDate(new Date(), Session.getScriptTimeZone() || 'Asia/Kolkata', 'yyyy-MM-dd HH:mm:ss')
         };
         props.setProperty('LEAGUE_ROSTERS', JSON.stringify(rosters));
         _appendLog(by, '', 'LEAGUE_ROSTER', monthKey + ' S=' + rosters[monthKey].strikers.join('/') + ' T=' + rosters[monthKey].titans.join('/'));
@@ -6544,12 +6544,12 @@ function _quizParse(v) {
   if (!s) return 0;
   try { return Utilities.parseDate(s.slice(0, 16), _quizTz(), 'yyyy-MM-dd HH:mm').getTime(); } catch (e) { return 0; }
 }
-function _quizFmt(ms) { return ms ? Utilities.formatDate(new Date(ms), _quizTz(), 'yyyy-MM-dd HH:mm') : ''; }
-function _quizFmtSec(ms) { return ms ? Utilities.formatDate(new Date(ms), _quizTz(), 'yyyy-MM-dd HH:mm:ss') : ''; }
+function _quizFmt(ms) { return ms ? _fmtDate(new Date(ms), _quizTz(), 'yyyy-MM-dd HH:mm') : ''; }
+function _quizFmtSec(ms) { return ms ? _fmtDate(new Date(ms), _quizTz(), 'yyyy-MM-dd HH:mm:ss') : ''; }
 // Indian financial year (April–March) of a moment, e.g. "FY 2026-27".
 function _quizFY(ms) {
   var d = new Date(ms || Date.now());
-  var y = Number(Utilities.formatDate(d, _quizTz(), 'yyyy')), m = Number(Utilities.formatDate(d, _quizTz(), 'M'));
+  var y = Number(_fmtDate(d, _quizTz(), 'yyyy')), m = Number(_fmtDate(d, _quizTz(), 'M'));
   var s = m >= 4 ? y : y - 1;
   return 'FY ' + s + '-' + String((s + 1) % 100).padStart(2, '0');
 }
@@ -6711,7 +6711,7 @@ function handleQuizSave(body) {
       for (var r = 0; r < rows.length; r++) if (String(rows[r][0]).trim() === id) { rowIx = r + 2; existing = rows[r]; break; }
       if (rowIx < 0) return { ok: false, error: 'Quiz not found — it may have been deleted.' };
     } else {
-      id = 'QZ' + Utilities.formatDate(new Date(), _quizTz(), 'yyMMddHHmmss');
+      id = 'QZ' + _fmtDate(new Date(), _quizTz(), 'yyMMddHHmmss');
     }
     var attempts = _quizResults(ss).filter(function (x) { return x.quizId === id; }).length;
     var oldQs = existing ? _quizQuestions(ss, id) : [];
@@ -6851,4 +6851,18 @@ function handleQuizSubmit(body) {
              review: rv.review, title: quiz.title };
   } catch (e) { return { ok: false, error: e.message }; }
   finally { if (haveLock) try { lock.releaseLock(); } catch (e) {} }
+}
+
+// Safe wrapper for Utilities.formatDate: Apps Script throws "timeZone should be of
+// type string" when the zone is null/undefined/empty (e.g. a spreadsheet whose
+// time zone lookup returns nothing). Always pass a valid IANA string, defaulting
+// to the showroom's zone (Asia/Kolkata).
+function _safeTz(tz) {
+  if (typeof tz === 'string' && tz.trim()) return tz.trim();
+  try { var s = Session.getScriptTimeZone(); if (typeof s === 'string' && s.trim()) return s.trim(); } catch (e) {}
+  return 'Asia/Kolkata';
+}
+function _fmtDate(d, tz, fmt) {
+  try { return Utilities.formatDate(d, _safeTz(tz), fmt); }
+  catch (e) { return Utilities.formatDate(d, 'Asia/Kolkata', fmt); }
 }
