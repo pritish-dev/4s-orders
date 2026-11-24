@@ -950,9 +950,12 @@ function setOfferEndDateGlobal(v) {
 // Today as yyyy-mm-dd in IST, safe to compare lexicographically with the stored
 // end date (en-CA formats as yyyy-mm-dd).
 function istTodayISO() {
-  try { return new Date().toLocaleDateString('en-CA', { timeZone: IST_TZ }); }
-  catch (e) { return new Date().toISOString().slice(0, 10); }
+  try { return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); }
+  catch (e) { return new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10); }
 }
+// Today's IST calendar date as a local-midnight Date, so getFullYear/getMonth/
+// getDate and day arithmetic follow India time whatever the device timezone.
+function istTodayDate() { return new Date(istTodayISO() + 'T00:00:00'); }
 // True while offers are live (no end date set, or today is on/before it).
 function offersLive() {
   if (!OFFER_END_DATE) return true;
@@ -3266,14 +3269,14 @@ function daysFromToday(iso) {
   if (!iso) return null;
   const d = new Date(iso + 'T00:00:00');
   if (isNaN(d.getTime())) return null;
-  const t = new Date(); t.setHours(0, 0, 0, 0);
+  const t = istTodayDate();
   return Math.round((d.getTime() - t.getTime()) / 86400000);
 }
 function prettyDate(iso) {
   if (!iso) return '';
   const d = new Date(iso + 'T00:00:00');
   if (isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: IST_TZ });
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
 // ─── CUSTOMER OCCASIONS (birthday / anniversary) ──────────────────────────────
@@ -3338,7 +3341,7 @@ function buildCustomerEvents(orders, opts){
 // but never two birthday offers (or two anniversary offers) in the same year —
 // no duplicate on the day, from any device or salesperson. The lock naturally
 // frees up again next year. Kept in one place so the client and the backend agree.
-function offerYearOf(ev){ return String((ev && ev.iso) || '').slice(0,4) || String(new Date().getFullYear()); }
+function offerYearOf(ev){ return String((ev && ev.iso) || '').slice(0,4) || istTodayISO().slice(0,4); }
 function offerKeyFor(ev){
   if(!ev) return '';
   const ph = _normPhone(ev.phone!=null ? ev.phone : (ev.order && ev.order.phone));
@@ -4329,7 +4332,7 @@ function App() {
       if (res && res.ok) {
         const rec = { phone, customer: res.customer || String(o.customer).trim(), salesExec: String(res.salesExec || salesExec).toUpperCase(),
           dob: res.dob != null ? res.dob : dob, anniversary: res.anniversary != null ? res.anniversary : anniversary,
-          orderNo: o.no, date: new Date().toISOString().slice(0,10), by: user?.name || '', _local: true };
+          orderNo: o.no, date: istTodayISO(), by: user?.name || '', _local: true };
         if (!res.already) setGoldenList(prev => {
           const next = (prev||[]).concat([rec]);
           try { localStorage.setItem('4s_golden_list', JSON.stringify(next)); } catch(e) {}
@@ -5052,14 +5055,14 @@ const LEAGUE_MANUAL_FIELDS = [
 ];
 const _pad2 = n => String(n).padStart(2,'0');
 function _isoOf(d){ return d.getFullYear()+'-'+_pad2(d.getMonth()+1)+'-'+_pad2(d.getDate()); }
-function _todayISO(){ return _isoOf(new Date()); }
+function _todayISO(){ return istTodayISO(); }
 function _daysInMonth(y,m){ return new Date(y,m+1,0).getDate(); }
 // The league season is one calendar month: it opens on the 1st and closes on the
 // last day. `offset` months back from the current one (0 = this month). The
 // weekly battles are carved from the 1st in 7-day blocks (1–7, 8–14, 15–21, …);
 // the final block runs to the last day of the month (so it can be shorter).
 function leagueMonth(offset){
-  const now = new Date(); now.setHours(0,0,0,0);
+  const now = istTodayDate();
   const first = new Date(now.getFullYear(), now.getMonth()+(offset||0), 1);
   const y = first.getFullYear(), m = first.getMonth();
   const dim = _daysInMonth(y, m);
@@ -7601,7 +7604,7 @@ function ReportsScreen({ctx}) {
 
   // Today's Sale — always computed over ALL orders (independent of the date-range
   // filter above) so the highlighted box reflects the current day only.
-  const _todayISO = _iso(new Date());
+  const _todayISO = istTodayISO();
   const todays    = (orders||[]).filter(o => o && o.status !== 'draft' && !isCancelled(o) && _toISO(o.date) === _todayISO).sort(_reportOrderSort);
   const todayCount = todays.length;
   const todayAmt   = todays.reduce((s,o)=>s+_exGst(o.amt),0);
@@ -7610,7 +7613,7 @@ function ReportsScreen({ctx}) {
   let todayFranchiseAmt = 0, todayFoursAmt = 0;
   todays.forEach(o => { const sp = _channelSplit(o); todayFranchiseAmt += sp.franchise; todayFoursAmt += sp.foursint; });
   function applyPreset(id){
-    const now = new Date(), y = now.getFullYear(), m = now.getMonth();
+    const now = istTodayDate(), y = now.getFullYear(), m = now.getMonth();
     setPreset(id);
     if (id==='all')       { setFrom(''); setTo(''); }
     else if (id==='month'){ setFrom(_iso(new Date(y,m,1)));  setTo(_iso(now)); }
@@ -8898,7 +8901,7 @@ function OfferZoneScreen({ctx}) {
     setSaving(false);
   }
 
-  const fmtDate = v => { try { return new Date(v+'T00:00:00').toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric',timeZone:IST_TZ}); } catch(e){ return v; } };
+  const fmtDate = v => { try { return new Date(v+'T00:00:00').toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}); } catch(e){ return v; } };
 
   return (
     <div className="screen">
@@ -10283,7 +10286,7 @@ function OrderFormScreen({ctx, viewOnly}) {
     setHappyPrompt(false);
     // Stamp the happy-code date (unless already set) so the league happy-calling
     // point lands in the current week.
-    setOrder(prev=>({...prev,deliveryStatus:'Installation Done',happyCode:code,happyCodeDate:prev.happyCodeDate||new Date().toISOString().slice(0,10)}));
+    setOrder(prev=>({...prev,deliveryStatus:'Installation Done',happyCode:code,happyCodeDate:prev.happyCodeDate||istTodayISO()}));
     // Persist immediately if the order already exists so the gate is enforced server-side too.
     if(order.no){ const ok = await doUpdateDelivery(order.no, order.internalNo, 'Installation Done', null, null, code); return ok; }
     return true;
@@ -11907,7 +11910,7 @@ function ServiceRemarks({remarks, newRemark, setNewRemark}){
 
 function ServiceRequestModal({order, ctx, onClose}){
   const {doUpdateService} = ctx;
-  const today = new Date().toISOString().slice(0,10);
+  const today = istTodayISO();
   const [reqNo,setReqNo]       = useState(order.serviceReqNo||'');
   const [issue,setIssue]       = useState(order.serviceIssue||'');
   const [raised,setRaised]     = useState(order.serviceRaisedDate||today);
@@ -11980,7 +11983,7 @@ function ServiceRequestModal({order, ctx, onClose}){
 function ManualServiceModal({req, ctx, onClose}){
   const {doCreateServiceRequest, doUpdateServiceRequest} = ctx;
   const isNew = !req || !req.id;
-  const today = new Date().toISOString().slice(0,10);
+  const today = istTodayISO();
   const [srNo,setSrNo]         = useState(req?.srNo||'');
   const [orderNo,setOrderNo]   = useState(req?.no||'');
   const [soNo,setSoNo]         = useState(req?.soNo||'');
@@ -12874,7 +12877,7 @@ function HistoryScreen({ctx}) {
     // The full WhatsApp message: bold title + one titled, fenced box per salesperson.
     const buildReportText = () => {
       let n=0; scope.forEach(nm=>REPORT_CATS.forEach(c=>{ n+=bucket(nm,c).length; }));
-      const head = '*4S Interiors — Sales Follow-up*\n_As on '+prettyDate(new Date().toISOString().slice(0,10))+' · '+(reportSales||'All salespeople')+'_\n'+n+' open order'+(n===1?'':'s');
+      const head = '*4S Interiors — Sales Follow-up*\n_As on '+prettyDate(istTodayISO())+' · '+(reportSales||'All salespeople')+'_\n'+n+' open order'+(n===1?'':'s');
       const blocks = scope.map(name=>{
         const tot = REPORT_CATS.reduce((s,c)=>s+bucket(name,c).length,0);
         if(!tot) return '';
@@ -12940,7 +12943,7 @@ function HistoryScreen({ctx}) {
       const rows = pendPeople.map(name=>({name,n:pendCountOf(name),v:pendValueOf(name)}));
       const totN = rows.reduce((s,r)=>s+r.n,0);
       const totV = rows.reduce((s,r)=>s+r.v,0);
-      const head = '*4S Interiors — Pending Order Value*\n_As on '+prettyDate(new Date().toISOString().slice(0,10))+' · excl. GST · '+(reportSales||'All salespeople')+'_';
+      const head = '*4S Interiors — Pending Order Value*\n_As on '+prettyDate(istTodayISO())+' · excl. GST · '+(reportSales||'All salespeople')+'_';
       const L = [bTop];
       rows.forEach(r=>L.push(sumRow(r.name,r.n,r.v)));
       L.push(bSep);
@@ -14437,7 +14440,7 @@ function SettingsScreen({ctx}) {
                 <div style={{fontSize:10.5,color:T.ink4,marginTop:2,lineHeight:1.5}}>Prices are built in from the price book (WEF {PRICE_BOOK_WEF}). Sync refreshes discontinued items, stock &amp; catalog photos from the OPS sheet.</div>
                 <div style={{fontSize:11,color:T.ink3,marginTop:4,lineHeight:1.5}}>
                   {priceSyncedAt
-                    ? <>Last synced: <b>{new Date(priceSyncedAt).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</b></>
+                    ? <>Last synced: <b>{new Date(priceSyncedAt).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',timeZone:IST_TZ})}</b></>
                     : <span style={{color:priceSyncError?T.bad:T.warn,fontWeight:600}}>{priceSyncError?'Last sync failed':'Not synced yet'}</span>}
                 </div>
               </div>
