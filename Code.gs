@@ -2047,7 +2047,9 @@ function handleOrders(p) {
     .sort(function(a,b){ return b._row - a._row; })
     .map(function(m){
       var won = m.wons.join(', ');
-      var completed = /installation done/i.test(m.deliveryStatus || '');
+      // FREE STOCK orders are also Completed once delivered at the godown.
+      var completed = /installation done/i.test(m.deliveryStatus || '') ||
+        (String(m.orderType || '').trim().toUpperCase() === 'FREE STOCK' && /^delivery at godown/i.test(String(m.deliveryStatus || '').trim()));
       // A saved-but-not-yet-submitted order surfaces as a 'draft' on the
       // dashboard; a WON makes it 'billed', installation makes it 'completed'.
       var status = completed ? 'completed'
