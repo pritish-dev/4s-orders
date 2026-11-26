@@ -2876,7 +2876,7 @@ const normalizeSalesNames = list => (Array.isArray(list) ? list : []).map(o =>
 // for delivery (the delivered items are tracked per-order).
 // "Cancelled" marks an order the customer cancelled: it drops out of every
 // delivery / pending figure and is not scored in the 4S Premier League.
-const DELIVERY_STATUSES = ['Pending', 'Scheduled for Delivery', 'Rescheduled for Delivery', 'Partial Delivery', 'Delivered', 'Installation Done', 'Cancelled'];
+const DELIVERY_STATUSES = ['Pending', 'Scheduled for Delivery', 'Rescheduled for Delivery', 'Partial Delivery', 'Delivery at Godown', 'Delivered', 'Installation Done', 'Cancelled'];
 // Whether an order has been cancelled (delivery status "Cancelled").
 function isCancelled(o) {
   return !!o && /^cancel/i.test(String(o.deliveryStatus || '').trim());
@@ -4880,9 +4880,13 @@ function _exGst(n){ return Math.round((Number(n)||0)/(1+GST_RATE)); }
 // no tag at all belong to the FRANCHISE channel; only items explicitly tagged
 // "4S" belong to the 4Sinteriors channel. An order can mix both, so the order's
 // pre-GST value is apportioned by each line's total between the two channels.
+// Orders whose Order Type is HOME LOCKERS form their own channel: the whole
+// order's pre-GST value is reported under Home Lockers (not Franchise / 4S).
 function _isFourS(whTag){ return String(whTag||'').trim().toUpperCase() === '4S'; }
+function isHomeLockers(o){ return String((o && o.orderType) || '').trim().toUpperCase() === 'HOME LOCKERS'; }
 function _channelSplit(o){
   const total = _exGst(o && o.amt);            // whole order, pre-GST
+  if (isHomeLockers(o)) return { franchise: 0, foursint: 0, homeLockers: total };
   const items = (o && o.items) || [];
   let fourSLine = 0, sumLine = 0;
   items.forEach(it => {
@@ -4892,9 +4896,9 @@ function _channelSplit(o){
   });
   // No line data (or no priced lines) → treat the whole order as Franchise,
   // matching the "not marked anything → Franchise" rule.
-  if (sumLine <= 0) return { franchise: total, foursint: 0 };
+  if (sumLine <= 0) return { franchise: total, foursint: 0, homeLockers: 0 };
   const foursint = Math.round(total * fourSLine / sumLine);
-  return { franchise: total - foursint, foursint };
+  return { franchise: total - foursint, foursint, homeLockers: 0 };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -5141,7 +5145,7 @@ function leagueAuto(orders, matchKey, startISO, endISO, leadPhones){
     if(startISO && iso<startISO) return;
     if(endISO   && iso>endISO)   return;
     orderCount++;                                                     // orders booked (excl. B2B)
-    basic += _channelSplit(o).franchise;                             // net basic (excl. 4S channel)
+    { const sp=_channelSplit(o); basic += sp.franchise + sp.homeLockers; } // net basic (excl. 4S channel)
     // Converted lead: this order's customer matches one of the player's leads AND
     // the order was booked on a later calendar day than the lead was added. A lead
     // added and sold on the same day (or an order that predates it) earns nothing.
@@ -7610,8 +7614,8 @@ function ReportsScreen({ctx}) {
   const todayAmt   = todays.reduce((s,o)=>s+_exGst(o.amt),0);
   // Today's Sale, split the same way as the range totals: Franchise (KB / 34S /
   // untagged) vs 4Sinteriors (items tagged "4S").
-  let todayFranchiseAmt = 0, todayFoursAmt = 0;
-  todays.forEach(o => { const sp = _channelSplit(o); todayFranchiseAmt += sp.franchise; todayFoursAmt += sp.foursint; });
+  let todayFranchiseAmt = 0, todayFoursAmt = 0, todayHomeLockersAmt = 0;
+  todays.forEach(o => { const sp = _channelSplit(o); todayFranchiseAmt += sp.franchise; todayFoursAmt += sp.foursint; todayHomeLockersAmt += sp.homeLockers; });
   function applyPreset(id){
     const now = istTodayDate(), y = now.getFullYear(), m = now.getMonth();
     setPreset(id);
@@ -7631,12 +7635,14 @@ function ReportsScreen({ctx}) {
   const totalAmt   = booked.reduce((s,o)=>s+_exGst(o.amt),0);
 
   // Franchise (KB / 34S / untagged) vs 4Sinteriors (items tagged "4S") split.
-  let franchiseAmt = 0, franchiseCount = 0, foursAmt = 0, foursCount = 0;
+  // HOME LOCKERS orders are reported as their own channel.
+  let franchiseAmt = 0, franchiseCount = 0, foursAmt = 0, foursCount = 0, homeLockersAmt = 0, homeLockersCount = 0;
   booked.forEach(o => {
     const sp = _channelSplit(o);
-    franchiseAmt += sp.franchise; foursAmt += sp.foursint;
+    franchiseAmt += sp.franchise; foursAmt += sp.foursint; homeLockersAmt += sp.homeLockers;
     if (sp.franchise > 0) franchiseCount++;
     if (sp.foursint  > 0) foursCount++;
+    if (isHomeLockers(o)) homeLockersCount++;
   });
 
   // Each breakdown bucket also keeps the actual orders it covers, so the row can
@@ -7734,6 +7740,11 @@ function ReportsScreen({ctx}) {
             <div style={{fontSize:22,fontWeight:800,letterSpacing:-1,color:T.ink,lineHeight:1.1,marginTop:4}}>{_fmtAmt(foursAmt)}</div>
             <div style={{fontSize:10,color:T.ink4,marginTop:2}}>{foursCount} order{foursCount===1?'':'s'}</div>
           </div>
+          <div style={{gridColumn:'1 / -1',background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'12px 14px'}}>
+            <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>HOME LOCKERS · EX-GST</div>
+            <div style={{fontSize:22,fontWeight:800,letterSpacing:-1,color:T.ink,lineHeight:1.1,marginTop:4}}>{_fmtAmt(homeLockersAmt)}</div>
+            <div style={{fontSize:10,color:T.ink4,marginTop:2}}>{homeLockersCount} order{homeLockersCount===1?'':'s'}</div>
+          </div>
         </div>
         {/* Today's Sale — always visible, highlighted, current day only */}
         <div style={{padding:'0 14px 12px'}}>
@@ -7756,6 +7767,10 @@ function ReportsScreen({ctx}) {
             <div style={{background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'9px 12px'}}>
               <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TODAY · 4SINTERIORS</div>
               <div style={{fontSize:17,fontWeight:800,letterSpacing:-0.6,color:T.ink,lineHeight:1.1,marginTop:3}}>{_fmtAmt(todayFoursAmt)}</div>
+            </div>
+            <div style={{gridColumn:'1 / -1',background:'#fff',border:`1px solid ${T.line}`,borderRadius:8,padding:'9px 12px'}}>
+              <div style={{fontSize:9,color:T.ink4,fontWeight:700,letterSpacing:.8}}>TODAY · HOME LOCKERS</div>
+              <div style={{fontSize:17,fontWeight:800,letterSpacing:-0.6,color:T.ink,lineHeight:1.1,marginTop:3}}>{_fmtAmt(todayHomeLockersAmt)}</div>
             </div>
           </div>
         </div>
@@ -11338,6 +11353,7 @@ function OrderFormScreen({ctx, viewOnly}) {
           <select value={o.orderType||'B2C'} onChange={e=>setF('orderType',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
             <option>B2C</option>
             <option>B2B</option>
+            <option value="HOME LOCKERS">HOME LOCKERS</option>
           </select>
         </div>
         </>)}
@@ -12352,6 +12368,7 @@ function HistoryScreen({ctx}) {
     {id:'rescheduled',label:'Rescheduled',  tone:T.green, filter:o=>/^rescheduled/.test(st(o))},
     {id:'delivered',  label:'Delivered',    tone:T.ok,    filter:o=>/^delivered/.test(st(o))},
     {id:'partial',    label:'Partial',      tone:T.warn,  filter:o=>/partial/.test(st(o))},
+    {id:'godown',     label:'At Godown',    tone:T.warn,  filter:o=>/^delivery at godown/.test(st(o))},
     {id:'completed',  label:'Completed',    tone:T.ok,    filter:o=>isCompleted(o)},
     {id:'cancelled',  label:'Cancelled',    tone:T.bad,   filter:o=>isCancelled(o)},
   ];
