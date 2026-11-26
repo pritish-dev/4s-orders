@@ -2849,6 +2849,17 @@ function isFinanceScheme(o) { return !!financeSchemeOf(o && o.paymentMode); }
 // rows. The challan amount reuses the `earnest` field (as Money Receipt 1's
 // amount does), so the running balance / "received so far" logic is unchanged.
 function isB2B(o) { return String((o && o.orderType) || '').toUpperCase() === 'B2B'; }
+// FREE STOCK orders are not business: they never count towards any salesperson
+// (league / sales summary) and carry no net-basic value. Such an order is
+// automatically Completed once its delivery status is "Delivery at Godown".
+function isFreeStock(o) { return String((o && o.orderType) || '').trim().toUpperCase() === 'FREE STOCK'; }
+// Whether an order is Completed: "Installation Done", or a FREE STOCK order
+// delivered at the godown.
+function isOrderCompleted(o) {
+  if (!o) return false;
+  const s = String(o.deliveryStatus || '').trim().toLowerCase();
+  return o.status === 'completed' || /installation done/.test(s) || (isFreeStock(o) && /^delivery at godown/.test(s));
+}
 // A B2B order's payment + challan details (Payment Mode, Challan No / Date /
 // Amount) are OPTIONAL when the order is placed, but become MANDATORY before the
 // order can be scheduled for delivery. Returns the list of still-missing fields
@@ -3342,7 +3353,7 @@ function customerOfferMessage(occasion, customerName, senderName, sameDay){
 // An order counts as "done" (no more delivery chasing) once fully delivered or installed.
 function isDeliveryDone(o) {
   const s = (o.deliveryStatus || '').toLowerCase();
-  return isCancelled(o) || o.status === 'completed' || /installation done|^delivered/.test(s);
+  return isCancelled(o) || isOrderCompleted(o) || /installation done|^delivered/.test(s);
 }
 
 // ─── DELIVERY WATCH (approaching / overdue deliveries) ──────
@@ -3359,7 +3370,7 @@ function orderDeliveryISO(o, mis) {
 // "Scheduled for Delivery".
 function deliveryActionSettled(o) {
   const s = (o.deliveryStatus || '').toLowerCase();
-  return isCancelled(o) || o.status === 'completed' || /^scheduled for delivery/.test(s) || /^delivered/.test(s) || /installation done/.test(s);
+  return isCancelled(o) || isOrderCompleted(o) || /^scheduled for delivery/.test(s) || /^delivered/.test(s) || /installation done/.test(s);
 }
 // Whether an order belongs on the Delivery Watch, and in which bucket. Returns
 // null when it doesn't. An order is watched when it still needs action (not
@@ -3383,7 +3394,7 @@ function isMisCommitted(o, mis) {
 // "Ready for Delivery": committed in MIS and still needing a delivery action
 // (not yet Scheduled / Delivered / Installation Done / Completed).
 function isReadyForDelivery(o, mis) {
-  return isMisCommitted(o, mis) && !deliveryActionSettled(o) && o.status !== 'completed';
+  return isMisCommitted(o, mis) && !deliveryActionSettled(o) && !isOrderCompleted(o);
 }
 // A "4S order" ships entirely from the 4Sinteriors warehouse — every line's
 // delivery warehouse is 4S (whTag '4S'). Any 34S / KB line makes it a franchise
@@ -3433,8 +3444,8 @@ function deliveryUrgency(o, mis) {
   // Cancelled — greyed out, no further chasing.
   if (isCancelled(o)) return { key:'cancelled', color:T.ink4, soft:T.paper2, line:T.line, label:'Cancelled' };
   // Settled trio (+ Completed) — calm blue, no further chasing.
-  if (o.status === 'completed' || /installation done/.test(s) || /^delivered/.test(s) || /^scheduled for delivery/.test(s)) {
-    const label = (o.status === 'completed' || /installation done/.test(s)) ? 'Completed'
+  if (isOrderCompleted(o) || /^delivered/.test(s) || /^scheduled for delivery/.test(s)) {
+    const label = isOrderCompleted(o) ? 'Completed'
                 : /^delivered/.test(s) ? 'Delivered' : 'Scheduled';
     return { key:'settled', color:T.blue, soft:T.blueSoft, line:T.blueLine, label };
   }
@@ -4837,6 +4848,7 @@ function _isFourS(whTag){ return String(whTag||'').trim().toUpperCase() === '4S'
 function isHomeLockers(o){ return String((o && o.orderType) || '').trim().toUpperCase() === 'HOME LOCKERS'; }
 function _channelSplit(o){
   const total = _exGst(o && o.amt);            // whole order, pre-GST
+  if (isFreeStock(o)) return { franchise: 0, foursint: 0, homeLockers: 0 };  // not business — no value
   if (isHomeLockers(o)) return { franchise: 0, foursint: 0, homeLockers: total };
   const items = (o && o.items) || [];
   let fourSLine = 0, sumLine = 0;
@@ -5092,6 +5104,7 @@ function leagueAuto(orders, matchKey, startISO, endISO, leadPhones){
       if(hd && (!startISO||hd>=startISO) && (!endISO||hd<=endISO)) happyCalls++;
     }
     if(String(o.orderType||'').toUpperCase()==='B2B') return;         // B2B excluded from count AND value
+    if(isFreeStock(o)) return;                                        // FREE STOCK is not business for anyone
     const iso=_toISO(o.date); if(!iso) return;
     if(startISO && iso<startISO) return;
     if(endISO   && iso>endISO)   return;
@@ -7560,7 +7573,8 @@ function ReportsScreen({ctx}) {
   // Today's Sale — always computed over ALL orders (independent of the date-range
   // filter above) so the highlighted box reflects the current day only.
   const _todayISO = istTodayISO();
-  const todays    = (orders||[]).filter(o => o && o.status !== 'draft' && !isCancelled(o) && _toISO(o.date) === _todayISO).sort(_reportOrderSort);
+  // FREE STOCK orders are not business — left out of the sales summary entirely.
+  const todays    = (orders||[]).filter(o => o && o.status !== 'draft' && !isCancelled(o) && !isFreeStock(o) && _toISO(o.date) === _todayISO).sort(_reportOrderSort);
   const todayCount = todays.length;
   const todayAmt   = todays.reduce((s,o)=>s+_exGst(o.amt),0);
   // Today's Sale, split the same way as the range totals: Franchise (KB / 34S /
@@ -7575,7 +7589,7 @@ function ReportsScreen({ctx}) {
     else if (id==='year') { setFrom(_iso(new Date(y,0,1)));  setTo(_iso(now)); }
   }
 
-  const booked = (orders||[]).filter(o => o && o.status !== 'draft' && !isCancelled(o)).filter(o => {
+  const booked = (orders||[]).filter(o => o && o.status !== 'draft' && !isCancelled(o) && !isFreeStock(o)).filter(o => {
     const iso = _toISO(o.date);
     if (!iso) return !from && !to;                 // undated: only when no range set
     if (from && iso < from) return false;
@@ -10609,13 +10623,14 @@ function OrderFormScreen({ctx, viewOnly}) {
     // billed against a delivery challan, and its payment + challan details are
     // optional at booking — they only become mandatory when the order is
     // scheduled for delivery (enforced via b2bDeliveryMissing).
-    if(!isB2B(o) && (!o.paymentMode||!String(o.paymentMode).trim())) add('payment','Select the Payment Mode');
+    // A FREE STOCK order has no payment, so neither Payment Mode nor a Money Receipt is required.
+    if(!isB2B(o) && !isFreeStock(o) && (!o.paymentMode||!String(o.paymentMode).trim())) add('payment','Select the Payment Mode');
     // A non-B2B order still needs its Money Receipt No (finance-scheme bookings —
     // Pine Labs / Bajaj Finance — don't use money receipts). A B2B order's challan
     // No / Date / Amount are NOT required to place the order. Manual (paper-replica)
     // orders don't require money receipt numbers either — in some special cases the
     // payment method is decided later.
-    if(!isB2B(o) && !isFinanceScheme(o) && !o.manualOrder && (!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim())) add('payment','Money Receipt No is required');
+    if(!isB2B(o) && !isFreeStock(o) && !isFinanceScheme(o) && !o.manualOrder && (!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim())) add('payment','Money Receipt No is required');
     if(financeSchemeOf(o.paymentMode)==='Bajaj Finance' && !String(o.bajajEmi||'').trim()) add('payment','Select the Bajaj Finance EMI scheme');
     // A Pine Labs order's 2nd payment (card / cash / UPI / another Pine Labs card)
     // must carry the amount paid on it once it has been added.
@@ -11292,7 +11307,7 @@ function OrderFormScreen({ctx, viewOnly}) {
           <select value={o.deliveryStatus||'Pending'} onChange={e=>handleDeliveryChange(e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
             {DELIVERY_STATUSES.map(s=><option key={s}>{s}</option>)}
           </select>
-          <div style={{fontSize:11,color:T.ink4,marginTop:3}}>Order is Completed only when "Installation Done".</div>
+          <div style={{fontSize:11,color:T.ink4,marginTop:3}}>{isFreeStock(o)?'FREE STOCK order is Completed when "Delivery at Godown" (or "Installation Done").':'Order is Completed only when "Installation Done".'}</div>
           {/partial/i.test(o.deliveryStatus||'') && <PartialDeliverySummary order={o} onEdit={()=>setPartialPicker(true)}/>}
         </div>
         </>)}
@@ -11305,6 +11320,7 @@ function OrderFormScreen({ctx, viewOnly}) {
             <option>B2C</option>
             <option>B2B</option>
             <option value="HOME LOCKERS">HOME LOCKERS</option>
+            <option value="FREE STOCK">FREE STOCK</option>
           </select>
         </div>
         </>)}
@@ -12300,7 +12316,7 @@ function HistoryScreen({ctx}) {
   // Delivery-status category helpers. "rescheduled for delivery" also contains
   // "scheduled", so anchor both with ^ to keep the two buckets separate.
   const st = o => (o.deliveryStatus||'').toLowerCase();
-  const isCompleted = o => o.status==='completed' || /installation done/i.test(o.deliveryStatus||'');
+  const isCompleted = o => isOrderCompleted(o);
   // An order still awaiting its WON / SO number (a "Pending Won"). Such an order
   // is bucketed under Pending Won ONLY — it is excluded from the plain Pending
   // bucket below so a single order is never counted in both.
@@ -12319,7 +12335,7 @@ function HistoryScreen({ctx}) {
     {id:'rescheduled',label:'Rescheduled',  tone:T.green, filter:o=>/^rescheduled/.test(st(o))},
     {id:'delivered',  label:'Delivered',    tone:T.ok,    filter:o=>/^delivered/.test(st(o))},
     {id:'partial',    label:'Partial',      tone:T.warn,  filter:o=>/partial/.test(st(o))},
-    {id:'godown',     label:'At Godown',    tone:T.warn,  filter:o=>/^delivery at godown/.test(st(o))},
+    {id:'godown',     label:'At Godown',    tone:T.warn,  filter:o=>/^delivery at godown/.test(st(o)) && !isCompleted(o)},
     {id:'completed',  label:'Completed',    tone:T.ok,    filter:o=>isCompleted(o)},
     {id:'cancelled',  label:'Cancelled',    tone:T.bad,   filter:o=>isCancelled(o)},
   ];
