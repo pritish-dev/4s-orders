@@ -1307,6 +1307,8 @@ function orderReceived(o) {
   }
   // A B2B order collects against a single delivery challan — its amount is the
   // earnest. There are no later money-receipt part-payments to add.
+  // A FREE STOCK order takes no payment — nothing is ever outstanding.
+  if (isFreeStock(o)) return { total, received: total, balance: 0 };
   if (isB2B(o)) {
     let received = Math.min(Number(o.earnest) || 0, total);
     let balance = total - received;
@@ -2652,15 +2654,21 @@ function generatePDF(order, copyType) {
     // row (No & Dt + amount) instead of the money-receipt rows.
     // Finance-scheme (Pine Labs / Bajaj Finance) bookings carry no money-receipt
     // details — the financier funds the order — so the receipt rows are omitted.
-    if (isB2B(order)) {
+    if (isB2B(order) || isFreeStock(order)) {
       const rcH=7;
       brd(ml,y,cw/2,rcH); brd(ml+cw/2,y,cw/2,rcH);
       lbl(ml+2,y+5,'Challan No & Dt :');
       const chTxt = [order.challanNo,order.challanDate].filter(Boolean).join('  ·  ');
       if(chTxt) val(ml+40,y+5, fit1(chTxt,cw/2-42,7.5), 7.5);
-      lbl(ml+cw/2+2,y+5,'Challan Amount :');
-      const chAmt = Number(order.earnest)||0;
-      if(chAmt) val(ml+cw/2+32,y+5, fit1(inr(chAmt),cw/2-34,7.5), 7.5);
+      if (isFreeStock(order)) {
+        // FREE STOCK: no payment — delivered at the godown against the challan.
+        lbl(ml+cw/2+2,y+5,'Order Type :');
+        val(ml+cw/2+32,y+5, fit1('FREE STOCK · Delivery at Godown',cw/2-34,7.5), 7.5);
+      } else {
+        lbl(ml+cw/2+2,y+5,'Challan Amount :');
+        const chAmt = Number(order.earnest)||0;
+        if(chAmt) val(ml+cw/2+32,y+5, fit1(inr(chAmt),cw/2-34,7.5), 7.5);
+      }
       y += rcH;
     } else if (!isFinanceScheme(order)) {
       const receipts = (order.moneyReceipts && order.moneyReceipts.length)
@@ -3099,6 +3107,21 @@ function FinancePaymentFields({ o, setOrder }) {
 function ChallanFields({ o, setOrder }) {
   const setF = (k, v) => setOrder(prev => ({ ...prev, [k]: v }));
   const total = orderTotals(o).total;
+  // A FREE STOCK order takes no payment — only the delivery challan No + date
+  // (the stock is delivered at the godown against that challan).
+  if (isFreeStock(o)) return (
+    <React.Fragment>
+      <div style={{padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.ink3,lineHeight:1.45}}>This is a <b>FREE STOCK</b> order — no payment details are needed. It is delivered at the <b>godown</b> against a <b>delivery challan</b>: enter the <b>Challan No</b> and date.</div>
+      <div style={{display:'flex',borderBottom:`1px solid ${T.line}`,background:'#fff'}}>
+        <div style={{flex:1,borderRight:`1px solid ${T.line}`}}>
+          <Field label="Challan No *" value={o.challanNo} onChange={v=>setF('challanNo',v)} mono/>
+        </div>
+        <div style={{flex:1}}>
+          <Field label="Challan Date *" value={o.challanDate} onChange={v=>setF('challanDate',v)} mono type="date"/>
+        </div>
+      </div>
+    </React.Fragment>
+  );
   return (
     <React.Fragment>
       <div style={{padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:11,color:T.ink3,lineHeight:1.45}}>This is a <b>B2B</b> order — it is billed against a <b>delivery challan</b>, not a money receipt. Enter the <b>Challan No</b>, date and amount.</div>
@@ -10679,6 +10702,9 @@ function OrderFormScreen({ctx, viewOnly}) {
     // No / Date / Amount are NOT required to place the order. Manual (paper-replica)
     // orders don't require money receipt numbers either — in some special cases the
     // payment method is decided later.
+    // A FREE STOCK order is delivered at the godown against a delivery challan —
+    // its Challan No + date are required.
+    if(isFreeStock(o)){ if(!String(o.challanNo||'').trim()) add('payment','Challan No is required (FREE STOCK)'); if(!String(o.challanDate||'').trim()) add('payment','Challan Date is required (FREE STOCK)'); }
     if(!isB2B(o) && !isFreeStock(o) && !isFinanceScheme(o) && !o.manualOrder && (!o.moneyReceipts||!o.moneyReceipts[0]||!String(o.moneyReceipts[0].no||'').trim())) add('payment','Money Receipt No is required');
     if(financeSchemeOf(o.paymentMode)==='Bajaj Finance' && !String(o.bajajEmi||'').trim()) add('payment','Select the Bajaj Finance EMI scheme');
     // A Pine Labs order's 2nd payment (card / cash / UPI / another Pine Labs card)
@@ -10784,7 +10810,7 @@ function OrderFormScreen({ctx, viewOnly}) {
       <StockRibbon syncedAt={ctx.syncedAt}/>
       {needsApproval && !viewOnly && (
         <div style={{flexShrink:0,padding:'9px 14px',background:T.warnSoft,borderBottom:'1px solid #e6cc95',color:T.warn,fontSize:11,fontWeight:600,lineHeight:1.5}}>
-          This order is submitted — your changes need <b>admin approval</b> before they are saved. Updating only the <b>WON</b>, <b>{isB2B(o)?'challan':'money receipts'}</b> or <b>delivery status</b> saves straight away.
+          This order is submitted — your changes need <b>admin approval</b> before they are saved. Updating only the <b>WON</b>, <b>{(isB2B(o)||isFreeStock(o))?'challan':'money receipts'}</b> or <b>delivery status</b> saves straight away.
           {myPending.length>0 && (
             <div style={{marginTop:6,paddingTop:6,borderTop:'1px dashed #e6cc95',color:T.ink2}}>
               ⏳ {myPending.length} change{myPending.length>1?'s':''} already waiting for approval ({myPending.map(r=>r.requestedByName||r.requestedBy).join(', ')}).
@@ -11291,7 +11317,8 @@ function OrderFormScreen({ctx, viewOnly}) {
         </>)}
         <AccordionHead secKey="payment" n="06" label="Payment" open={openSecs.payment} onToggle={()=>toggleSec('payment')} done={secDone('payment')}/>
         {openSecs.payment && (<>
-        <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
+        {/* A FREE STOCK order takes no payment — no Payment Mode / receipts. */}
+        {!isFreeStock(o) && <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>PAYMENT MODE <span style={{color:T.bad,marginLeft:3}}>*</span></div>
           <select value={o.paymentMode} onChange={e=>{const pm=e.target.value; const fin=financeSchemeOf(pm); setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:'',amt:''}); if(fin){arr[0]={...arr[0],no:fin};} else if(financeSchemeOf(prev.paymentMode)){arr[0]={...arr[0],no:''};} return {...prev,paymentMode:pm,moneyReceipts:arr,receiptNo: fin?fin:(financeSchemeOf(prev.paymentMode)?'':prev.receiptNo)};});}} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:o.paymentMode?T.ink:T.ink4,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
             <option value="">Select payment mode…</option>
@@ -11305,7 +11332,7 @@ function OrderFormScreen({ctx, viewOnly}) {
             <option>Bajaj Finance EMI</option>
             <option>Pine Labs EMI</option>
           </select>
-        </div>
+        </div>}
         {/* Money receipt no + date + amount — updatable up to 3 times. Each receipt
             carries the amount collected against it: receipt 1 is the booking advance
             (stored in `earnest`), receipts 2 & 3 their own part-payments. The three
@@ -11316,7 +11343,7 @@ function OrderFormScreen({ctx, viewOnly}) {
         {(()=>{
           const setMR=(i,field,val)=>setOrder(prev=>{const arr=(prev.moneyReceipts||[{no:'',date:'',amt:''},{no:'',date:'',amt:''},{no:'',date:'',amt:''}]).map(x=>({...x})); while(arr.length<3)arr.push({no:'',date:'',amt:''}); arr[i]={...arr[i],[field]:val}; return {...prev,moneyReceipts:arr,receiptNo: field==='no'&&i===0?val:prev.receiptNo}; });
           // A B2B order bills against a delivery challan — no money-receipt rows.
-          if(isB2B(o)){
+          if(isB2B(o) || isFreeStock(o)){
             return <ChallanFields o={o} setOrder={setOrder}/>;
           }
           const fin=financeSchemeOf(o.paymentMode);
@@ -11344,7 +11371,7 @@ function OrderFormScreen({ctx, viewOnly}) {
             </div>
           );});
         })()}
-        {(()=>{ const {received,balance}=orderReceived(o); return (
+        {!isFreeStock(o) && (()=>{ const {received,balance}=orderReceived(o); return (
           <div style={{display:'flex',justifyContent:'space-between',padding:'9px 14px',background:T.paper,borderBottom:`1px solid ${T.line}`,fontSize:12}}>
             <span style={{color:T.ink3,fontWeight:600}}>Received so far <b style={{fontFamily:T.mono,color:T.ink}}>₹{received.toLocaleString('en-IN')}</b></span>
             <span style={{color:balance>0?T.bad:T.ok,fontWeight:700}}>{balance>0?`Balance ₹${balance.toLocaleString('en-IN')}`:'Paid in full ✓'}</span>
@@ -11365,7 +11392,7 @@ function OrderFormScreen({ctx, viewOnly}) {
         <Field label="Salesperson" value={o.salesExec??''} onChange={v=>setF('salesExec',v)} mono hint="Pre-filled with your name — edit or clear freely (your name is used if left blank)."/>
         <div style={{borderBottom:`1px solid ${T.line}`,padding:'11px 14px',background:'#fff'}}>
           <div style={{fontSize:10,fontWeight:700,color:T.ink4,letterSpacing:0.8,textTransform:'uppercase',marginBottom:6}}>Order Type <span style={{color:T.bad,marginLeft:3}}>*</span></div>
-          <select value={o.orderType||'B2C'} onChange={e=>setF('orderType',e.target.value)} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
+          <select value={o.orderType||'B2C'} onChange={e=>{const t=e.target.value; setOrder(prev=>({...prev,orderType:t,...(String(t).toUpperCase()==='FREE STOCK'?{deliveryStatus:'Delivery at Godown'}:{})}));}} style={{width:'100%',border:'none',outline:'none',fontSize:15,fontFamily:T.sans,color:T.ink,background:'transparent',padding:0,appearance:'none',WebkitAppearance:'none',cursor:'pointer'}}>
             <option>B2C</option>
             <option>B2B</option>
             <option value="HOME LOCKERS">HOME LOCKERS</option>
